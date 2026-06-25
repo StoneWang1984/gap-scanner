@@ -7,6 +7,7 @@ Accumulates minute bars from snapshots into 5-min bars for entry/ATR/re-entry.
 import json
 import time
 import datetime as dt
+from zoneinfo import ZoneInfo
 from collections import defaultdict
 from dataclasses import dataclass
 
@@ -403,7 +404,7 @@ def run_live():
 
     # Wait for market open
     while True:
-        now = dt.datetime.now(tz=dt.timezone(dt.timedelta(hours=-4)))
+        now = dt.datetime.now(tz=ZoneInfo("America/New_York"))
         if now.hour >= 9 and now.minute >= 30:
             break
         if now.hour >= 10:
@@ -433,7 +434,7 @@ def run_live():
     cutoff_time = dt.time(10, 0)
 
     while True:
-        now_est = dt.datetime.now(tz=dt.timezone(dt.timedelta(hours=-4)))
+        now_est = dt.datetime.now(tz=ZoneInfo("America/New_York"))
         now_time = now_est.time()
         poll_count += 1
 
