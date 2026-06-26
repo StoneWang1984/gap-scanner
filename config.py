@@ -111,3 +111,8 @@ PARTIAL_SELL_RATIO_75_042 = 1/3
 PARTIAL_SELL_RATIO_100_042 = 1/3
 PARTIAL_SELL_RATIO_150_042 = 1/3
 PROFIT_RETRACEMENT_100_042 = 1.0    # 100% gap retracement target
+
+# ══════════════════════════════════════════════════════════════════
+# Stone 0.4.3 — Dynamic position sizing by dollar volume
+# ══════════════════════════════════════════════════════════════════
+POSITION_DV_RATIO = 0.01            # max position = daily dollar volume × this ratio
