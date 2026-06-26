@@ -324,7 +324,7 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
                     break
 
                 reentry_price, prev_high, reentry_idx, reentry_confirmed = find_reentry_point(
-                    bars_after_exit, open_price
+                    bars_after_exit, open_price, initial_highest=result.trailing_high
                 )
 
                 if not reentry_confirmed or reentry_price <= 0:

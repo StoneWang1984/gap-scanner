@@ -356,6 +356,31 @@ def check_entry(symbol, open_price, accumulator):
     return 0, False
 
 
+def check_entry_fallback(symbol, open_price, snaps):
+    """Fallback entry using daily_bar low when 5-min bars unavailable.
+
+    For low-volume gap stocks, snapshot.minute_bar rarely updates,
+    preventing BarAccumulator from building 5-min bars. This fallback
+    checks if the daily low has dipped below open (pullback) and the
+    current price has recovered (confirmation).
+    """
+    snap = snaps.get(symbol)
+    if not snap or not snap.daily_bar or not snap.latest_trade:
+        return 0, False
+
+    daily_low = float(snap.daily_bar.low)
+    cur_price = float(snap.latest_trade.price)
+
+    if daily_low < open_price and cur_price >= daily_low:
+        if not config.ENTRY_CONFIRMATION:
+            return daily_low, True
+        # Confirmation: current price recovered above daily low
+        if cur_price > daily_low:
+            return daily_low, True
+
+    return 0, False
+
+
 # ── Test data connectivity ─────────────────────────────────────────
 def test_connectivity():
     """Test that snapshot API works for real-time data."""
@@ -608,6 +633,8 @@ def run_live():
                         continue
 
         # ── Check entries for candidates ──
+        if now_time >= cutoff_time and poll_count == 1:
+            log(f"Entry window closed (10:00 AM). No entries will be placed.")
         if now_time < cutoff_time and daily_trades < config.MAX_DAILY_TRADES and not daily_stopped:
             for cand in candidates:
                 symbol = cand["symbol"]
@@ -618,6 +645,12 @@ def run_live():
 
                 entry_price, confirmed = check_entry(symbol, cand["open_price"], accumulator)
                 if not confirmed or entry_price <= 0:
+                    if poll_count % 6 == 0:
+                        snap = snaps.get(symbol)
+                        cur = float(snap.latest_trade.price) if snap and snap.latest_trade else 0
+                        dl = float(snap.daily_bar.low) if snap and snap.daily_bar else 0
+                        log(f"  {symbol}: no entry signal yet (5min_bars={accumulator.bar_count(symbol)}, "
+                            f"cur=${cur:.4f}, open=${cand['open_price']:.4f}, daily_low=${dl:.4f})")
                     continue
 
                 # ATR from accumulated 5-min bars or previous daily bars

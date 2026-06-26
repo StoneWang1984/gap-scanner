@@ -216,16 +216,17 @@ def evaluate_trade_stone(
     return _make_result("force_close", exit_price, len(bars_after_entry) - 1)
 
 
-def find_reentry_point(bars: list[dict], open_price: float):
+def find_reentry_point(bars: list[dict], open_price: float, initial_highest: float = 0.0):
     """Find re-entry after first trade exits: peak then pullback with confirmation.
     Requires volume-price confirmation: confirmation bar must be bullish (close > open)
     and volume > average of recent bars.
+    initial_highest: highest price from first trade, carried forward for peak detection.
     Returns (entry_price, prev_high, entry_bar_idx, confirmed) or (0, 0, -1, False).
     """
     if len(bars) < 3:
         return 0, 0, -1, False
 
-    highest = 0.0
+    highest = initial_highest
     peak_found = False
     vol_avg_window = 5
 
