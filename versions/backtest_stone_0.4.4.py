@@ -76,11 +76,11 @@ def apply_slippage(result: TradeResult) -> tuple[TradeResult, float]:
     adj_pnl_pct = adj_pnl / (adj_entry * result.shares) if adj_entry > 0 else 0
 
     # Update result in place
-    result.entry_price = round(adj_entry, 4)
-    result.exit_price = round(adj_exit, 4)
-    result.partial_sell_price = round(adj_partial, 4) if adj_partial > 0 else 0.0
-    result.partial2_sell_price = round(adj_partial2, 4) if adj_partial2 > 0 else 0.0
-    result.partial3_sell_price = round(adj_partial3, 4) if adj_partial3 > 0 else 0.0
+    result.entry_price = round(adj_entry, 2)
+    result.exit_price = round(adj_exit, 2)
+    result.partial_sell_price = round(adj_partial, 2) if adj_partial > 0 else 0.0
+    result.partial2_sell_price = round(adj_partial2, 2) if adj_partial2 > 0 else 0.0
+    result.partial3_sell_price = round(adj_partial3, 2) if adj_partial3 > 0 else 0.0
     result.pnl = round(adj_pnl, 2)
     result.pnl_pct = round(adj_pnl_pct, 4)
     result.position_size = round(adj_entry * result.shares, 2)
@@ -254,8 +254,8 @@ def run_backtest_044(end_date=None, n_days=config.BACKTEST_DAYS) -> tuple[list[T
                     daily_stopped = True
                     break
 
-                reentry_stop = round(reentry_price * (1 - config.REENTRY_STOP_PCT), 4)
-                reentry_target = round(reentry_price + config.REENTRY_PROFIT_RETRACEMENT * (prev_high - reentry_price), 4)
+                reentry_stop = round(reentry_price * (1 - config.REENTRY_STOP_PCT), 2)
+                reentry_target = round(reentry_price + config.REENTRY_PROFIT_RETRACEMENT * (prev_high - reentry_price), 2)
 
                 pos_size_re = min(calc_position_size(equity), config.MAX_POSITION_SIZE)
                 reentry_shares = int(pos_size_re / reentry_price)

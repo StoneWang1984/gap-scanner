@@ -337,8 +337,8 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
                     break
 
                 # Re-entry trade
-                reentry_stop = round(reentry_price * (1 - config.REENTRY_STOP_PCT), 4)
-                reentry_target = round(reentry_price + config.REENTRY_PROFIT_RETRACEMENT * (prev_high - reentry_price), 4)
+                reentry_stop = round(reentry_price * (1 - config.REENTRY_STOP_PCT), 2)
+                reentry_target = round(reentry_price + config.REENTRY_PROFIT_RETRACEMENT * (prev_high - reentry_price), 2)
 
                 pos_size_re = min(calc_position_size(equity), config.MAX_POSITION_SIZE)
                 reentry_shares = int(pos_size_re / reentry_price)

@@ -597,7 +597,7 @@ def run_live():
                         pct = config.TRAILING_STOP_PCT_1125
                     else:
                         pct = config.TRAILING_STOP_PCT_75
-                    tsp = round(pos.highest * (1 - pct), 4)
+                    tsp = round(pos.highest * (1 - pct), 2)
                     tsp = max(tsp, pos.entry_price)
                     if cur_price <= tsp:
                         tier = "150%" if pos.reached_150 else "112.5%" if pos.reached_1125 else "75%"
@@ -621,7 +621,7 @@ def run_live():
                         pos.remaining_shares -= n
 
                 if pos.reached_150 and pos.remaining_shares > 0:
-                    tsp = round(pos.highest * (1 - config.REENTRY_TRAILING_PCT), 4)
+                    tsp = round(pos.highest * (1 - config.REENTRY_TRAILING_PCT), 2)
                     tsp = max(tsp, pos.entry_price)
                     if cur_price <= tsp:
                         log(f"RE-ENTRY TRAILING: {pos.symbol} @ ${tsp:.4f} (high=${pos.highest:.4f})")
@@ -703,8 +703,8 @@ def run_live():
                 if not confirmed or entry_price <= 0:
                     continue
 
-                stop_price = round(entry_price * (1 - config.REENTRY_STOP_PCT), 4)
-                target = round(entry_price + config.REENTRY_PROFIT_RETRACEMENT * (prev_high - entry_price), 4)
+                stop_price = round(entry_price * (1 - config.REENTRY_STOP_PCT), 2)
+                target = round(entry_price + config.REENTRY_PROFIT_RETRACEMENT * (prev_high - entry_price), 2)
 
                 pos_size = min(calc_position_size(config.INITIAL_CAPITAL), config.MAX_POSITION_SIZE)
                 shares = int(pos_size / entry_price)

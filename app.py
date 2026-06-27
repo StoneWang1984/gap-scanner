@@ -1,4 +1,4 @@
-"""Stone 0.4 策略 — Streamlit Web UI (回测 + 实时监控)"""
+"""Stone 0.4.4 策略 — Streamlit Web UI (回测 + 实时监控)"""
 
 import json
 import time
@@ -13,19 +13,19 @@ from backtest import run_backtest
 from report import calc_summary, build_trade_table, build_equity_curve
 from strategy import TradeResult
 
-st.set_page_config(page_title="Stone 0.4 策略", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Stone 0.4.4 策略", page_icon="📊", layout="wide")
 
 # ── Sidebar ──────────────────────────────────────────────────────
 
-st.sidebar.title("Stone 0.4 策略")
-st.sidebar.caption("三档止盈 · 量价确认再入场 · ATR止损")
+st.sidebar.title("Stone 0.4.4 策略")
+st.sidebar.caption("三档止盈 · 量价确认再入场 · ATR止损 · 滑点模型 · 原生订单")
 
 tab = st.sidebar.radio("导航", ["策略概览", "运行回测", "实时监控", "交易详情"])
 
 # ── Tab 1: 策略概览 ──────────────────────────────────────────────
 
 if tab == "策略概览":
-    st.title("Stone 0.4 策略概览")
+    st.title("Stone 0.4.4 策略概览")
 
     col1, col2 = st.columns(2)
 
@@ -77,6 +77,24 @@ if tab == "策略概览":
         - 收盘强制平仓: **{config.FORCE_CLOSE_TIME}** EST
         """)
 
+        st.subheader("0.4.4 滑点模型（回测）")
+        st.markdown(f"""
+        - 入场滑点: **+{getattr(config, 'SLIPPAGE_ENTRY_PCT', 0.005):.1%}**
+        - 止损滑点: **-{getattr(config, 'SLIPPAGE_STOP_PCT', 0.02):.1%}**
+        - 追踪止损滑点: **-{getattr(config, 'SLIPPAGE_TRAILING_PCT', 0.01):.1%}**
+        - 目标卖出滑点: **-{getattr(config, 'SLIPPAGE_TARGET_PCT', 0.003):.1%}**
+        - 收盘清仓滑点: **-{getattr(config, 'SLIPPAGE_FORCE_CLOSE_PCT', 0.01):.1%}**
+        """)
+
+        st.subheader("0.4.4 原生订单（实盘）")
+        st.markdown(f"""
+        - 入场限价缓冲: **+{getattr(config, 'ENTRY_LIMIT_BUFFER', 0.005):.1%}**
+        - 止损: 原生 **stop-limit** (0延迟)
+        - 追踪止损: 原生 **trailing stop** (服务端实时)
+        - 目标卖出缓冲: **-0.3%**
+        - 收盘清仓: 先限价 **{getattr(config, 'FORCE_CLOSE_LIMIT_TIMEOUT', 120)}s** → 市价
+        """)
+
     st.divider()
     st.subheader("版本对比")
     versions = [
@@ -84,6 +102,7 @@ if tab == "策略概览":
         ("Stone 0.2", "增加频次版 ($100K)", "399%", "65.2%", "-7.58%", "6.03", "621"),
         ("Stone 0.3", "复利+动态止盈 ($1K)", "54,414%", "87.8%", "-14.73%", "13.63", "181"),
         ("Stone 0.4", "三档+量价再入场 ($1K)", "61,507%", "80.5%", "-14.74%", "14.46", "215"),
+        ("Stone 0.4.4", "滑点模型+原生订单 ($1K)", "含滑点回测", "—", "—", "—", "—"),
     ]
     vdf = pd.DataFrame(versions, columns=["版本", "描述", "总收益率", "胜率", "最大回撤", "夏普比率", "总交易"])
     st.dataframe(vdf, width="stretch", hide_index=True)
@@ -238,7 +257,8 @@ elif tab == "实时监控":
         updated = state.get("updated", "未知")
         daily_trades = state.get("daily_trades", 0)
         daily_stopped = state.get("daily_stopped", False)
-        st.caption(f"最后更新: {updated} | 今日交易: {daily_trades} | "
+        version = state.get("version", "0.4")
+        st.caption(f"版本: {version} | 最后更新: {updated} | 今日交易: {daily_trades} | "
                    f"{'⚠️ 已停止交易' if daily_stopped else '✅ 正常交易中'}")
 
     # ── Gap scan results ──
@@ -265,7 +285,7 @@ elif tab == "实时监控":
                 else:
                     st.info("未发现跳空股票")
     else:
-        st.info("等待 live_trade.py 启动...")
+        st.info("等待 live_trade_stone_0.4.4.py 启动...")
 
     # ── Current positions ──
     if state and state.get("positions"):

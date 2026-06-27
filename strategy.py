@@ -5,7 +5,7 @@ import config
 
 
 def calc_price_at_retracement(pullback: float, open_price: float, retracement: float) -> float:
-    return round(pullback + retracement * (open_price - pullback), 4)
+    return round(pullback + retracement * (open_price - pullback), 2)
 
 
 def calc_atr(bars: list[dict], period: int = 14) -> float:
@@ -26,12 +26,12 @@ def calc_stop_price(pullback: float, atr: float, atr_mult: float = None) -> floa
     if atr_mult is None:
         atr_mult = config.STOP_LOSS_ATR_MULT
     if atr <= 0:
-        return round(pullback * (1 - config.STOP_LOSS_PCT_FALLBACK), 4)
+        return round(pullback * (1 - config.STOP_LOSS_PCT_FALLBACK), 2)
     atr_stop = pullback - atr_mult * atr
     min_stop = pullback * 0.70
     max_stop = pullback * 0.95
     atr_stop = max(min_stop, min(max_stop, atr_stop))
-    return round(atr_stop, 4)
+    return round(atr_stop, 2)
 
 
 def calc_position_size(equity: float) -> float:
@@ -200,7 +200,7 @@ def evaluate_trade_stone(
                 pct = trail_pct_1125
             else:
                 pct = trail_pct_75
-            tsp = round(highest * (1 - pct), 4)
+            tsp = round(highest * (1 - pct), 2)
             tsp = max(tsp, plan.pullback)
             if bl <= tsp:
                 suffix = "_150" if reached_150 else "_1125" if reached_1125 else "_75"
@@ -280,8 +280,8 @@ def evaluate_reentry_trade(
     force_close_price: float | None = None,
 ) -> TradeResult:
     """Re-entry trade: 5% stop, sell 1/3 at 150% target, then 5% trailing stop."""
-    stop_price = round(entry_price * (1 - config.REENTRY_STOP_PCT), 4)
-    target = round(entry_price + config.REENTRY_PROFIT_RETRACEMENT * (prev_high - entry_price), 4)
+    stop_price = round(entry_price * (1 - config.REENTRY_STOP_PCT), 2)
+    target = round(entry_price + config.REENTRY_PROFIT_RETRACEMENT * (prev_high - entry_price), 2)
 
     highest = entry_price
     reached_target = False
@@ -328,7 +328,7 @@ def evaluate_reentry_trade(
 
         # Trailing stop after target
         if reached_target and remaining_shares > 0:
-            tsp = round(highest * (1 - config.REENTRY_TRAILING_PCT), 4)
+            tsp = round(highest * (1 - config.REENTRY_TRAILING_PCT), 2)
             tsp = max(tsp, entry_price)  # protect breakeven
             if bl <= tsp:
                 return _make_result("reentry_trailing", tsp, bi)
