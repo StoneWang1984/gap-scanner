@@ -385,6 +385,35 @@ def check_order_filled(order_id) -> bool:
         return False
 
 
+def _wait_order_filled(order_id, timeout=30) -> bool:
+    """Wait for an order to be filled, polling every 2s."""
+    deadline = dt.datetime.now() + dt.timedelta(seconds=timeout)
+    while dt.datetime.now() < deadline:
+        if check_order_filled(order_id):
+            return True
+        time.sleep(2)
+    return False
+
+
+def _verify_positions_closed(positions: list[LivePosition]):
+    """Double-check with Alpaca that positions are actually closed. Force close if not."""
+    try:
+        alpaca_positions = trading_client.get_all_positions()
+        held_symbols = {p.symbol for p in alpaca_positions}
+        for pos in positions:
+            if pos.symbol in held_symbols and pos.remaining_shares > 0:
+                log(f"WARNING: {pos.symbol} still held after exit signal! Force closing...")
+                try:
+                    trading_client.close_position(pos.symbol)
+                    log(f"FORCE CLOSED {pos.symbol}")
+                except Exception as e:
+                    log(f"FORCE CLOSE FAILED {pos.symbol}: {e}")
+                    place_sell_market(pos.symbol, pos.remaining_shares)
+                pos.remaining_shares = 0
+    except Exception as e:
+        log(f"Position verification error: {e}")
+
+
 # ── Protective order management ────────────────────────────────────
 
 def place_protective_stop(pos: LivePosition) -> str | None:
@@ -485,7 +514,7 @@ def test_connectivity():
 def run_live():
     log("=" * 60)
     log("Stone 0.4.4 Live Paper Trading")
-    log(f"Capital: ${config.INITIAL_CAPITAL:,.0f} | Max daily trades: {config.MAX_DAILY_TRADES}")
+    log(f"Capital: ${config.INITIAL_CAPITAL:,.0f} | Trading capital: ${capital:,.2f} | Max daily trades: {config.MAX_DAILY_TRADES}")
     log(f"Entry buffer: +{ENTRY_LIMIT_BUFFER:.1%} | Stop-limit buffer: -{STOP_LIMIT_BUFFER:.1%}")
     log(f"Target buffer: -{TARGET_LIMIT_BUFFER:.1%} | Force-close timeout: {FORCE_CLOSE_LIMIT_TIMEOUT}s")
     log("=" * 60)
@@ -493,6 +522,22 @@ def run_live():
     if not test_connectivity():
         log("Data connectivity failed. Cannot trade.")
         return
+
+    # ── Get actual capital for compound interest ──
+    try:
+        acct = trading_client.get_account()
+        actual_equity = float(acct.equity)
+        # If paper account still has default balance (~$100k), override with strategy capital
+        if actual_equity > config.INITIAL_CAPITAL * 5:
+            capital = config.INITIAL_CAPITAL
+            log(f"Paper account balance ${actual_equity:,.2f} > 5x initial capital")
+            log(f"Using strategy capital: ${capital:,.2f} (compound interest tracking)")
+        else:
+            capital = actual_equity
+            log(f"Account equity: ${capital:,.2f} (compound interest from prior gains)")
+    except Exception as e:
+        capital = config.INITIAL_CAPITAL
+        log(f"Could not fetch account equity: {e}. Using initial capital ${capital:,.2f}")
 
     positions: list[LivePosition] = []
     daily_trades = 0
@@ -523,7 +568,7 @@ def run_live():
         log("No gap stocks found today. Exiting.")
         return
 
-    deployable = calc_position_size(config.INITIAL_CAPITAL)
+    deployable = calc_position_size(capital)
     pos_per_stock = min(deployable, config.MAX_POSITION_SIZE)
     max_stocks = max(config.MAX_POSITIONS_PER_DAY, int(deployable / pos_per_stock))
     candidates = candidates[:max_stocks]
@@ -639,11 +684,35 @@ def run_live():
                         if pos.remaining_shares > 0:
                             if pos.protective_order_id:
                                 cancel_order(pos.protective_order_id)
-                            place_sell_market(pos.symbol, pos.remaining_shares)
-                            pos.remaining_shares = 0
+                                pos.protective_order_id = None
+                            order = place_sell_market(pos.symbol, pos.remaining_shares)
+                            if order:
+                                # Wait up to 30s for fill confirmation
+                                filled = _wait_order_filled(order.id, timeout=30)
+                                if filled:
+                                    log(f"PULLBACK STOP FILLED: {pos.symbol} {pos.remaining_shares} shares")
+                                    pos.remaining_shares = 0
+                                else:
+                                    log(f"PULLBACK STOP NOT FILLED: {pos.symbol}, retrying...")
+                                    # Retry with market order
+                                    retry = place_sell_market(pos.symbol, pos.remaining_shares)
+                                    if retry:
+                                        _wait_order_filled(retry.id, timeout=30)
+                                    pos.remaining_shares = 0
+                            else:
+                                # Market order failed, retry once
+                                log(f"PULLBACK STOP SELL FAILED: {pos.symbol}, retrying...")
+                                time.sleep(2)
+                                retry = place_sell_market(pos.symbol, pos.remaining_shares)
+                                if retry:
+                                    _wait_order_filled(retry.id, timeout=30)
+                                pos.remaining_shares = 0
                     break
 
         if daily_stopped:
+            # Verify all positions actually closed on Alpaca side
+            _verify_positions_closed(positions)
+            positions = [p for p in positions if p.remaining_shares > 0]
             time.sleep(30)
             continue
 
@@ -667,9 +736,15 @@ def run_live():
                 events_log.append(f"{now_est.strftime('%H:%M:%S')} STOP LOSS {pos.symbol} @ ${pos.stop_price:.4f}")
                 if pos.protective_order_id:
                     cancel_order(pos.protective_order_id)
-                place_sell_market(pos.symbol, pos.remaining_shares)
+                    pos.protective_order_id = None
+                order = place_sell_market(pos.symbol, pos.remaining_shares)
+                if order and _wait_order_filled(order.id, timeout=15):
+                    log(f"STOP LOSS FILLED: {pos.symbol}")
+                else:
+                    log(f"STOP LOSS NOT FILLED: {pos.symbol}, retrying...")
+                    place_sell_market(pos.symbol, pos.remaining_shares)
+                    _verify_positions_closed([pos])
                 pos.remaining_shares = 0
-                pos.protective_order_id = None
                 daily_trades += 1
                 positions.remove(pos)
                 continue
@@ -752,9 +827,15 @@ def run_live():
                         events_log.append(f"{now_est.strftime('%H:%M:%S')} TRAILING STOP({tier}) {pos.symbol} @ ${tsp:.4f}")
                         if pos.protective_order_id:
                             cancel_order(pos.protective_order_id)
-                        place_sell_market(pos.symbol, pos.remaining_shares)
+                            pos.protective_order_id = None
+                        order = place_sell_market(pos.symbol, pos.remaining_shares)
+                        if order and _wait_order_filled(order.id, timeout=15):
+                            log(f"TRAILING STOP FILLED: {pos.symbol}")
+                        else:
+                            log(f"TRAILING STOP NOT FILLED: {pos.symbol}, retrying...")
+                            place_sell_market(pos.symbol, pos.remaining_shares)
+                            _verify_positions_closed([pos])
                         pos.remaining_shares = 0
-                        pos.protective_order_id = None
                         daily_trades += 1
                         positions.remove(pos)
                         continue
@@ -788,9 +869,15 @@ def run_live():
                         events_log.append(f"{now_est.strftime('%H:%M:%S')} RE-ENTRY TRAILING {pos.symbol} @ ${tsp:.4f}")
                         if pos.protective_order_id:
                             cancel_order(pos.protective_order_id)
-                        place_sell_market(pos.symbol, pos.remaining_shares)
+                            pos.protective_order_id = None
+                        order = place_sell_market(pos.symbol, pos.remaining_shares)
+                        if order and _wait_order_filled(order.id, timeout=15):
+                            log(f"RE-ENTRY TRAILING FILLED: {pos.symbol}")
+                        else:
+                            log(f"RE-ENTRY TRAILING NOT FILLED: {pos.symbol}, retrying...")
+                            place_sell_market(pos.symbol, pos.remaining_shares)
+                            _verify_positions_closed([pos])
                         pos.remaining_shares = 0
-                        pos.protective_order_id = None
                         daily_trades += 1
                         positions.remove(pos)
                         continue
@@ -821,7 +908,7 @@ def run_live():
                 target_1125 = calc_price_at_retracement(entry_price, cand["open_price"], config.PROFIT_RETRACEMENT_1125)
                 target_150 = calc_price_at_retracement(entry_price, cand["open_price"], config.PROFIT_RETRACEMENT_150)
 
-                pos_size = min(calc_position_size(config.INITIAL_CAPITAL), config.MAX_POSITION_SIZE)
+                pos_size = min(calc_position_size(capital), config.MAX_POSITION_SIZE)
                 shares = int(pos_size / entry_price)
                 if shares <= 0:
                     entry_checked.add(symbol)
@@ -864,7 +951,7 @@ def run_live():
                 stop_price = round(entry_price * (1 - config.REENTRY_STOP_PCT), 2)
                 target = round(entry_price + config.REENTRY_PROFIT_RETRACEMENT * (prev_high - entry_price), 2)
 
-                pos_size = min(calc_position_size(config.INITIAL_CAPITAL), config.MAX_POSITION_SIZE)
+                pos_size = min(calc_position_size(capital), config.MAX_POSITION_SIZE)
                 shares = int(pos_size / entry_price)
                 if shares <= 0:
                     reentry_checked.add(symbol)
@@ -959,9 +1046,12 @@ def _wait_force_close(force_close_started: dict, positions: list[LivePosition]):
         for pos in positions:
             if pos.symbol == symbol and pos.remaining_shares > 0:
                 log(f"FORCE CLOSE MARKET FALLBACK: {symbol} {pos.remaining_shares} shares")
-                place_sell_market(pos.symbol, pos.remaining_shares)
+                order = place_sell_market(pos.symbol, pos.remaining_shares)
+                if order:
+                    _wait_order_filled(order.id, timeout=30)
                 pos.remaining_shares = 0
         del force_close_started[symbol]
+    _verify_positions_closed(positions)
 
 
 if __name__ == "__main__":
