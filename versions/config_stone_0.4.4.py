@@ -13,7 +13,7 @@ ALPACA_BASE_URL = "https://paper-api.alpaca.markets"
 ALPACA_DATA_URL = "https://data.alpaca.markets"
 
 # Scanner filters
-GAP_THRESHOLD = 0.20
+GAP_THRESHOLD = 0.10
 MIN_VOLUME = 50000
 MIN_DOLLAR_VOLUME = 500000
 PRICE_MIN = 0.25
