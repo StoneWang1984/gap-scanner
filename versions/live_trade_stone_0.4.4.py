@@ -376,6 +376,49 @@ def close_all_positions():
         log(f"Close positions error: {e}")
 
 
+def force_sell_position(symbol: str, qty: int) -> bool:
+    """Most reliable way to exit a position: close_position() atomically
+    cancels all pending orders for the symbol and sells.
+    Falls back to cancel_all + market sell if close_position fails.
+    Returns True if sell was confirmed filled."""
+    # Method 1: Alpaca close_position API (atomic cancel + sell)
+    try:
+        result = trading_client.close_position(symbol, cancel_orders=True)
+        if result:
+            log(f"FORCE SELL (close_position): {symbol} {qty} shares")
+            return True
+    except Exception as e:
+        log(f"close_position failed for {symbol}: {e}")
+
+    # Method 2: Cancel all pending orders first, then market sell
+    try:
+        cancel_all_orders()
+        time.sleep(1)
+        order = place_sell_market(symbol, qty)
+        if order:
+            filled = _wait_order_filled(order.id, timeout=30)
+            if filled:
+                log(f"FORCE SELL (market): {symbol} {qty} shares")
+                return True
+    except Exception as e:
+        log(f"market sell failed for {symbol}: {e}")
+
+    # Method 3: Cancel all, wait longer, retry market sell
+    try:
+        cancel_all_orders()
+        time.sleep(3)
+        order = place_sell_market(symbol, qty)
+        if order:
+            filled = _wait_order_filled(order.id, timeout=30)
+            if filled:
+                log(f"FORCE SELL (retry): {symbol} {qty} shares")
+                return True
+    except Exception as e:
+        log(f"All sell methods failed for {symbol}: {e}")
+
+    return False
+
+
 def check_order_filled(order_id) -> bool:
     """Check if an order has been filled."""
     try:
@@ -420,7 +463,6 @@ def _force_close_remaining(positions: list[LivePosition]):
     try:
         alpaca_positions = trading_client.get_all_positions()
         if not alpaca_positions:
-            # All clear on Alpaca side
             for pos in positions:
                 pos.remaining_shares = 0
             return
@@ -428,15 +470,12 @@ def _force_close_remaining(positions: list[LivePosition]):
         held = {p.symbol: int(p.qty) for p in alpaca_positions}
         for pos in positions:
             if pos.symbol in held:
-                log(f"FORCE CLOSE: {pos.symbol} still has {held[pos.symbol]} shares on Alpaca, closing...")
-                try:
-                    trading_client.close_position(pos.symbol)
-                    log(f"FORCE CLOSED {pos.symbol} via Alpaca API")
-                except Exception as e:
-                    log(f"Alpaca close_position failed for {pos.symbol}: {e}, trying market sell...")
-                    order = place_sell_market(pos.symbol, pos.remaining_shares)
-                    if order:
-                        _wait_order_filled(order.id, timeout=15)
+                log(f"FORCE CLOSE: {pos.symbol} still has {held[pos.symbol]} shares on Alpaca")
+                sold = force_sell_position(pos.symbol, held[pos.symbol])
+                if sold:
+                    log(f"FORCE CLOSE SUCCESS: {pos.symbol}")
+                else:
+                    log(f"FORCE CLOSE FAILED: {pos.symbol}")
                 pos.remaining_shares = 0
     except Exception as e:
         log(f"Force close check error: {e}")
@@ -696,29 +735,13 @@ def run_live():
                     events_log.append(f"{now_est.strftime('%H:%M:%S')} PULLBACK STOP {symbol} -{(dh - dl) / dh:.1%}")
                     for pos in positions:
                         if pos.remaining_shares > 0:
-                            if pos.protective_order_id:
-                                cancel_order(pos.protective_order_id)
+                            sold = force_sell_position(pos.symbol, pos.remaining_shares)
+                            if sold:
+                                log(f"PULLBACK STOP FILLED: {pos.symbol} {pos.remaining_shares} shares")
+                                pos.remaining_shares = 0
                                 pos.protective_order_id = None
-                            # Try up to 3 times to sell
-                            sold = False
-                            for attempt in range(3):
-                                order = place_sell_market(pos.symbol, pos.remaining_shares)
-                                if order:
-                                    filled = _wait_order_filled(order.id, timeout=30)
-                                    if filled:
-                                        log(f"PULLBACK STOP FILLED: {pos.symbol} {pos.remaining_shares} shares")
-                                        pos.remaining_shares = 0
-                                        sold = True
-                                        break
-                                    else:
-                                        log(f"PULLBACK STOP attempt {attempt+1} not filled: {pos.symbol}, retrying...")
-                                else:
-                                    log(f"PULLBACK STOP attempt {attempt+1} failed: {pos.symbol}, retrying...")
-                                time.sleep(2)
-                            if not sold:
-                                # All retries failed — don't set remaining_shares to 0!
-                                # Let _verify_positions_closed handle it
-                                log(f"PULLBACK STOP ALL RETRIES FAILED: {pos.symbol} — will force close via Alpaca API")
+                            else:
+                                log(f"PULLBACK STOP FAILED: {pos.symbol} — will retry next cycle")
                     break
 
         if daily_stopped:
@@ -751,17 +774,9 @@ def run_live():
                 if pos.protective_order_id:
                     cancel_order(pos.protective_order_id)
                     pos.protective_order_id = None
-                sold = False
-                for attempt in range(3):
-                    order = place_sell_market(pos.symbol, pos.remaining_shares)
-                    if order and _wait_order_filled(order.id, timeout=15):
-                        log(f"STOP LOSS FILLED: {pos.symbol}")
-                        sold = True
-                        break
-                    log(f"STOP LOSS attempt {attempt+1} failed: {pos.symbol}")
-                    time.sleep(2)
+                sold = force_sell_position(pos.symbol, pos.remaining_shares)
                 if not sold:
-                    _force_close_remaining([pos])
+                    log(f"STOP LOSS FORCE SELL FAILED: {pos.symbol}")
                 pos.remaining_shares = 0
                 daily_trades += 1
                 positions.remove(pos)
@@ -846,17 +861,9 @@ def run_live():
                         if pos.protective_order_id:
                             cancel_order(pos.protective_order_id)
                             pos.protective_order_id = None
-                        sold = False
-                        for attempt in range(3):
-                            order = place_sell_market(pos.symbol, pos.remaining_shares)
-                            if order and _wait_order_filled(order.id, timeout=15):
-                                log(f"TRAILING STOP FILLED: {pos.symbol}")
-                                sold = True
-                                break
-                            log(f"TRAILING STOP attempt {attempt+1} failed: {pos.symbol}")
-                            time.sleep(2)
+                        sold = force_sell_position(pos.symbol, pos.remaining_shares)
                         if not sold:
-                            _force_close_remaining([pos])
+                            log(f"TRAILING STOP FORCE SELL FAILED: {pos.symbol}")
                         pos.remaining_shares = 0
                         daily_trades += 1
                         positions.remove(pos)
@@ -892,17 +899,9 @@ def run_live():
                         if pos.protective_order_id:
                             cancel_order(pos.protective_order_id)
                             pos.protective_order_id = None
-                        sold = False
-                        for attempt in range(3):
-                            order = place_sell_market(pos.symbol, pos.remaining_shares)
-                            if order and _wait_order_filled(order.id, timeout=15):
-                                log(f"RE-ENTRY TRAILING FILLED: {pos.symbol}")
-                                sold = True
-                                break
-                            log(f"RE-ENTRY TRAILING attempt {attempt+1} failed: {pos.symbol}")
-                            time.sleep(2)
+                        sold = force_sell_position(pos.symbol, pos.remaining_shares)
                         if not sold:
-                            _force_close_remaining([pos])
+                            log(f"RE-ENTRY TRAILING FORCE SELL FAILED: {pos.symbol}")
                         pos.remaining_shares = 0
                         daily_trades += 1
                         positions.remove(pos)
