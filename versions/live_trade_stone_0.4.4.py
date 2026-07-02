@@ -514,7 +514,7 @@ def test_connectivity():
 def run_live():
     log("=" * 60)
     log("Stone 0.4.4 Live Paper Trading")
-    log(f"Capital: ${config.INITIAL_CAPITAL:,.0f} | Trading capital: ${capital:,.2f} | Max daily trades: {config.MAX_DAILY_TRADES}")
+    log(f"Capital: ${config.INITIAL_CAPITAL:,.0f} | Max daily trades: {config.MAX_DAILY_TRADES}")
     log(f"Entry buffer: +{ENTRY_LIMIT_BUFFER:.1%} | Stop-limit buffer: -{STOP_LIMIT_BUFFER:.1%}")
     log(f"Target buffer: -{TARGET_LIMIT_BUFFER:.1%} | Force-close timeout: {FORCE_CLOSE_LIMIT_TIMEOUT}s")
     log("=" * 60)
@@ -523,21 +523,7 @@ def run_live():
         log("Data connectivity failed. Cannot trade.")
         return
 
-    # ── Get actual capital for compound interest ──
-    try:
-        acct = trading_client.get_account()
-        actual_equity = float(acct.equity)
-        # If paper account still has default balance (~$100k), override with strategy capital
-        if actual_equity > config.INITIAL_CAPITAL * 5:
-            capital = config.INITIAL_CAPITAL
-            log(f"Paper account balance ${actual_equity:,.2f} > 5x initial capital")
-            log(f"Using strategy capital: ${capital:,.2f} (compound interest tracking)")
-        else:
-            capital = actual_equity
-            log(f"Account equity: ${capital:,.2f} (compound interest from prior gains)")
-    except Exception as e:
-        capital = config.INITIAL_CAPITAL
-        log(f"Could not fetch account equity: {e}. Using initial capital ${capital:,.2f}")
+    capital = config.INITIAL_CAPITAL  # fixed $1,000 per day
 
     positions: list[LivePosition] = []
     daily_trades = 0
