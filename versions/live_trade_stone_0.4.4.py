@@ -699,6 +699,8 @@ def run_live():
             # Verify all positions actually closed on Alpaca side
             _verify_positions_closed(positions)
             positions = [p for p in positions if p.remaining_shares > 0]
+            save_state(positions, candidates, daily_trades, daily_stopped,
+                       entry_checked, day_highs, accumulator, events_log)
             time.sleep(30)
             continue
 
