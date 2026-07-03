@@ -41,8 +41,8 @@ PARTIAL_SELL_RATIO_75 = 0.25
 PARTIAL_SELL_RATIO_1125 = 1/3
 PARTIAL_SELL_RATIO_150 = 1/3
 
-# Trailing stop — first trade (0.4.5: 75% tier widened from 3% to 5%)
-TRAILING_STOP_PCT_75 = 0.05
+# Trailing stop — first trade (0.4.5: 75% tier kept at 3%)
+TRAILING_STOP_PCT_75 = 0.03
 TRAILING_STOP_PCT_1125 = 0.04
 TRAILING_STOP_PCT_150 = 0.05
 
