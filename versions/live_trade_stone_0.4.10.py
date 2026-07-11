@@ -87,6 +87,7 @@ data_client = StockHistoricalDataClient(config.ALPACA_API_KEY, config.ALPACA_SEC
 
 
 _LOG_FILE = os.path.join(_ver_dir, "live_0410.log")
+_REPORT_DIR = os.path.join(_ver_dir, "daily_reports")
 
 def log(msg):
     now = dt.datetime.now().strftime("%H:%M:%S")
@@ -97,6 +98,21 @@ def log(msg):
             f.write(line + "\n")
     except Exception:
         pass
+
+
+def smart_sleep_until(target_dt, check_interval=30):
+    """Sleep until target EST datetime, with progressive logging."""
+    while True:
+        now = dt.datetime.now(tz=ZoneInfo("America/New_York"))
+        remaining = (target_dt - now).total_seconds()
+        if remaining <= 0:
+            break
+        if remaining > 300:
+            log(f"Next event in {remaining / 60:.0f} min, sleeping...")
+            time.sleep(min(remaining * 0.85, 600))
+        else:
+            log(f"Starting in {remaining / 60:.1f} min...")
+            time.sleep(check_interval)
 
 
 # ── Position tracking ──────────────────────────────────────────────
@@ -613,10 +629,74 @@ def test_connectivity():
         return False
 
 
-# ── Main trading loop ──────────────────────────────────────────────
+# ── Market calendar ────────────────────────────────────────────────
+from market_calendar import (
+    is_trading_day, get_trading_day_info, get_next_trading_day,
+    calc_force_close_time, get_market_datetime,
+)
+
+
+# ── Daily report ──────────────────────────────────────────────────
+def generate_daily_report(date_str, version, equity_start, equity_end,
+                          daily_trades, trades_detail, candidates,
+                          events_log):
+    """Save structured daily report and print summary."""
+    os.makedirs(_REPORT_DIR, exist_ok=True)
+
+    wins = [t for t in trades_detail if t.get("pnl", 0) > 0]
+    win_rate = len(wins) / len(trades_detail) if trades_detail else 0
+    daily_pnl = equity_end - equity_start
+
+    report = {
+        "date": date_str,
+        "version": version,
+        "account_equity_start": round(equity_start, 2),
+        "account_equity_end": round(equity_end, 2),
+        "daily_pnl": round(daily_pnl, 2),
+        "daily_trades": daily_trades,
+        "win_trades": len(wins),
+        "win_rate": round(win_rate, 3),
+        "candidates": [
+            {"symbol": c["symbol"], "gap_pct": round(c["gap_pct"], 4),
+             "open_price": c["open_price"]}
+            for c in (candidates or [])
+        ],
+        "trades": trades_detail,
+        "events": events_log[-100:],
+    }
+
+    path = os.path.join(_REPORT_DIR, f"{date_str}.json")
+    try:
+        with open(path, "w") as f:
+            json.dump(report, f, indent=2, default=str)
+        log(f"Daily report saved: {path}")
+    except Exception as e:
+        log(f"Failed to save report: {e}")
+
+    # Print readable summary
+    log("")
+    log("=" * 50)
+    log("         DAILY REPORT")
+    log("=" * 50)
+    log(f"Date: {date_str} | Version: {version}")
+    log(f"Equity: ${equity_end:,.2f} | Daily P&L: ${daily_pnl:+,.2f}")
+    log(f"Trades: {daily_trades} | Win rate: {win_rate:.1%}")
+    log("-" * 50)
+    for i, t in enumerate(trades_detail, 1):
+        pnl_s = f"${t['pnl']:+,.2f}" if t.get("pnl") is not None else "N/A"
+        log(f"#{i} {t.get('symbol','?'):6s} {t.get('type','?'):8s} "
+            f"{t.get('shares',0)}sh  "
+            f"${t.get('entry',0):.2f}→${t.get('exit',0):.2f}  "
+            f"{t.get('exit_reason','?'):20s} {pnl_s}")
+    log("=" * 50)
+
+    return report
+
+
+# ── Main scheduler ────────────────────────────────────────────────
 def run_live():
     log("=" * 60)
-    log("Stone 0.4.10 Live Paper Trading")
+    log("Stone 0.4.10 Live Paper Trading — Auto Scheduler")
     log(f"Capital: ${config.INITIAL_CAPITAL:,.0f} | Max daily trades: {config.MAX_DAILY_TRADES}")
     log(f"Entry buffer: +{ENTRY_LIMIT_BUFFER:.1%} | Stop-limit buffer: -{STOP_LIMIT_BUFFER:.1%}")
     log(f"Target buffer: -{TARGET_LIMIT_BUFFER:.1%} | Force-close timeout: {FORCE_CLOSE_LIMIT_TIMEOUT}s")
@@ -627,6 +707,109 @@ def run_live():
     if not test_connectivity():
         log("Data connectivity failed. Cannot trade.")
         return
+
+    # Main scheduling loop — runs forever
+    while True:
+        now_est = dt.datetime.now(tz=ZoneInfo("America/New_York"))
+        today = now_est.date()
+
+        # Check if today is a trading day
+        today_info = get_trading_day_info(trading_client, today)
+
+        if not today_info:
+            next_day = get_next_trading_day(trading_client, today)
+            next_date = dt.date.fromisoformat(next_day["date"])
+            open_h, open_m = int(next_day["open"][:2]), int(next_day["open"][3:5])
+            target = dt.datetime(next_date.year, next_date.month, next_date.day,
+                                 open_h, open_m, tzinfo=ZoneInfo("America/New_York")) \
+                     - dt.timedelta(minutes=30)
+            log(f"Today ({today}) is NOT a trading day. "
+                f"Next trading day: {next_day['date']} (open {next_day['open']} EST)")
+            smart_sleep_until(target)
+            continue
+
+        # Today is a trading day — get close time and force close
+        close_str = today_info["close"]
+        force_close_str = calc_force_close_time(close_str)
+        close_h, close_m = int(close_str[:2]), int(close_str[3:5])
+        fc_h, fc_m = int(force_close_str[:2]), int(force_close_str[3:5])
+        open_h, open_m = int(today_info["open"][:2]), int(today_info["open"][3:5])
+
+        force_close_time = dt.time(fc_h, fc_m)
+        open_time = dt.time(open_h, open_m)
+        pre_open_time = dt.time(open_h, open_m - 30 if open_m >= 30 else 0,
+                                open_m - 30 + 60 if open_m < 30 else 0)
+
+        # If already past force close, wait for next trading day
+        if now_est.time() >= force_close_time:
+            next_day = get_next_trading_day(trading_client, today + dt.timedelta(days=1))
+            next_date = dt.date.fromisoformat(next_day["date"])
+            n_open_h, n_open_m = int(next_day["open"][:2]), int(next_day["open"][3:5])
+            target = dt.datetime(next_date.year, next_date.month, next_date.day,
+                                 n_open_h, n_open_m, tzinfo=ZoneInfo("America/New_York")) \
+                     - dt.timedelta(minutes=30)
+            log(f"Market already closed for today. Next trading day: {next_day['date']}")
+            smart_sleep_until(target)
+            continue
+
+        # If not yet 30 min before open, sleep
+        pre_open_dt = dt.datetime(today.year, today.month, today.day,
+                                  open_h, open_m, tzinfo=ZoneInfo("America/New_York")) \
+                      - dt.timedelta(minutes=30)
+        if now_est < pre_open_dt:
+            log(f"Market opens at {today_info['open']} EST. Waiting for pre-open ({open_h:02d}:{open_m - 30 + (60 if open_m < 30 else 0):02d})...")
+            smart_sleep_until(pre_open_dt)
+
+        # Run the trading day
+        today_str = str(today)
+        log(f"Starting trading day: {today_str} (close {close_str} EST, force_close {force_close_str})")
+        if today_info["is_early_close"]:
+            log(f"WARNING: Early close today at {close_str} EST!")
+
+        # Get start equity
+        equity_start = 0
+        try:
+            acct = trading_client.get_account()
+            equity_start = float(acct.equity)
+        except Exception:
+            pass
+
+        result = run_trading_day(force_close_time, force_close_str, today_info)
+
+        # Get end equity
+        equity_end = equity_start
+        try:
+            acct = trading_client.get_account()
+            equity_end = float(acct.equity)
+        except Exception:
+            pass
+
+        # Generate daily report
+        generate_daily_report(
+            date_str=today_str,
+            version="0.4.10",
+            equity_start=equity_start,
+            equity_end=equity_end,
+            daily_trades=result["daily_trades"],
+            trades_detail=result["trades_detail"],
+            candidates=result["candidates"],
+            events_log=result["events_log"],
+        )
+
+        # Wait for next trading day
+        next_day = get_next_trading_day(trading_client, today + dt.timedelta(days=1))
+        next_date = dt.date.fromisoformat(next_day["date"])
+        n_open_h, n_open_m = int(next_day["open"][:2]), int(next_day["open"][3:5])
+        target = dt.datetime(next_date.year, next_date.month, next_date.day,
+                             n_open_h, n_open_m, tzinfo=ZoneInfo("America/New_York")) \
+                 - dt.timedelta(minutes=30)
+        log(f"Next trading day: {next_day['date']}. Sleeping until pre-open...")
+        smart_sleep_until(target)
+
+
+def run_trading_day(force_close_time: dt.time, force_close_str: str,
+                    today_info: dict) -> dict:
+    """Execute one trading day. Returns result dict for daily report."""
 
     capital = config.INITIAL_CAPITAL
 
@@ -641,22 +824,25 @@ def run_live():
     poll_count = 0
     events_log = []
     pending_buys = {}
+    trades_detail = []
 
+    # Wait for exact market open (9:30 AM EST) if not yet
     while True:
         now = dt.datetime.now(tz=ZoneInfo("America/New_York"))
-        if (now.hour == 9 and now.minute >= 30) or (10 <= now.hour < 16):
+        if now.time() >= force_close_time:
+            log("Market already closed, skipping trading day.")
+            return {"daily_trades": 0, "trades_detail": [], "candidates": [], "events_log": events_log}
+        if (now.hour == 9 and now.minute >= 30) or now.hour >= 10:
             break
-        log("Waiting for market open (9:30 AM EST)...")
-        time.sleep(30)
-        log("Waiting for market open (9:30 AM EST)...")
+        log(f"Waiting for market open ({today_info['open']} EST)...")
         time.sleep(30)
 
     # ── Scan gaps ──
     log("Scanning for gap stocks...")
     candidates = scan_gaps()
     if not candidates:
-        log("No gap stocks found today. Exiting.")
-        return
+        log("No gap stocks found today.")
+        return {"daily_trades": 0, "trades_detail": [], "candidates": [], "events_log": events_log}
 
     deployable = calc_position_size(capital)
     pos_per_stock = min(deployable, config.MAX_POSITION_SIZE)
@@ -669,10 +855,24 @@ def run_live():
         day_highs[c['symbol']] = c['open_price']
 
     # ── Main loop ──
-    force_close_time = dt.time(int(config.FORCE_CLOSE_TIME[:2]), int(config.FORCE_CLOSE_TIME[3:]))
     cutoff_time = dt.time(10, 0)
     reentry_cutoff_time = dt.time(int(REENTRY_CUTOFF[:2]), int(REENTRY_CUTOFF[3:]))
     force_close_started = {}
+
+    def record_trade(pos, exit_price, exit_reason):
+        nonlocal daily_trades
+        daily_trades += 1
+        orig = getattr(pos, 'original_shares', pos.remaining_shares)
+        pnl = (exit_price - pos.entry_price) * orig
+        trades_detail.append({
+            "symbol": pos.symbol,
+            "type": pos.trade_type,
+            "entry": round(pos.entry_price, 4),
+            "exit": round(exit_price, 4),
+            "shares": orig,
+            "exit_reason": exit_reason,
+            "pnl": round(pnl, 2),
+        })
 
     while True:
         now_est = dt.datetime.now(tz=ZoneInfo("America/New_York"))
@@ -703,7 +903,7 @@ def run_live():
                 events_log.append(f"{now_est.strftime('%H:%M:%S')} PROTECTIVE FILLED {pos.symbol}")
                 pos.remaining_shares = 0
                 pos.protective_order_id = None
-                daily_trades += 1
+                record_trade(pos, pos.stop_price, "protective_stop")
                 positions.remove(pos)
                 continue
 
@@ -722,8 +922,10 @@ def run_live():
                         place_sell_limit(pos.symbol, pos.remaining_shares, limit_price)
                         force_close_started[pos.symbol] = now_est
                         events_log.append(f"{now_est.strftime('%H:%M:%S')} FORCE CLOSE LIMIT {pos.symbol} {pos.remaining_shares} @ ${limit_price:.2f}")
+                        record_trade(pos, limit_price, "force_close")
                     else:
                         place_sell_market(pos.symbol, pos.remaining_shares)
+                        record_trade(pos, bid_price or pos.entry_price, "force_close")
                         pos.remaining_shares = 0
             if force_close_started:
                 _wait_force_close(force_close_started, positions)
@@ -777,6 +979,7 @@ def run_live():
                             sold = force_sell_position(pos.symbol, pos.remaining_shares)
                             if sold:
                                 log(f"PULLBACK STOP FILLED: {pos.symbol} {pos.remaining_shares} shares")
+                            record_trade(pos, dl, "pullback_stop")
                             pos.remaining_shares = 0
                             pos.protective_order_id = None
                     break
@@ -814,7 +1017,7 @@ def run_live():
                 if not sold:
                     log(f"STOP LOSS FORCE SELL FAILED: {pos.symbol}")
                 pos.remaining_shares = 0
-                daily_trades += 1
+                record_trade(pos, pos.stop_price, "stop_loss")
                 positions.remove(pos)
                 continue
 
@@ -899,7 +1102,7 @@ def run_live():
                         if not sold:
                             log(f"TRAILING STOP FORCE SELL FAILED: {pos.symbol}")
                         pos.remaining_shares = 0
-                        daily_trades += 1
+                        record_trade(pos, cur_price, "trailing_stop")
                         positions.remove(pos)
                         continue
 
@@ -919,7 +1122,7 @@ def run_live():
                         pos.protective_order_id = None
                     sold = force_sell_position(pos.symbol, pos.remaining_shares)
                     pos.remaining_shares = 0
-                    daily_trades += 1
+                    record_trade(pos, cur_price, "reentry_time_stop")
                     positions.remove(pos)
                     continue
 
@@ -950,7 +1153,7 @@ def run_live():
                         pos.protective_order_id = None
                     sold = force_sell_position(pos.symbol, pos.remaining_shares)
                     pos.remaining_shares = 0
-                    daily_trades += 1
+                    record_trade(pos, pos.entry_price, "reentry_breakeven")
                     positions.remove(pos)
                     continue
 
@@ -972,7 +1175,7 @@ def run_live():
                             pos.protective_order_id = None
                         sold = force_sell_position(pos.symbol, pos.remaining_shares)
                         pos.remaining_shares = 0
-                        daily_trades += 1
+                        record_trade(pos, tsp, "reentry_trailing")
                         positions.remove(pos)
                         continue
 
@@ -1131,6 +1334,14 @@ def run_live():
     events_log.append(f"EOD equity=${equity:,.2f} trades={daily_trades}")
     save_state(positions, candidates, daily_trades, daily_stopped,
                entry_checked, day_highs, accumulator, events_log)
+
+    return {
+        "daily_trades": daily_trades,
+        "trades_detail": trades_detail,
+        "candidates": [{"symbol": c["symbol"], "gap_pct": c["gap_pct"],
+                         "open_price": c["open_price"]} for c in candidates],
+        "events_log": events_log,
+    }
 
 
 def _wait_force_close(force_close_started: dict, positions: list[LivePosition]):
