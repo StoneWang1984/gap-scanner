@@ -28,7 +28,20 @@ from alpaca.data.requests import StockBarsRequest, StockSnapshotRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.data.enums import Adjustment, DataFeed
 
-import config
+import importlib.util, sys, os
+
+# Add parent dir to path for scanner/strategy imports
+_ver_dir = os.path.dirname(os.path.abspath(__file__))
+_parent_dir = os.path.dirname(_ver_dir)
+if _parent_dir not in sys.path:
+    sys.path.insert(0, _parent_dir)
+
+# Load version-specific config
+_spec = importlib.util.spec_from_file_location("config", os.path.join(_ver_dir, "config_stone_0.4.9.py"))
+config = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(config)
+sys.modules["config"] = config
+
 from scanner import get_tradable_symbols
 from strategy import (
     calc_atr, calc_stop_price, calc_price_at_retracement, calc_position_size,
@@ -149,7 +162,8 @@ def save_state(positions, candidates, daily_trades, daily_stopped,
         "bar_counts": {sym: accumulator.bar_count(sym) for sym in all_syms},
         "events": events_log[-50:],
     }
-    with open("live_state.json", "w") as f:
+    state_path = os.path.join(_parent_dir, "live_state.json")
+    with open(state_path, "w") as f:
         json.dump(state, f, indent=2)
 
 
@@ -449,7 +463,16 @@ def force_sell_position(symbol: str, qty: int) -> bool:
 def check_order_filled(order_id) -> bool:
     try:
         order = trading_client.get_order_by_id(order_id)
-        return order.status == QueryOrderStatus.FILLED
+        return order.status == OrderStatus.FILLED
+    except Exception as e:
+        log(f"check_order_filled error for {order_id}: {e}")
+        return False
+
+
+def check_order_canceled(order_id) -> bool:
+    try:
+        order = trading_client.get_order_by_id(order_id)
+        return order.status in (OrderStatus.CANCELED, OrderStatus.EXPIRED, OrderStatus.REJECTED)
     except Exception:
         return False
 
@@ -605,10 +628,10 @@ def run_live():
 
     while True:
         now = dt.datetime.now(tz=ZoneInfo("America/New_York"))
-        if now.hour >= 9 and now.minute >= 30:
+        if (now.hour == 9 and now.minute >= 30) or (10 <= now.hour < 16):
             break
-        if now.hour >= 10:
-            break
+        log("Waiting for market open (9:30 AM EST)...")
+        time.sleep(30)
         log("Waiting for market open (9:30 AM EST)...")
         time.sleep(30)
 
@@ -649,6 +672,10 @@ def run_live():
                 positions.append(pos)
                 place_protective_stop(pos)
                 events_log.append(f"{now_est.strftime('%H:%M:%S')} BUY FILLED {symbol} @ ${pos.entry_price:.4f}")
+                del pending_buys[symbol]
+            elif check_order_canceled(order_id):
+                log(f"BUY CANCELED: {symbol} order {order_id}")
+                events_log.append(f"{now_est.strftime('%H:%M:%S')} BUY CANCELED {symbol}")
                 del pending_buys[symbol]
 
         # ── Check protective order fills ──

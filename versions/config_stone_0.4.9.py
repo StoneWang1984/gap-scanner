@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).parent / ".env")
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 # Alpaca API
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
