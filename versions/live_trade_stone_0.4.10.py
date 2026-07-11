@@ -198,6 +198,59 @@ def save_state(positions, candidates, daily_trades, daily_stopped,
         json.dump(state, f, indent=2)
 
 
+def save_chart_data(accumulator, positions, chart_events, date_str):
+    """Persist bar data and trade events for dashboard charting."""
+    syms_data = {}
+    all_syms = set(accumulator._5min_cache.keys()) | set(accumulator._minute_bars.keys())
+    for sym in all_syms:
+        bars_5m = accumulator.get_5min_bars(sym)
+        bars_1m = list(accumulator._minute_bars.get(sym, []))
+
+        def _fmt_ts(ts):
+            if hasattr(ts, "strftime"):
+                return ts.strftime("%H:%M")
+            return str(ts)[-8:-3] if len(str(ts)) > 5 else str(ts)
+
+        sym_entry = {
+            "bars_5m": [
+                {"ts": _fmt_ts(b["timestamp"]),
+                 "o": round(b["open"], 4), "h": round(b["high"], 4),
+                 "l": round(b["low"], 4), "c": round(b["close"], 4),
+                 "v": b["volume"]}
+                for b in bars_5m
+            ],
+            "bars_1m": [
+                {"ts": _fmt_ts(b["timestamp"]),
+                 "o": round(b["open"], 4), "h": round(b["high"], 4),
+                 "l": round(b["low"], 4), "c": round(b["close"], 4),
+                 "v": b["volume"]}
+                for b in bars_1m
+            ],
+            "events": chart_events.get(sym, []),
+        }
+        # Add reference lines from current positions
+        for pos in positions:
+            if pos.symbol == sym and pos.remaining_shares > 0:
+                sym_entry["entry_price"] = round(pos.entry_price, 4)
+                sym_entry["stop_price"] = round(pos.stop_price, 4)
+                sym_entry["targets"] = {
+                    "75%": round(pos.target_75, 4),
+                    "112.5%": round(pos.target_1125, 4),
+                    "150%": round(pos.target_150, 4),
+                }
+                if pos.trade_type == "reentry" and pos.reentry_target > 0:
+                    sym_entry["reentry_target"] = round(pos.reentry_target, 4)
+                break
+        syms_data[sym] = sym_entry
+
+    chart_path = os.path.join(_ver_dir, "chart_data.json")
+    try:
+        with open(chart_path, "w") as f:
+            json.dump({"date": date_str, "symbols": syms_data}, f, indent=2)
+    except Exception as e:
+        log(f"save_chart_data error: {e}")
+
+
 # ── 5-min bar accumulator ──────────────────────────────────────────
 class BarAccumulator:
     def __init__(self):
@@ -824,7 +877,18 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
     poll_count = 0
     events_log = []
     pending_buys = {}
+    chart_events = {}  # {symbol: [{ts, type, price, label}, ...]}
     trades_detail = []
+
+    def add_chart_event(symbol, etype, price, label):
+        if symbol not in chart_events:
+            chart_events[symbol] = []
+        chart_events[symbol].append({
+            "ts": dt.datetime.now(tz=ZoneInfo("America/New_York")).strftime("%H:%M"),
+            "type": etype,  # "buy" or "sell"
+            "price": round(price, 4),
+            "label": label,
+        })
 
     # Wait for exact market open (9:30 AM EST) if not yet
     while True:
@@ -873,6 +937,8 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
             "exit_reason": exit_reason,
             "pnl": round(pnl, 2),
         })
+        add_chart_event(pos.symbol, "sell", exit_price,
+                        f"{exit_reason.replace('_', ' ').upper()} {orig}sh")
 
     while True:
         now_est = dt.datetime.now(tz=ZoneInfo("America/New_York"))
@@ -888,6 +954,8 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 positions.append(pos)
                 place_protective_stop(pos)
                 events_log.append(f"{now_est.strftime('%H:%M:%S')} BUY FILLED {symbol} @ ${pos.entry_price:.4f}")
+                add_chart_event(symbol, "buy", pos.entry_price,
+                                f"BUY {pos.shares}sh" if pos.trade_type != "reentry" else f"RE-ENTRY BUY {pos.shares}sh")
                 del pending_buys[symbol]
             elif check_order_canceled(order_id):
                 log(f"BUY CANCELED: {symbol} order {order_id}")
@@ -989,6 +1057,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
             positions = [p for p in positions if p.remaining_shares > 0]
             save_state(positions, candidates, daily_trades, daily_stopped,
                        entry_checked, day_highs, accumulator, events_log)
+            save_chart_data(accumulator, positions, chart_events, str(now_est.date()))
             time.sleep(30)
             continue
 
@@ -1035,6 +1104,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                         sell_price = round(pos.target_150 * (1 - TARGET_LIMIT_BUFFER), 2)
                         log(f"150% TARGET: {pos.symbol} selling {total_sell} @ ${sell_price:.4f}")
                         events_log.append(f"{now_est.strftime('%H:%M:%S')} 150% TARGET {pos.symbol} sell {total_sell} @ ${sell_price:.4f}")
+                        add_chart_event(pos.symbol, "sell", sell_price, f"TARGET_150 {total_sell}sh")
                         if pos.protective_order_id:
                             cancel_order(pos.protective_order_id)
                             pos.protective_order_id = None
@@ -1054,6 +1124,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                         sell_price = round(pos.target_1125 * (1 - TARGET_LIMIT_BUFFER), 2)
                         log(f"112.5% TARGET: {pos.symbol} selling {total_sell} @ ${sell_price:.4f}")
                         events_log.append(f"{now_est.strftime('%H:%M:%S')} 112.5% TARGET {pos.symbol} sell {total_sell} @ ${sell_price:.4f}")
+                        add_chart_event(pos.symbol, "sell", sell_price, f"TARGET_1125 {total_sell}sh")
                         if pos.protective_order_id:
                             cancel_order(pos.protective_order_id)
                             pos.protective_order_id = None
@@ -1070,6 +1141,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                         sell_price = round(pos.target_75 * (1 - TARGET_LIMIT_BUFFER), 2)
                         log(f"75% TARGET: {pos.symbol} selling {n75} @ ${sell_price:.4f}")
                         events_log.append(f"{now_est.strftime('%H:%M:%S')} 75% TARGET {pos.symbol} sell {n75} @ ${sell_price:.4f}")
+                        add_chart_event(pos.symbol, "sell", sell_price, f"TARGET_75 {n75}sh")
                         if pos.protective_order_id:
                             cancel_order(pos.protective_order_id)
                             pos.protective_order_id = None
@@ -1135,6 +1207,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                         sell_price = round(pos.reentry_target * (1 - TARGET_LIMIT_BUFFER), 2)
                         log(f"RE-ENTRY TIER-1: {pos.symbol} selling {n} @ ${sell_price:.4f}")
                         events_log.append(f"{now_est.strftime('%H:%M:%S')} RE-ENTRY TIER-1 {pos.symbol} sell {n} @ ${sell_price:.4f}")
+                        add_chart_event(pos.symbol, "sell", sell_price, f"TIER-1 {n}sh")
                         if pos.protective_order_id:
                             cancel_order(pos.protective_order_id)
                             pos.protective_order_id = None
@@ -1297,6 +1370,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
         # ── Save state ──
         save_state(positions, candidates, daily_trades, daily_stopped,
                    entry_checked, day_highs, accumulator, events_log)
+        save_chart_data(accumulator, positions, chart_events, str(now_est.date()))
 
         # ── Status log ──
         if poll_count % 4 == 0 and positions:
@@ -1334,6 +1408,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
     events_log.append(f"EOD equity=${equity:,.2f} trades={daily_trades}")
     save_state(positions, candidates, daily_trades, daily_stopped,
                entry_checked, day_highs, accumulator, events_log)
+    save_chart_data(accumulator, positions, chart_events, str(dt.datetime.now(tz=ZoneInfo("America/New_York")).date()))
 
     return {
         "daily_trades": daily_trades,
