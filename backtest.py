@@ -1,5 +1,8 @@
 """Backtesting engine — Stone 0.4: three-tier first trade + re-entry + equity compounding."""
 
+import json
+import os
+
 import pandas as pd
 from alpaca.data.historical.stock import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
@@ -146,15 +149,15 @@ def find_entry_with_confirmation(bars_5m, open_price):
         return pullback_price, pullback_idx, True
     if pullback_idx + 1 >= len(bars_5m):
         return 0, -1, False
-    next_bar = bars_5m.iloc[pullback_idx + 1]
-    if next_bar["low"] >= pullback_price:
-        return pullback_price, pullback_idx, True
-    for i in range(pullback_idx + 2, len(bars_5m)):
-        bar = bars_5m.iloc[i]
-        prev_bar = bars_5m.iloc[i - 1]
-        if bar["low"] < open_price and prev_bar["low"] >= bar["low"]:
-            if i + 1 < len(bars_5m) and bars_5m.iloc[i + 1]["low"] >= bar["low"]:
-                return bar["low"], i, True
+    # Track the running minimum: keep updating pullback while price goes lower,
+    # return when a subsequent bar's low is higher (confirmation of bottom)
+    for i in range(pullback_idx + 1, len(bars_5m)):
+        bar_low = bars_5m.iloc[i]["low"]
+        if bar_low < open_price and bar_low < pullback_price:
+            pullback_idx = i
+            pullback_price = bar_low
+        elif bar_low >= pullback_price:
+            return pullback_price, pullback_idx, True
     return pullback_price, pullback_idx, True
 
 
@@ -169,13 +172,62 @@ def _bars_to_list(bars_df, start_idx=0):
             ts = idx[1]
         ts = pd.Timestamp(ts)
         if ts.tzinfo is None:
-            ts = ts.tz_localize('UTC').tz_convert('America/New_York')
+            ts = ts.tz_localize('UTC')
+        ts = ts.tz_convert('America/New_York')
         result.append({
             "high": bar["high"], "low": bar["low"], "close": bar["close"],
             "open": bar["open"], "volume": int(bar["volume"]) if "volume" in bar.index else 0,
             "timestamp": ts,
         })
     return result
+
+
+def _bars_to_chart(bars_df):
+    """Convert DataFrame to chart_data.json bar format."""
+    result = []
+    for i in range(len(bars_df)):
+        bar = bars_df.iloc[i]
+        idx = bars_df.index[i]
+        ts = idx
+        if isinstance(idx, tuple):
+            ts = idx[1]
+        ts = pd.Timestamp(ts)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize('UTC')
+        ts = ts.tz_convert('America/New_York')
+        result.append({
+            "ts": ts.strftime("%H:%M"),
+            "o": round(float(bar["open"]), 4), "h": round(float(bar["high"]), 4),
+            "l": round(float(bar["low"]), 4), "c": round(float(bar["close"]), 4),
+            "v": int(bar["volume"]) if "volume" in bar.index else 0,
+        })
+    return result
+
+
+def _find_target_bar(bars_list, start_idx, target_price):
+    """Find first bar after start_idx where high >= target_price. Returns bar index or None."""
+    for i in range(start_idx, len(bars_list)):
+        if bars_list[i]["high"] >= target_price:
+            return i
+    return None
+
+
+def _bar_ts_str(bars_list, idx):
+    """Get HH:MM timestamp string from bars_list at index."""
+    if 0 <= idx < len(bars_list):
+        return bars_list[idx]["timestamp"].strftime("%H:%M")
+    return "00:00"
+
+
+def save_backtest_charts(chart_entries, filepath="versions/chart_data.json"):
+    """Save collected chart data to JSON file for dashboard."""
+    date_parts = sorted(set(v["date"] for v in chart_entries.values()))
+    date_range = f"{date_parts[0]} to {date_parts[-1]}" if len(date_parts) > 1 else date_parts[0]
+    output = {"date": date_range, "symbols": chart_entries}
+    os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
+    with open(filepath, "w") as f:
+        json.dump(output, f, indent=2)
+    print(f"Chart data saved to {filepath} ({len(chart_entries)} symbols)")
 
 
 def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult]:
@@ -192,8 +244,12 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
     print(f"Capital: ${config.INITIAL_CAPITAL:,.0f} | Deploy: {config.EQUITY_POSITION_RATIO:.0%} | "
           f"Per-stock cap: ${config.MAX_POSITION_SIZE:,.0f} | Max daily trades: {config.MAX_DAILY_TRADES}")
     print(f"First trade: 1/4@75% + 1/3@112.5% + 1/3@150% | Trail: {config.TRAILING_STOP_PCT_75:.0%}/{config.TRAILING_STOP_PCT_1125:.0%}/{config.TRAILING_STOP_PCT_150:.0%}")
-    print(f"Re-entry: {config.REENTRY_STOP_PCT:.0%} stop | 1/3@150% target | {config.REENTRY_TRAILING_PCT:.0%} trail | "
-          f"Pullback stop: {config.PULLBACK_STOP_THRESHOLD:.0%}")
+    reentry_ret1 = getattr(config, "REENTRY_PROFIT_RETRACEMENT_1", 0.75)
+    reentry_trail = getattr(config, "REENTRY_TRAILING_PCT_2", 0.03)
+    reentry_max_bars = getattr(config, "REENTRY_MAX_BARS_BEFORE_TARGET", 0)
+    tl_str = f"{reentry_max_bars} bars" if reentry_max_bars > 0 else "none"
+    print(f"Re-entry: {reentry_ret1:.0%} retracement/50% + {reentry_trail:.0%} trail | "
+          f"Time limit: {tl_str} | Pullback stop: {config.PULLBACK_STOP_THRESHOLD:.0%}")
 
     print("\nLoading tradable symbols...")
     symbols = get_tradable_symbols()
@@ -206,6 +262,7 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
 
     all_trades: list[TradeResult] = []
     equity = config.INITIAL_CAPITAL
+    chart_entries = {}  # chart data for dashboard
 
     for date in trading_days:
         date_key = date.date()
@@ -242,6 +299,11 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
                 print(f"  {symbol}: no confirmed entry, skipping")
                 continue
 
+            # 0.4.11: Skip if entry price >= open price
+            if pullback >= open_price:
+                print(f"  {symbol}: entry ${pullback:.4f} >= open ${open_price:.4f}, skipping")
+                continue
+
             # Entry time check
             idx_val = bars_5m.index[entry_bar_idx]
             if isinstance(idx_val, tuple):
@@ -249,7 +311,8 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
             else:
                 entry_ts = pd.Timestamp(idx_val)
             if entry_ts.tzinfo is None:
-                entry_ts = entry_ts.tz_localize('UTC').tz_convert('America/New_York')
+                entry_ts = entry_ts.tz_localize('UTC')
+            entry_ts = entry_ts.tz_convert('America/New_York')
             cutoff = pd.Timestamp(f"{date_key} 10:00", tz="America/New_York")
             if entry_ts > cutoff:
                 print(f"  {symbol}: entry after 10:00, skipping")
@@ -282,11 +345,13 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
             remaining_list = all_bars[entry_bar_idx + 1:]
             force_close_price = remaining_list[-1]["close"] if remaining_list else None
 
+            time_limit = getattr(config, "FIRST_TRADE_TIME_LIMIT_BARS", 0)
             result = evaluate_trade_stone(
                 plan, remaining_list, force_close_price,
                 trail_pct_75=config.TRAILING_STOP_PCT_75,
                 trail_pct_1125=config.TRAILING_STOP_PCT_1125,
                 trail_pct_150=config.TRAILING_STOP_PCT_150,
+                time_limit_bars=time_limit,
             )
             result.date = str(date_key)
             result.open_price = open_price
@@ -309,6 +374,50 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
             all_trades.append(result)
             equity += result.pnl
             daily_trades += 1
+
+            # ── Collect chart data for first trade ──
+            sym_key = f"{symbol} ({date_key})"
+            chart_bars = _bars_to_chart(bars_5m)
+            events = []
+            # Buy event
+            events.append({"ts": _bar_ts_str(all_bars, entry_bar_idx), "type": "buy",
+                           "price": round(pullback, 4), "label": f"BUY {shares}sh"})
+            # Target sells — find actual bar times
+            next_search = entry_bar_idx + 1
+            if result.partial_sell_shares > 0:
+                t75_idx = _find_target_bar(all_bars, next_search, target_75)
+                ts_75 = _bar_ts_str(all_bars, t75_idx) if t75_idx is not None else _bar_ts_str(all_bars, entry_bar_idx + 1)
+                events.append({"ts": ts_75, "type": "sell", "price": round(result.partial_sell_price, 4),
+                               "label": f"TARGET_75 {result.partial_sell_shares}sh"})
+                next_search = (t75_idx or entry_bar_idx) + 1
+            if result.partial2_sell_shares > 0:
+                t1125_idx = _find_target_bar(all_bars, next_search, target_1125)
+                ts_1125 = _bar_ts_str(all_bars, t1125_idx) if t1125_idx is not None else _bar_ts_str(all_bars, next_search)
+                events.append({"ts": ts_1125, "type": "sell", "price": round(result.partial2_sell_price, 4),
+                               "label": f"TARGET_1125 {result.partial2_sell_shares}sh"})
+                next_search = (t1125_idx or next_search) + 1
+            if result.partial3_sell_shares > 0:
+                t150_idx = _find_target_bar(all_bars, next_search, target_150)
+                ts_150 = _bar_ts_str(all_bars, t150_idx) if t150_idx is not None else _bar_ts_str(all_bars, next_search)
+                events.append({"ts": ts_150, "type": "sell", "price": round(result.partial3_sell_price, 4),
+                               "label": f"TARGET_150 {result.partial3_sell_shares}sh"})
+            # Exit event
+            exit_bar_in_all = entry_bar_idx + 1 + result.exit_bar_idx
+            if result.exit_reason not in ("target_75", "target_1125", "target_150", "target_150_full"):
+                exit_label = result.exit_reason.upper().replace("_", " ")
+                remaining_shares = shares - result.partial_sell_shares - result.partial2_sell_shares - result.partial3_sell_shares
+                if remaining_shares > 0:
+                    events.append({"ts": _bar_ts_str(all_bars, exit_bar_in_all), "type": "sell",
+                                   "price": round(result.exit_price, 4), "label": f"{exit_label} {remaining_shares}sh"})
+
+            chart_entries[sym_key] = {
+                "date": str(date_key), "bars_5m": chart_bars, "bars_1m": [],
+                "events": events,
+                "entry_price": round(pullback, 4),
+                "stop_price": round(plan.stop_price, 4),
+                "targets": {"75%": round(target_75, 4), "112.5%": round(target_1125, 4), "150%": round(target_150, 4)},
+                "pnl": round(result.pnl, 2), "open_price": round(open_price, 4),
+            }
 
             # ========== RE-ENTRY TRADES ==========
             # Find bars after first trade's exit
@@ -336,12 +445,26 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
                     daily_stopped = True
                     break
 
-                # Re-entry trade
-                reentry_stop = round(reentry_price * (1 - config.REENTRY_STOP_PCT), 2)
-                reentry_target = round(reentry_price + config.REENTRY_PROFIT_RETRACEMENT * (prev_high - reentry_price), 2)
+                # Re-entry trade — 0.4.13: ATR stop, retracement target + trailing
+                # ATR-based stop
+                reentry_bars_for_atr = []
+                for j in range(min(reentry_idx + 1, len(bars_after_exit))):
+                    b = bars_after_exit[j]
+                    reentry_bars_for_atr.append({"high": b["high"], "low": b["low"], "close": b["close"]})
+                reentry_atr = calc_atr(reentry_bars_for_atr, period=14)
+                if reentry_atr > 0:
+                    reentry_stop = round(reentry_price - getattr(config, "REENTRY_STOP_ATR_MULT", 1.5) * reentry_atr, 2)
+                    fallback = round(reentry_price * (1 - getattr(config, "REENTRY_STOP_PCT_FALLBACK", 0.04)), 2)
+                    reentry_stop = max(reentry_stop, fallback)
+                else:
+                    reentry_stop = round(reentry_price * (1 - config.REENTRY_STOP_PCT), 2)
+
+                reentry_retracement_1 = getattr(config, "REENTRY_PROFIT_RETRACEMENT_1", 0.75)
+                reentry_target_1 = round(reentry_price + reentry_retracement_1 * (prev_high - reentry_price), 2)
 
                 pos_size_re = min(calc_position_size(equity), config.MAX_POSITION_SIZE)
-                reentry_shares = int(pos_size_re / reentry_price)
+                reentry_pos_ratio = getattr(config, "REENTRY_POSITION_RATIO", 0.5)
+                reentry_shares = int((pos_size_re * reentry_pos_ratio) / reentry_price)
                 if reentry_shares <= 0:
                     break
 
@@ -357,22 +480,58 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
                     open_price=open_price,
                     bars_after_entry=reentry_remaining,
                     force_close_price=reentry_force_close,
+                    stop_price=reentry_stop,
+                    reentry_profit_retracement_1=reentry_retracement_1,
+                    reentry_trailing_pct_2=getattr(config, "REENTRY_TRAILING_PCT_2", 0.03),
+                    reentry_sell_ratio_1=getattr(config, "REENTRY_SELL_RATIO_1", 0.5),
                 )
                 reentry_result.date = str(date_key)
 
                 type_tag = f"[Re{reentry_round}]"
                 re_extra = ""
                 if reentry_result.partial_sell_shares > 0:
-                    re_extra += f", 1/3@${reentry_result.partial_sell_price:.4f}"
+                    re_extra += f", 50%@${reentry_result.partial_sell_price:.4f}"
                 if reentry_result.trailing_high > reentry_result.entry_price:
                     re_extra += f", high=${reentry_result.trailing_high:.4f}"
                 print(f"  {symbol} {type_tag} entry=${reentry_price:.4f} exit=${reentry_result.exit_price:.4f} "
                       f"({reentry_result.exit_reason}), P&L=${reentry_result.pnl:,.2f} ({reentry_result.pnl_pct:.2%})"
-                      f", prev_high=${prev_high:.4f}, target=${reentry_target:.4f}{re_extra}")
+                      f", stop=${reentry_stop:.4f}, target=${reentry_target_1:.4f}{re_extra}")
 
                 all_trades.append(reentry_result)
                 equity += reentry_result.pnl
                 daily_trades += 1
+
+                # ── Collect chart data for re-entry trade ──
+                re_sym_key = f"{symbol} RE ({date_key})"
+                # Re-entry bars: offset into all_bars
+                reentry_start_in_all = exit_bar_in_all + 1 + reentry_idx
+                re_events = []
+                re_events.append({"ts": _bar_ts_str(all_bars, reentry_start_in_all), "type": "buy",
+                                  "price": round(reentry_price, 4), "label": f"RE-ENTRY BUY {reentry_shares}sh"})
+                # Tier-1 sell (retracement target)
+                if reentry_result.partial_sell_shares > 0:
+                    t1_idx = _find_target_bar(all_bars, reentry_start_in_all + 1, reentry_target_1)
+                    ts_t1 = _bar_ts_str(all_bars, t1_idx) if t1_idx is not None else _bar_ts_str(all_bars, reentry_start_in_all + 1)
+                    re_events.append({"ts": ts_t1, "type": "sell", "price": round(reentry_result.partial_sell_price, 4),
+                                      "label": f"TIER-1 {reentry_result.partial_sell_shares}sh"})
+                # Exit event (trailing, stop, force close)
+                reentry_exit_in_all = reentry_start_in_all + 1 + reentry_result.exit_bar_idx
+                if reentry_result.exit_reason not in ("reentry_tier1",):
+                    re_exit_label = reentry_result.exit_reason.upper().replace("_", " ")
+                    re_remaining = reentry_shares - reentry_result.partial_sell_shares
+                    if re_remaining > 0:
+                        re_events.append({"ts": _bar_ts_str(all_bars, reentry_exit_in_all), "type": "sell",
+                                          "price": round(reentry_result.exit_price, 4), "label": f"{re_exit_label} {re_remaining}sh"})
+
+                chart_entries[re_sym_key] = {
+                    "date": str(date_key), "bars_5m": chart_bars, "bars_1m": [],
+                    "events": re_events,
+                    "entry_price": round(reentry_price, 4),
+                    "stop_price": round(reentry_stop, 4),
+                    "targets": {"75% retracement": round(reentry_target_1, 4)},
+                    "pnl": round(reentry_result.pnl, 2), "open_price": round(open_price, 4),
+                }
+
                 reentry_round += 1
 
                 # Prepare for next re-entry
@@ -385,4 +544,8 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
     print(f"\n{'='*60}")
     print(f"[Stone 0.4] Backtest complete. Final equity: ${equity:,.2f}")
     print(f"Total trades: {len(all_trades)}")
+
+    if chart_entries:
+        save_backtest_charts(chart_entries)
+
     return all_trades

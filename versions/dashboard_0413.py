@@ -1,4 +1,4 @@
-"""Stone 0.4.10 实盘监控 Dashboard — with real-time price charts"""
+"""Stone 0.4.13 实盘监控 Dashboard — with real-time price charts"""
 
 import json
 import time
@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 VER_DIR = Path(__file__).parent
-LOG_FILE = VER_DIR / "live_0410.log"
+LOG_FILE = VER_DIR / "live_0413.log"
 STATE_FILE = Path(__file__).parent.parent / "live_state.json"
 REPORT_DIR = VER_DIR / "daily_reports"
 CHART_FILE = VER_DIR / "chart_data.json"

@@ -103,8 +103,13 @@ def evaluate_trade_stone(
     trail_pct_75: float = None,
     trail_pct_1125: float = None,
     trail_pct_150: float = None,
+    time_limit_bars: int = 0,
 ) -> TradeResult:
-    """Stone 0.4 first trade: sell 1/4 at 75%, 1/3 at 112.5%, 1/3 at 150%, then trail."""
+    """Stone 0.4 first trade: sell 1/4 at 75%, 1/3 at 112.5%, all remaining at 150%.
+
+    time_limit_bars: if > 0 and no target hit within this many bars,
+                     sell all when price >= entry price.
+    """
     if trail_pct_75 is None:
         trail_pct_75 = config.TRAILING_STOP_PCT_75
     if trail_pct_1125 is None:
@@ -122,6 +127,7 @@ def evaluate_trade_stone(
     partial_sell_shares_150 = 0
     highest = plan.pullback
     remaining_shares = plan.shares
+    time_limit_active = False
 
     def _make_result(reason, exit_price, bi):
         pnl_75 = (partial_sell_price_75 - plan.pullback) * partial_sell_shares_75 if sold_partial_75 else 0
@@ -154,6 +160,13 @@ def evaluate_trade_stone(
         if bl <= plan.stop_price:
             return _make_result("stop_loss", plan.stop_price, bi)
 
+        # Time limit: if no target hit within time_limit_bars, sell at breakeven or better
+        if time_limit_bars > 0 and not reached_75 and bi >= time_limit_bars:
+            time_limit_active = True
+        if time_limit_active and bh >= plan.pullback:
+            exit_price = max(bh, plan.pullback)
+            return _make_result("time_limit_exit", exit_price, bi)
+
         if not reached_150 and bh >= plan.target_150:
             reached_150 = reached_1125 = reached_75 = True
             if not sold_partial_150:
@@ -164,13 +177,11 @@ def evaluate_trade_stone(
             if not sold_partial_1125:
                 sold_partial_1125 = True
                 partial_sell_price_1125 = plan.target_150
-                partial_sell_shares_1125 = remaining_shares // 3
-                remaining_shares -= partial_sell_shares_1125
+                partial_sell_shares_1125 = 0
             if not sold_partial_75:
                 sold_partial_75 = True
                 partial_sell_price_75 = plan.target_150
-                partial_sell_shares_75 = plan.shares // 4
-                remaining_shares -= partial_sell_shares_75
+                partial_sell_shares_75 = 0
 
         if not reached_1125 and bh >= plan.target_1125:
             reached_1125 = reached_75 = True
@@ -278,13 +289,31 @@ def evaluate_reentry_trade(
     open_price: float,
     bars_after_entry: list[dict],
     force_close_price: float | None = None,
+    stop_price: float | None = None,
+    reentry_profit_retracement_1: float | None = None,
+    reentry_trailing_pct_2: float | None = None,
+    reentry_sell_ratio_1: float | None = None,
 ) -> TradeResult:
-    """Re-entry trade: 5% stop, sell 1/3 at 150% target, then 5% trailing stop."""
-    stop_price = round(entry_price * (1 - config.REENTRY_STOP_PCT), 2)
-    target = round(entry_price + config.REENTRY_PROFIT_RETRACEMENT * (prev_high - entry_price), 2)
+    """Re-entry trade: sell 50% at retracement target, then 3% trailing stop.
+
+    reentry_profit_retracement_1: tier-1 retracement (default config.REENTRY_PROFIT_RETRACEMENT_1 or 0.75)
+    reentry_trailing_pct_2: trailing stop % after tier-1 (default config.REENTRY_TRAILING_PCT_2 or 0.03)
+    reentry_sell_ratio_1: fraction to sell at tier-1 (default config.REENTRY_SELL_RATIO_1 or 0.5)
+    """
+    if reentry_profit_retracement_1 is None:
+        reentry_profit_retracement_1 = getattr(config, "REENTRY_PROFIT_RETRACEMENT_1", 0.75)
+    if reentry_trailing_pct_2 is None:
+        reentry_trailing_pct_2 = getattr(config, "REENTRY_TRAILING_PCT_2", 0.03)
+    if reentry_sell_ratio_1 is None:
+        reentry_sell_ratio_1 = getattr(config, "REENTRY_SELL_RATIO_1", 0.5)
+
+    if stop_price is None:
+        stop_price = round(entry_price * (1 - config.REENTRY_STOP_PCT), 2)
+
+    target_1 = round(entry_price + reentry_profit_retracement_1 * (prev_high - entry_price), 2)
 
     highest = entry_price
-    reached_target = False
+    reached_tier1 = False
     sold_partial = False
     partial_sell_price = 0.0
     partial_sell_shares = 0
@@ -299,7 +328,7 @@ def evaluate_reentry_trade(
             symbol=symbol, date=str(bar.get("timestamp", pd.Timestamp.now()).date()) if bi >= 0 else "",
             entry_price=entry_price, exit_price=exit_price, shares=shares,
             pnl=round(pnl, 2), pnl_pct=round(pnl_pct, 4), exit_reason=reason,
-            open_price=open_price, sell_target=target, stop_price=stop_price,
+            open_price=open_price, sell_target=target_1, stop_price=stop_price,
             partial_sell_price=partial_sell_price, partial_sell_shares=partial_sell_shares,
             trailing_high=highest, trailing_exit_price=exit_price,
             exit_bar_idx=bi, position_size=entry_price * shares,
@@ -317,19 +346,19 @@ def evaluate_reentry_trade(
         if bl <= stop_price:
             return _make_result("reentry_stop", stop_price, bi)
 
-        # Target: sell 1/3
-        if not reached_target and bh >= target:
-            reached_target = True
+        # Tier-1: sell reentry_sell_ratio_1 at retracement target
+        if not reached_tier1 and bh >= target_1:
+            reached_tier1 = True
             if not sold_partial:
                 sold_partial = True
-                partial_sell_price = target
-                partial_sell_shares = remaining_shares // 3
+                partial_sell_price = target_1
+                partial_sell_shares = int(remaining_shares * reentry_sell_ratio_1)
                 remaining_shares -= partial_sell_shares
 
-        # Trailing stop after target
-        if reached_target and remaining_shares > 0:
-            tsp = round(highest * (1 - config.REENTRY_TRAILING_PCT), 2)
-            tsp = max(tsp, entry_price)  # protect breakeven
+        # Trailing stop after tier-1
+        if reached_tier1 and remaining_shares > 0:
+            tsp = round(highest * (1 - reentry_trailing_pct_2), 2)
+            tsp = max(tsp, entry_price)
             if bl <= tsp:
                 return _make_result("reentry_trailing", tsp, bi)
 
@@ -338,6 +367,6 @@ def evaluate_reentry_trade(
         exit_price = force_close_price
     else:
         exit_price = bars_after_entry[-1]["close"] if bars_after_entry else entry_price
-    if not reached_target:
-        exit_price = entry_price  # breakeven if target not reached
+    if not reached_tier1:
+        exit_price = entry_price
     return _make_result("reentry_force_close", exit_price, len(bars_after_entry) - 1)

@@ -39,12 +39,20 @@ TRAILING_STOP_PCT_75 = 0.03
 TRAILING_STOP_PCT_1125 = 0.04
 TRAILING_STOP_PCT_150 = 0.05
 
-# Re-entry trade — Stone 0.4
-REENTRY_STOP_PCT = 0.05            # 5% stop loss for re-entry
-REENTRY_PROFIT_RETRACEMENT = 1.50  # 150% of (prev_high - entry) as target
-REENTRY_SELL_RATIO = 1/3           # sell 1/3 at target
-REENTRY_TRAILING_PCT = 0.05        # 5% trailing stop after target sell
-PULLBACK_STOP_THRESHOLD = 0.15     # if pullback from peak > 15%, stop day
+# Time limit exit — if no target hit within N 5-min bars, sell all when price >= entry
+FIRST_TRADE_TIME_LIMIT_BARS = 8  # 8 bars × 5 min = 40 minutes (0 = disabled)
+
+# Re-entry trade — Stone 0.4.13: retracement + trailing, no time limit
+REENTRY_STOP_PCT = 0.05                 # legacy fallback
+REENTRY_STOP_ATR_MULT = 1.5             # ATR-based stop multiplier
+REENTRY_STOP_PCT_FALLBACK = 0.04        # fallback when ATR unavailable
+REENTRY_PROFIT_RETRACEMENT_1 = 0.75     # tier-1: sell 50% at 75% retracement
+REENTRY_SELL_RATIO_1 = 0.5             # sell 50% at tier-1
+REENTRY_TRAILING_PCT_2 = 0.03           # 3% trailing after tier-1
+REENTRY_POSITION_RATIO = 0.5            # half position vs first trade
+REENTRY_CUTOFF_TIME = "12:30"
+REENTRY_MAX_BARS_BEFORE_TARGET = 0      # no time limit (0.4.13: removed)
+PULLBACK_STOP_THRESHOLD = 0.15          # if pullback from peak > 15%, stop day
 
 # Position management
 MAX_POSITIONS_PER_DAY = 3
