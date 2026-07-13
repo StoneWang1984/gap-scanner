@@ -1,7 +1,8 @@
-"""Backtesting engine — Stone 0.4: three-tier first trade + re-entry + equity compounding."""
+"""Backtesting engine — Stone 0.4.14: three-tier + re-entry + safety features + equity compounding."""
 
 import json
 import os
+import re
 
 import pandas as pd
 from alpaca.data.historical.stock import StockHistoricalDataClient
@@ -17,6 +18,30 @@ from strategy import (
     find_reentry_point,
     TradeResult, TradePlan,
 )
+
+
+# ── Leveraged ETF filter ─────────────────────────────────────────────
+_LEV_PATTERN = re.compile(r'(2X|3X|BULL|BEAR)$', re.IGNORECASE)
+_LEV_SUFFIXES = ("U", "L", "S", "BULL", "BEAR")
+_LEV_PREFIXES = (
+    "TQQQ", "SQQQ", "UPRO", "SPXU", "TNA", "TZA",
+    "MSTU", "MSTZ", "CONL", "NAIL", "WEBL", "FNGU",
+    "FNGD", "SOXL", "SOXS", "TECL", "TECS", "UDOW",
+    "SDOW", "UMDD", "SMDD", "TQQ", "SQQ", "YINN",
+    "YANG", "CURE", "LABD", "LABU", "DRN", "DRV",
+    "DGP", "DGZ", "BOIL", "KOLD", "NUGT", "DUST",
+    "JNUG", "JDST", "GLL", "UGL", "AXTU", "RDWU",
+)
+
+
+def is_leveraged_etf(symbol: str) -> bool:
+    if _LEV_PATTERN.search(symbol):
+        return True
+    if len(symbol) > 3 and symbol[-1] in _LEV_SUFFIXES:
+        return True
+    if any(symbol.startswith(p) for p in _LEV_PREFIXES):
+        return True
+    return False
 
 
 def get_trading_days(client: StockHistoricalDataClient, end_date: pd.Timestamp, n_days: int) -> list[pd.Timestamp]:
@@ -240,7 +265,7 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
         print("No trading days found.")
         return []
 
-    print(f"[Stone 0.4] Backtesting {len(trading_days)} trading days: {trading_days[0].date()} to {trading_days[-1].date()}")
+    print(f"[Stone 0.4.14] Backtesting {len(trading_days)} trading days: {trading_days[0].date()} to {trading_days[-1].date()}")
     print(f"Capital: ${config.INITIAL_CAPITAL:,.0f} | Deploy: {config.EQUITY_POSITION_RATIO:.0%} | "
           f"Per-stock cap: ${config.MAX_POSITION_SIZE:,.0f} | Max daily trades: {config.MAX_DAILY_TRADES}")
     print(f"First trade: 1/4@75% + 1/3@112.5% + 1/3@150% | Trail: {config.TRAILING_STOP_PCT_75:.0%}/{config.TRAILING_STOP_PCT_1125:.0%}/{config.TRAILING_STOP_PCT_150:.0%}")
@@ -254,6 +279,10 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
     print("\nLoading tradable symbols...")
     symbols = get_tradable_symbols()
     print(f"Found {len(symbols)} tradable symbols")
+
+    # Filter leveraged ETFs
+    symbols = [s for s in symbols if not is_leveraged_etf(s)]
+    print(f"After leveraged ETF filter: {len(symbols)} symbols")
 
     print("\nBulk scanning for gaps...")
     gap_data = bulk_scan_gaps(client, trading_days, symbols)
@@ -279,9 +308,17 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
 
         daily_trades = 0
         daily_stopped = False
+        daily_loss = 0.0
+        max_daily_loss = equity * getattr(config, "MAX_DAILY_LOSS_PCT", 0.05)
 
         for _, row in candidates.iterrows():
             if daily_trades >= config.MAX_DAILY_TRADES or daily_stopped:
+                break
+
+            # Daily loss circuit breaker
+            if max_daily_loss > 0 and daily_loss <= -max_daily_loss:
+                print(f"  Daily loss ${daily_loss:,.2f} exceeded limit ${-max_daily_loss:,.2f}, stopping for day")
+                daily_stopped = True
                 break
 
             symbol = row["symbol"]
@@ -326,6 +363,11 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
             atr = calc_atr(bars_for_atr, period=14)
 
             stop_price = calc_stop_price(pullback, atr)
+            # 0.4.14: Cap stop loss at max percentage
+            stop_max_pct = getattr(config, "STOP_LOSS_MAX_PCT", 0)
+            if stop_max_pct > 0:
+                min_stop = round(pullback * (1 - stop_max_pct), 2)
+                stop_price = max(stop_price, min_stop)
             target_75 = calc_price_at_retracement(pullback, open_price, config.PROFIT_RETRACEMENT_75)
             target_1125 = calc_price_at_retracement(pullback, open_price, config.PROFIT_RETRACEMENT_1125)
             target_150 = calc_price_at_retracement(pullback, open_price, config.PROFIT_RETRACEMENT_150)
@@ -373,6 +415,7 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
 
             all_trades.append(result)
             equity += result.pnl
+            daily_loss += result.pnl
             daily_trades += 1
 
             # ── Collect chart data for first trade ──
@@ -432,6 +475,12 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
                 if not bars_after_exit or len(bars_after_exit) < 3:
                     break
 
+                # Daily loss circuit breaker (check before each re-entry)
+                if max_daily_loss > 0 and daily_loss <= -max_daily_loss:
+                    print(f"  Daily loss ${daily_loss:,.2f} exceeded limit ${-max_daily_loss:,.2f}, stopping for day")
+                    daily_stopped = True
+                    break
+
                 reentry_price, prev_high, reentry_idx, reentry_confirmed = find_reentry_point(
                     bars_after_exit, open_price, initial_highest=result.trailing_high
                 )
@@ -439,13 +488,21 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
                 if not reentry_confirmed or reentry_price <= 0:
                     break
 
+                # 0.4.14: Minimum pullback from peak for re-entry
+                reentry_min_pullback = getattr(config, "REENTRY_MIN_PULLBACK", 0)
+                if reentry_min_pullback > 0 and prev_high > 0:
+                    pullback_pct = (prev_high - reentry_price) / prev_high
+                    if pullback_pct < reentry_min_pullback:
+                        print(f"  {symbol}: re-entry pullback {pullback_pct:.1%} < min {reentry_min_pullback:.0%}, skipping")
+                        break
+
                 # Check if significant pullback occurred
                 if prev_high > 0 and (prev_high - reentry_price) / prev_high > config.PULLBACK_STOP_THRESHOLD:
                     print(f"  {symbol}: significant pullback from ${prev_high:.4f}, stopping day")
                     daily_stopped = True
                     break
 
-                # Re-entry trade — 0.4.13: ATR stop, retracement target + trailing
+                # Re-entry trade — 0.4.14: ATR stop, retracement target + trailing
                 # ATR-based stop
                 reentry_bars_for_atr = []
                 for j in range(min(reentry_idx + 1, len(bars_after_exit))):
@@ -458,6 +515,11 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
                     reentry_stop = max(reentry_stop, fallback)
                 else:
                     reentry_stop = round(reentry_price * (1 - config.REENTRY_STOP_PCT), 2)
+
+                # 0.4.14: Cap re-entry stop loss at max percentage
+                if stop_max_pct > 0:
+                    reentry_min_stop = round(reentry_price * (1 - stop_max_pct), 2)
+                    reentry_stop = max(reentry_stop, reentry_min_stop)
 
                 reentry_retracement_1 = getattr(config, "REENTRY_PROFIT_RETRACEMENT_1", 0.75)
                 reentry_target_1 = round(reentry_price + reentry_retracement_1 * (prev_high - reentry_price), 2)
@@ -499,6 +561,7 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
 
                 all_trades.append(reentry_result)
                 equity += reentry_result.pnl
+                daily_loss += reentry_result.pnl
                 daily_trades += 1
 
                 # ── Collect chart data for re-entry trade ──
@@ -542,7 +605,7 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
                     break
 
     print(f"\n{'='*60}")
-    print(f"[Stone 0.4] Backtest complete. Final equity: ${equity:,.2f}")
+    print(f"[Stone 0.4.14] Backtest complete. Final equity: ${equity:,.2f}")
     print(f"Total trades: {len(all_trades)}")
 
     if chart_entries:

@@ -1,3 +1,5 @@
+"""Stone 0.4.14 — Main config (synced with versions/config_stone_0.4.14.py)"""
+
 import os
 from pathlib import Path
 from dotenv import load_dotenv
@@ -10,19 +12,29 @@ ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
 ALPACA_BASE_URL = "https://paper-api.alpaca.markets"
 ALPACA_DATA_URL = "https://data.alpaca.markets"
 
-# Scanner filters
+# Scanner filters — aligned with 0.4.10/0.4.14
 GAP_THRESHOLD = 0.10
-MIN_VOLUME = 50000
-MIN_DOLLAR_VOLUME = 500000
-PRICE_MIN = 0.25
+MIN_VOLUME = 10000
+MIN_DOLLAR_VOLUME = 100000
+PRICE_MIN = 1.0
 PRICE_MAX = 20.0
+
+# Leveraged ETF exclusion
+LEVERAGED_ETF_SUFFIXES = ("U", "L", "BULL", "BEAR")
+LEVERAGED_ETF_PREFIXES = ()
 
 # Entry — confirmation logic
 ENTRY_CONFIRMATION = True
 
+# 0.4.11: Skip first trade if entry price >= open price
+ENTRY_BELOW_OPEN = True
+
 # Stop loss — ATR based (first trade)
 STOP_LOSS_ATR_MULT = 2.0
 STOP_LOSS_PCT_FALLBACK = 0.20
+
+# 0.4.14: Stop loss max cap
+STOP_LOSS_MAX_PCT = 0.10
 
 # Profit targets — first trade (three tiers)
 PROFIT_RETRACEMENT_75 = 0.75
@@ -42,7 +54,7 @@ TRAILING_STOP_PCT_150 = 0.05
 # Time limit exit — if no target hit within N 5-min bars, sell all when price >= entry
 FIRST_TRADE_TIME_LIMIT_BARS = 8  # 8 bars × 5 min = 40 minutes (0 = disabled)
 
-# Re-entry trade — Stone 0.4.13: retracement + trailing, no time limit
+# Re-entry trade — Stone 0.4.14: retracement + trailing, no time limit
 REENTRY_STOP_PCT = 0.05                 # legacy fallback
 REENTRY_STOP_ATR_MULT = 1.5             # ATR-based stop multiplier
 REENTRY_STOP_PCT_FALLBACK = 0.04        # fallback when ATR unavailable
@@ -52,7 +64,11 @@ REENTRY_TRAILING_PCT_2 = 0.03           # 3% trailing after tier-1
 REENTRY_POSITION_RATIO = 0.5            # half position vs first trade
 REENTRY_CUTOFF_TIME = "12:30"
 REENTRY_MAX_BARS_BEFORE_TARGET = 0      # no time limit (0.4.13: removed)
+REENTRY_MIN_PULLBACK = 0.03             # 0.4.14: min 3% pullback from peak for re-entry
 PULLBACK_STOP_THRESHOLD = 0.15          # if pullback from peak > 15%, stop day
+
+# 0.4.14: Daily loss circuit breaker
+MAX_DAILY_LOSS_PCT = 0.05               # 0.4.14: 5% daily loss circuit breaker
 
 # Position management
 MAX_POSITIONS_PER_DAY = 3
@@ -74,53 +90,39 @@ BACKTEST_DAYS = 180
 # Stone 0.5 — MACD 2nd-derivative signals on 5-minute bars
 # ══════════════════════════════════════════════════════════════════
 
-# MACD parameters (standard)
 MACD_FAST = 12
 MACD_SLOW = 26
 MACD_SIGNAL = 9
-
-# Minimum bars before MACD is valid (26 slow + 9 signal - 1 + 1 margin)
 MACD_WARMUP_BARS = 35
-
-# Stop loss
-MACD_STOP_PCT = 0.08  # 8% stop loss from entry price
-
-# Entry cutoff (MACD on 5-min bars needs ~34 bars ≈ 2.8 hrs from open)
+MACD_STOP_PCT = 0.08
 MACD_ENTRY_CUTOFF_TIME = "13:00"
-
-# Number of prior trading days to fetch for MACD warmup
 MACD_WARMUP_DAYS = 3
 
 # ══════════════════════════════════════════════════════════════════
 # Stone 0.4.2 — Optimized Stone 0.4
 # ══════════════════════════════════════════════════════════════════
 
-# Stop loss — low-price optimization
-LOW_PRICE_STOP_PCT = 0.05           # fixed 5% stop for stocks < $1
-LOW_PRICE_THRESHOLD = 1.0           # low-price stock threshold
-EARLY_STOP_BARS = 3                 # check first N bars for early stop
+LOW_PRICE_STOP_PCT = 0.05
+LOW_PRICE_THRESHOLD = 1.0
+EARLY_STOP_BARS = 3
 
-# Entry quality filters
-VOLUME_RATIO_MIN = 1.5              # opening volume ratio minimum
-PRIOR_GAIN_MAX = 0.15               # max cumulative gain in prior N days
-PRIOR_GAIN_DAYS = 3                 # how many prior days to check
+VOLUME_RATIO_MIN = 1.5
+PRIOR_GAIN_MAX = 0.15
+PRIOR_GAIN_DAYS = 3
 
-# Late-day management (bar index from 9:30 open, 5-min bars)
-LATE_TIGHTEN_TIME_BAR = 66          # 14:00 = bar #66
-LATE_CLOSE_TIME_BAR = 72            # 14:30 = bar #72
-TRAILING_LATE_FACTOR = 0.5          # tighten trailing stop by this factor after 14:00
+LATE_TIGHTEN_TIME_BAR = 66
+LATE_CLOSE_TIME_BAR = 72
+TRAILING_LATE_FACTOR = 0.5
 
-# Re-entry quality control
-REENTRY_MIN_PULLBACK_042 = 0.03     # minimum 3% pullback from peak for re-entry
-REENTRY_EARLY_EXIT_BARS = 2         # exit re-entry if no gain in N bars
+REENTRY_MIN_PULLBACK_042 = 0.03
+REENTRY_EARLY_EXIT_BARS = 2
 
-# Three-tier ratios — 0.4.2 (1/3 each)
 PARTIAL_SELL_RATIO_75_042 = 1/3
 PARTIAL_SELL_RATIO_100_042 = 1/3
 PARTIAL_SELL_RATIO_150_042 = 1/3
-PROFIT_RETRACEMENT_100_042 = 1.0    # 100% gap retracement target
+PROFIT_RETRACEMENT_100_042 = 1.0
 
 # ══════════════════════════════════════════════════════════════════
 # Stone 0.4.3 — Dynamic position sizing by dollar volume
 # ══════════════════════════════════════════════════════════════════
-POSITION_DV_RATIO = 0.01            # max position = daily dollar volume × this ratio
+POSITION_DV_RATIO = 0.01

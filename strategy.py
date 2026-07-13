@@ -26,12 +26,17 @@ def calc_stop_price(pullback: float, atr: float, atr_mult: float = None) -> floa
     if atr_mult is None:
         atr_mult = config.STOP_LOSS_ATR_MULT
     if atr <= 0:
-        return round(pullback * (1 - config.STOP_LOSS_PCT_FALLBACK), 2)
-    atr_stop = pullback - atr_mult * atr
-    min_stop = pullback * 0.70
-    max_stop = pullback * 0.95
-    atr_stop = max(min_stop, min(max_stop, atr_stop))
-    return round(atr_stop, 2)
+        stop = pullback * (1 - config.STOP_LOSS_PCT_FALLBACK)
+    else:
+        atr_stop = pullback - atr_mult * atr
+        min_stop = pullback * 0.70
+        max_stop = pullback * 0.95
+        stop = max(min_stop, min(max_stop, atr_stop))
+    # 0.4.14: Cap stop loss at max percentage from entry
+    max_pct = getattr(config, "STOP_LOSS_MAX_PCT", 0)
+    if max_pct > 0:
+        stop = max(stop, pullback * (1 - max_pct))
+    return round(stop, 2)
 
 
 def calc_position_size(equity: float) -> float:
