@@ -44,9 +44,17 @@ def price_fmt(price):
 
 
 def ts_to_minutes(ts_str):
-    """Convert 'HH:MM' to minutes since midnight."""
+    """Convert 'HH:MM' to minutes since midnight (assumes EST)."""
     parts = ts_str.split(":")
     return int(parts[0]) * 60 + int(parts[1])
+
+
+def utc_ts_to_est_minutes(ts_str):
+    """Convert UTC 'HH:MM' to minutes since midnight EST (EDT -4h offset)."""
+    parts = ts_str.split(":")
+    h, m = int(parts[0]), int(parts[1])
+    est_h = (h - 4) % 24  # UTC-4 for EDT (summer); use -5 for EST (winter)
+    return est_h * 60 + m
 
 
 def build_time_ticks():
@@ -71,13 +79,13 @@ def build_symbol_chart(sym, data):
         return None
 
     # Line: pure bar close prices
-    line_x = [ts_to_minutes(b["ts"]) for b in bars]
+    line_x = [utc_ts_to_est_minutes(b["ts"]) for b in bars]
     line_y = [b["c"] for b in bars]
 
     # Volume
     vol_df = pd.DataFrame(bars) if bars else pd.DataFrame(columns=["ts", "v", "c", "o"])
     if not vol_df.empty:
-        vol_df["x"] = vol_df["ts"].apply(ts_to_minutes)
+        vol_df["x"] = vol_df["ts"].apply(utc_ts_to_est_minutes)
 
     # Price range — include event prices so arrows stay in view
     all_y = list(line_y)
@@ -97,7 +105,7 @@ def build_symbol_chart(sym, data):
                         row_heights=[0.75, 0.25], vertical_spacing=0.04)
 
     # High-Low band (shows intra-bar range)
-    band_x = [ts_to_minutes(b["ts"]) for b in bars]
+    band_x = [utc_ts_to_est_minutes(b["ts"]) for b in bars]
     band_high = [b["h"] for b in bars]
     band_low = [b["l"] for b in bars]
     fig.add_trace(go.Scatter(
@@ -229,7 +237,7 @@ def build_symbol_chart(sym, data):
     buy_events = [e for e in events if e["type"] == "buy"]
     for e in buy_events:
         is_re = e.get("trade_type") == "reentry"
-        e_x = ts_to_minutes(e["ts"])
+        e_x = utc_ts_to_est_minutes(e["ts"])
         e_y = e["price"]
         pct = (e["price"] - open_price) / open_price if open_price else 0
         if is_re:
@@ -259,7 +267,7 @@ def build_symbol_chart(sym, data):
     for e in sell_events:
         is_re = e.get("trade_type") == "reentry"
         l = e["label"].upper()
-        e_x = ts_to_minutes(e["ts"])
+        e_x = utc_ts_to_est_minutes(e["ts"])
         e_y = e["price"]
 
         if is_re:

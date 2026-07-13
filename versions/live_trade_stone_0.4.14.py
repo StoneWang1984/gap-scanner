@@ -6,6 +6,16 @@ Changes over 0.4.13:
 - Daily loss circuit breaker: 5% (MAX_DAILY_LOSS_PCT = 0.05)
 - Re-entry min pullback: 3% from peak (REENTRY_MIN_PULLBACK = 0.03)
 - Scanner: PRICE_MIN = $1.0 (aligned with 0.4.10)
+
+Pre-market scanning:
+- Gap scan runs at pre-open (~9:00 EST) instead of after 9:30
+- Candidates are ready BEFORE market open, eliminating 3-min scan delay
+- Open prices are refreshed at 9:30 with regular-session data
+
+Data feed:
+- Default: IEX (free, real-time, ~2-3% market volume)
+- Optional: SIP ($99/mo, consolidated tape, all exchanges)
+- Set DATA_FEED = "sip" in config to upgrade
 """
 
 import re
@@ -314,9 +324,21 @@ class BarAccumulator:
         return len(self._5min_cache.get(symbol, []))
 
 
+# ── Data feed selection ───────────────────────────────────────────────
+# IEX: free, real-time, but only IEX exchange (~2-3% market volume)
+# SIP: $99/mo, consolidated tape from all exchanges, better for small/mid-cap
+DATA_FEED = DataFeed.IEX
+_cfg_feed = getattr(config, "DATA_FEED", "iex").lower()
+if _cfg_feed == "sip":
+    DATA_FEED = DataFeed.SIP
+    log("Using SIP data feed (consolidated, all exchanges)")
+else:
+    log("Using IEX data feed (free, IEX exchange only — ~2-3% market volume)")
+
+
 # ── Data helpers ───────────────────────────────────────────────────
 def get_snapshots(symbols):
-    request = StockSnapshotRequest(symbol_or_symbols=symbols, feed=DataFeed.IEX)
+    request = StockSnapshotRequest(symbol_or_symbols=symbols, feed=DATA_FEED)
     return data_client.get_stock_snapshot(request)
 
 
@@ -325,7 +347,7 @@ def get_prev_day_atr(symbol):
     start = today - pd.Timedelta(days=30)
     request = StockBarsRequest(
         symbol_or_symbols=symbol, timeframe=TimeFrame.Day,
-        start=start, end=today, adjustment=Adjustment.RAW, feed=DataFeed.IEX,
+        start=start, end=today, adjustment=Adjustment.RAW, feed=DATA_FEED,
     )
     try:
         bars = data_client.get_stock_bars(request)
@@ -362,7 +384,7 @@ def scan_gaps():
         batch = symbols[i:i + batch_size]
         request = StockBarsRequest(
             symbol_or_symbols=batch, timeframe=TimeFrame.Day,
-            start=yesterday, end=end, adjustment=Adjustment.RAW, feed=DataFeed.IEX,
+            start=yesterday, end=end, adjustment=Adjustment.RAW, feed=DATA_FEED,
         )
         try:
             bars = data_client.get_stock_bars(request)
@@ -406,6 +428,43 @@ def scan_gaps():
     results.sort(key=lambda x: x["gap_pct"], reverse=True)
     log(f"Found {len(results)} gap stocks")
     return results
+
+
+def refresh_candidates(candidates):
+    """Refresh candidate open prices at market open using snapshots.
+    Re-validate gap thresholds with fresh regular-session open prices."""
+    symbols = [c['symbol'] for c in candidates]
+    if not symbols:
+        return candidates
+
+    log(f"Refreshing {len(symbols)} candidate prices at market open...")
+    refreshed = []
+    try:
+        # Use configured data feed (IEX or SIP)
+        snaps = get_snapshots(symbols)
+        for c in candidates:
+            sym = c['symbol']
+            snap = snaps.get(sym)
+            updated = False
+            if snap and snap.daily_bar:
+                new_open = float(snap.daily_bar.open)
+                if new_open > 0:
+                    old_open = c['open_price']
+                    c['open_price'] = new_open
+                    c['gap_pct'] = (new_open / c['prev_close']) - 1.0
+                    updated = True
+                    if abs(new_open - old_open) / old_open > 0.005:
+                        log(f"  {sym}: open updated ${old_open:.4f} -> ${new_open:.4f}")
+            # Re-check gap threshold with refreshed price
+            if c['gap_pct'] >= config.GAP_THRESHOLD:
+                refreshed.append(c)
+            else:
+                log(f"  {sym}: gap narrowed to +{c['gap_pct']:.1%} (below {config.GAP_THRESHOLD:.0%}), skipping")
+        log(f"After refresh: {len(refreshed)} candidates remain")
+    except Exception as e:
+        log(f"Refresh error: {e}, keeping original candidates")
+        return candidates
+    return refreshed
 
 
 # ── Order execution ────────────────────────────────────────────────
@@ -762,6 +821,8 @@ def run_live():
     log(f"Re-entry cutoff: {REENTRY_CUTOFF} EST | Leveraged ETF filter: ON")
     log(f"Re-entry v2: half-pos, ATR stop, tier-1 target + trailing, breakeven, NO time stop")
     log(f"0.4.14: Based on 0.4.13, added leveraged ETF filter, stop cap 10%, daily loss 5% circuit breaker, re-entry min pullback 3%")
+    log(f"Pre-market scan: runs at ~9:00 EST, candidates ready before 9:30 open")
+    log(f"Data feed: {'SIP (consolidated)' if DATA_FEED == DataFeed.SIP else 'IEX (free, ~2-3% market volume)'}")
     log("=" * 60)
 
     if not test_connectivity():
@@ -897,22 +958,44 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
             "label": label,
         })
 
-    # Wait for exact market open (9:30 AM EST) if not yet
-    while True:
-        now = dt.datetime.now(tz=ZoneInfo("America/New_York"))
-        if now.time() >= force_close_time:
-            log("Market already closed, skipping trading day.")
-            return {"daily_trades": 0, "trades_detail": [], "candidates": [], "events_log": events_log}
-        if (now.hour == 9 and now.minute >= 30) or now.hour >= 10:
-            break
-        log(f"Waiting for market open ({today_info['open']} EST)...")
-        time.sleep(30)
-
-    # ── Scan gaps ──
-    log("Scanning for gap stocks...")
+    # ── Pre-market scan gaps (BEFORE 9:30 to have candidates ready at open) ──
+    log("Pre-market scanning for gap stocks...")
     candidates = scan_gaps()
     if not candidates:
-        log("No gap stocks found today.")
+        log("No gap stocks found in pre-market scan. Waiting for market open to re-scan...")
+        # Wait for market open and try again (some stocks may not have pre-market bars)
+        while True:
+            now = dt.datetime.now(tz=ZoneInfo("America/New_York"))
+            if now.time() >= force_close_time:
+                log("Market already closed, skipping trading day.")
+                return {"daily_trades": 0, "trades_detail": [], "candidates": [], "events_log": events_log}
+            if (now.hour == 9 and now.minute >= 30) or now.hour >= 10:
+                break
+            log(f"Waiting for market open ({today_info['open']} EST)...")
+            time.sleep(30)
+        log("Re-scanning at market open...")
+        candidates = scan_gaps()
+        if not candidates:
+            log("No gap stocks found today.")
+            return {"daily_trades": 0, "trades_detail": [], "candidates": [], "events_log": events_log}
+    else:
+        log(f"Pre-market found {len(candidates)} gap stocks")
+        # Wait for market open
+        while True:
+            now = dt.datetime.now(tz=ZoneInfo("America/New_York"))
+            if now.time() >= force_close_time:
+                log("Market already closed, skipping trading day.")
+                return {"daily_trades": 0, "trades_detail": [], "candidates": [], "events_log": events_log}
+            if (now.hour == 9 and now.minute >= 30) or now.hour >= 10:
+                break
+            log(f"Waiting for market open ({today_info['open']} EST)... candidates ready.")
+            time.sleep(30)
+
+    # ── Refresh candidate open prices at market open ──
+    if candidates:
+        candidates = refresh_candidates(candidates)
+    if not candidates:
+        log("No gap stocks after price refresh.")
         return {"daily_trades": 0, "trades_detail": [], "candidates": [], "events_log": events_log}
 
     deployable = calc_position_size(capital)
