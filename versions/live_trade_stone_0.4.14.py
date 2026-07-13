@@ -8,8 +8,8 @@ Changes over 0.4.13:
 - Scanner: PRICE_MIN = $1.0 (aligned with 0.4.10)
 
 Pre-market scanning:
-- Gap scan runs at pre-open (~9:00 EST) instead of after 9:30
-- Candidates are ready BEFORE market open, eliminating 3-min scan delay
+- Gap scan runs at 9:20 EST (10 min before 9:30 open)
+- Scan finishes by ~9:25, candidates ready before market open
 - Open prices are refreshed at 9:30 with regular-session data
 
 Data feed:
@@ -821,7 +821,7 @@ def run_live():
     log(f"Re-entry cutoff: {REENTRY_CUTOFF} EST | Leveraged ETF filter: ON")
     log(f"Re-entry v2: half-pos, ATR stop, tier-1 target + trailing, breakeven, NO time stop")
     log(f"0.4.14: Based on 0.4.13, added leveraged ETF filter, stop cap 10%, daily loss 5% circuit breaker, re-entry min pullback 3%")
-    log(f"Pre-market scan: runs at ~9:00 EST, candidates ready before 9:30 open")
+    log(f"Pre-market scan: runs at 9:20 EST, candidates ready by ~9:25")
     log(f"Data feed: {'SIP (consolidated)' if DATA_FEED == DataFeed.SIP else 'IEX (free, ~2-3% market volume)'}")
     log("=" * 60)
 
@@ -868,17 +868,17 @@ def run_live():
             n_open_h, n_open_m = int(next_day["open"][:2]), int(next_day["open"][3:5])
             target = dt.datetime(next_date.year, next_date.month, next_date.day,
                                  n_open_h, n_open_m, tzinfo=ZoneInfo("America/New_York")) \
-                     - dt.timedelta(minutes=30)
+                     - dt.timedelta(minutes=10)
             log(f"Market already closed for today. Next trading day: {next_day['date']}")
             smart_sleep_until(target)
             continue
 
-        # If not yet 30 min before open, sleep
+        # Pre-open at 9:20 EST (10 min before 9:30 open) — scan finishes by ~9:25
         pre_open_dt = dt.datetime(today.year, today.month, today.day,
                                   open_h, open_m, tzinfo=ZoneInfo("America/New_York")) \
-                      - dt.timedelta(minutes=30)
+                      - dt.timedelta(minutes=10)
         if now_est < pre_open_dt:
-            log(f"Market opens at {today_info['open']} EST. Waiting for pre-open ({open_h:02d}:{open_m - 30 + (60 if open_m < 30 else 0):02d})...")
+            log(f"Market opens at {today_info['open']} EST. Waiting for pre-open (9:20)...")
             smart_sleep_until(pre_open_dt)
 
         # Run the trading day
@@ -917,14 +917,14 @@ def run_live():
             events_log=result["events_log"],
         )
 
-        # Wait for next trading day
+        # Wait for next trading day (wake at 9:20 EST for pre-market scan)
         next_day = get_next_trading_day(trading_client, today + dt.timedelta(days=1))
         next_date = dt.date.fromisoformat(next_day["date"])
         n_open_h, n_open_m = int(next_day["open"][:2]), int(next_day["open"][3:5])
         target = dt.datetime(next_date.year, next_date.month, next_date.day,
                              n_open_h, n_open_m, tzinfo=ZoneInfo("America/New_York")) \
-                 - dt.timedelta(minutes=30)
-        log(f"Next trading day: {next_day['date']}. Sleeping until pre-open...")
+                 - dt.timedelta(minutes=10)
+        log(f"Next trading day: {next_day['date']}. Sleeping until pre-open (9:20)...")
         smart_sleep_until(target)
 
 
