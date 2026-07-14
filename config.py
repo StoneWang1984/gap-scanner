@@ -80,7 +80,7 @@ MAX_DAILY_TRADES = 3               # max total trades per day (first + re-entrie
 EQUITY_POSITION_RATIO = 0.80
 MAX_POSITION_SIZE = 100000
 MIN_POSITION_SIZE = 250
-INITIAL_CAPITAL = 1000
+INITIAL_CAPITAL = 500
 FORCE_CLOSE_TIME = "15:50"
 
 # Market hours (EST)
