@@ -78,8 +78,8 @@ PULLBACK_STOP_THRESHOLD = 0.15          # if pullback from peak > 15%, stop day
 MAX_DAILY_LOSS_PCT = 0.05               # 0.4.14: 5% daily loss circuit breaker
 
 # Position management
-MAX_POSITIONS_PER_DAY = 3
-MAX_DAILY_TRADES = 3               # max total trades per day (first + re-entries)
+MAX_POSITIONS_PER_DAY = 5
+MAX_DAILY_TRADES = 5               # max total trades per day (first + re-entries)
 EQUITY_POSITION_RATIO = 0.80
 MAX_POSITION_SIZE = 100000
 MIN_POSITION_SIZE = 250
