@@ -498,10 +498,9 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
                         print(f"  {symbol}: re-entry pullback {pullback_pct:.1%} < min {reentry_min_pullback:.0%}, skipping")
                         break
 
-                # Check if significant pullback occurred
+                # Check if significant pullback occurred — skip re-entry for THIS stock only
                 if prev_high > 0 and (prev_high - reentry_price) / prev_high > config.PULLBACK_STOP_THRESHOLD:
-                    print(f"  {symbol}: significant pullback from ${prev_high:.4f}, stopping day")
-                    daily_stopped = True
+                    print(f"  {symbol}: significant pullback from ${prev_high:.4f}, skipping re-entry")
                     break
 
                 # Re-entry trade — 0.4.14: ATR stop, retracement target + trailing

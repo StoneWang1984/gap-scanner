@@ -1126,29 +1126,33 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 h = float(snap.daily_bar.high)
                 day_highs[symbol] = max(day_highs.get(symbol, 0), h)
 
-        # ── Pullback stop (15% from day high) — only on HELD positions ──
-        if not daily_stopped and positions:
-            held_symbols = {p.symbol for p in positions if p.remaining_shares > 0}
-            for symbol in held_symbols:
-                snap = snaps.get(symbol)
-                if not snap or not snap.daily_bar:
-                    continue
-                dh = day_highs.get(symbol, 0)
-                dl = float(snap.daily_bar.low)
-                if dh > 0 and (dh - dl) / dh > config.PULLBACK_STOP_THRESHOLD:
-                    daily_stopped = True
-                    log(f"PULLBACK STOP: {symbol} dropped {(dh - dl) / dh:.1%} from high ${dh:.4f}")
-                    events_log.append(f"{now_est.strftime('%H:%M:%S')} PULLBACK STOP {symbol} -{(dh - dl) / dh:.1%}")
-                    for pos in positions:
-                        if pos.remaining_shares > 0:
-                            sold = force_sell_position(pos.symbol, pos.remaining_shares)
-                            if sold:
-                                log(f"PULLBACK STOP FILLED: {pos.symbol} {pos.remaining_shares} shares")
-                            record_trade(pos, dl, "pullback_stop")
-                            pos.remaining_shares = 0
-                            pos.protective_order_id = None
-                    break
+        # ── Pullback stop (15% from day high) — per-stock, only HELD positions ──
+        # Only sells the stock that triggered the stop, other positions continue
+        for pos in positions[:]:
+            if pos.remaining_shares <= 0:
+                continue
+            symbol = pos.symbol
+            snap = snaps.get(symbol)
+            if not snap or not snap.daily_bar:
+                continue
+            dh = day_highs.get(symbol, 0)
+            dl = float(snap.daily_bar.low)
+            if dh > 0 and (dh - dl) / dh > config.PULLBACK_STOP_THRESHOLD:
+                log(f"PULLBACK STOP: {symbol} dropped {(dh - dl) / dh:.1%} from high ${dh:.4f}")
+                events_log.append(f"{now_est.strftime('%H:%M:%S')} PULLBACK STOP {symbol} -{(dh - dl) / dh:.1%}")
+                sold = force_sell_position(symbol, pos.remaining_shares)
+                if sold:
+                    log(f"PULLBACK STOP FILLED: {symbol} {pos.remaining_shares} shares")
+                record_trade(pos, dl, "pullback_stop")
+                pos.remaining_shares = 0
+                pos.protective_order_id = None
+                # Remove this stock from candidates to prevent re-entry
+                entry_checked.add(symbol)
 
+        # Clean up zero-share positions
+        positions = [p for p in positions if p.remaining_shares > 0]
+
+        # ── Daily loss circuit breaker (separate from pullback stop) ──
         if daily_stopped:
             _force_close_remaining(positions)
             positions = [p for p in positions if p.remaining_shares > 0]
