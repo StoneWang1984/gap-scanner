@@ -114,6 +114,8 @@ def bulk_scan_gaps(
                     gap_pct = (open_price / prev_close) - 1.0
                     if gap_pct < config.GAP_THRESHOLD:
                         continue
+                    if gap_pct > getattr(config, "GAP_MAX", 100.0):
+                        continue
                     if volume < config.MIN_VOLUME:
                         continue
                     if not (config.PRICE_MIN <= open_price <= config.PRICE_MAX):

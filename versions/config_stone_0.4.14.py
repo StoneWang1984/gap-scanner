@@ -27,7 +27,8 @@ from alpaca.data.enums import DataFeed as _DF
 DATA_FEED_OBJ = _DF.SIP
 
 # Scanner filters — aligned with 0.4.10
-GAP_THRESHOLD = 0.10
+GAP_THRESHOLD = 0.10   # min 10% gap
+GAP_MAX = 1.0          # max 100% gap — filters reverse splits & extreme gaps
 MIN_VOLUME = 10000
 MIN_DOLLAR_VOLUME = 100000
 PRICE_MIN = 1.0
