@@ -17,11 +17,13 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 # Alpaca API
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
-ALPACA_BASE_URL = "https://paper-api.alpaca.markets"
+ALPACA_PAPER = False  # False = live account, True = paper trading
+ALPACA_BASE_URL = "https://api.alpaca.markets"  # live account
 ALPACA_DATA_URL = "https://data.alpaca.markets"
 
-# Data feed: IEX (free, real-time but only IEX exchange ~2-3% volume)
-# For better coverage, upgrade to SIP ($99/mo): set DATA_FEED = "sip"
+# Data feed for real-time data (snapshots, minute bars)
+# IEX: free, real-time, ~2-3% market volume — REQUIRED for snapshots/minute bars
+# SIP: $99/mo for real-time, all exchanges — only available for daily bars on free tier
 DATA_FEED = "iex"
 
 # Scanner filters — aligned with 0.4.10

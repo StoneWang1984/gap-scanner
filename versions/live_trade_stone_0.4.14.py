@@ -87,7 +87,8 @@ def is_leveraged_etf(symbol: str) -> bool:
 
 
 # ── Clients ────────────────────────────────────────────────────────
-trading_client = TradingClient(config.ALPACA_API_KEY, config.ALPACA_SECRET_KEY, paper=True)
+_ALPACA_PAPER = getattr(config, "ALPACA_PAPER", False)
+trading_client = TradingClient(config.ALPACA_API_KEY, config.ALPACA_SECRET_KEY, paper=_ALPACA_PAPER)
 data_client = StockHistoricalDataClient(config.ALPACA_API_KEY, config.ALPACA_SECRET_KEY)
 
 
