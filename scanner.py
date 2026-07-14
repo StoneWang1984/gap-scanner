@@ -22,7 +22,7 @@ def get_tradable_symbols() -> list[str]:
     trading_client = TradingClient(
         api_key=config.ALPACA_API_KEY,
         secret_key=config.ALPACA_SECRET_KEY,
-        paper=True,
+        paper=getattr(config, "ALPACA_PAPER", True),
     )
     assets = trading_client.get_all_assets()
     symbols = [

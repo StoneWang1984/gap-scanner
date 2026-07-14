@@ -15,6 +15,8 @@ ALPACA_DATA_URL = "https://data.alpaca.markets"
 
 # Data feed: SIP (all exchanges, consolidated tape)
 DATA_FEED = "sip"
+from alpaca.data.enums import DataFeed as _DF
+DATA_FEED_OBJ = _DF.SIP
 
 # Scanner filters — aligned with 0.4.10/0.4.14
 GAP_THRESHOLD = 0.10

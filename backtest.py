@@ -48,7 +48,7 @@ def get_trading_days(client: StockHistoricalDataClient, end_date: pd.Timestamp, 
     start = end_date - pd.Timedelta(days=n_days * 2 + 10)
     request = StockBarsRequest(
         symbol_or_symbols="SPY", timeframe=TimeFrame.Day,
-        start=start, end=end_date, adjustment=Adjustment.RAW, feed=DataFeed.IEX,
+        start=start, end=end_date, adjustment=Adjustment.RAW, feed=getattr(config, "DATA_FEED_OBJ", DataFeed.IEX),
     )
     bars = client.get_stock_bars(request)
     if bars.df.empty:
@@ -78,7 +78,7 @@ def bulk_scan_gaps(
 
         request = StockBarsRequest(
             symbol_or_symbols=batch, timeframe=TimeFrame.Day,
-            start=start, end=end, adjustment=Adjustment.RAW, feed=DataFeed.IEX,
+            start=start, end=end, adjustment=Adjustment.RAW, feed=getattr(config, "DATA_FEED_OBJ", DataFeed.IEX),
         )
         try:
             bars = client.get_stock_bars(request)
@@ -150,7 +150,7 @@ def get_5min_bars(client, symbol, date) -> pd.DataFrame:
     market_close = pd.Timestamp(f"{date.date()} {config.MARKET_CLOSE}", tz="America/New_York")
     request = StockBarsRequest(
         symbol_or_symbols=symbol, timeframe=TimeFrame(5, TimeFrameUnit.Minute),
-        start=market_open, end=market_close, adjustment=Adjustment.RAW, feed=DataFeed.IEX,
+        start=market_open, end=market_close, adjustment=Adjustment.RAW, feed=getattr(config, "DATA_FEED_OBJ", DataFeed.IEX),
     )
     bars = client.get_stock_bars(request)
     if bars.df.empty:
