@@ -1126,9 +1126,10 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 h = float(snap.daily_bar.high)
                 day_highs[symbol] = max(day_highs.get(symbol, 0), h)
 
-        # ── Pullback stop (15% from day high) ──
-        if not daily_stopped:
-            for symbol in all_symbols:
+        # ── Pullback stop (15% from day high) — only on HELD positions ──
+        if not daily_stopped and positions:
+            held_symbols = {p.symbol for p in positions if p.remaining_shares > 0}
+            for symbol in held_symbols:
                 snap = snaps.get(symbol)
                 if not snap or not snap.daily_bar:
                     continue
