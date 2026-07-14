@@ -13,9 +13,8 @@ ALPACA_PAPER = False  # False = live account, True = paper trading
 ALPACA_BASE_URL = "https://api.alpaca.markets"
 ALPACA_DATA_URL = "https://data.alpaca.markets"
 
-# Data feed: IEX for real-time (snapshots/minute bars)
-# SIP requires paid subscription for real-time; daily bars work on free tier
-DATA_FEED = "iex"
+# Data feed: SIP (all exchanges, consolidated tape)
+DATA_FEED = "sip"
 
 # Scanner filters — aligned with 0.4.10/0.4.14
 GAP_THRESHOLD = 0.10
