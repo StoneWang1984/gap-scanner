@@ -864,8 +864,11 @@ def run_live():
         pre_open_time = dt.time(open_h, open_m - 30 if open_m >= 30 else 0,
                                 open_m - 30 + 60 if open_m < 30 else 0)
 
-        # If already past force close, wait for next trading day
-        if now_est.time() >= force_close_time:
+        # If already past force close for today, wait for next trading day
+        # Compare full datetime, not just time — avoids late-night false positive
+        force_close_dt = dt.datetime(today.year, today.month, today.day,
+                                     fc_h, fc_m, tzinfo=ZoneInfo("America/New_York"))
+        if now_est >= force_close_dt:
             next_day = get_next_trading_day(trading_client, today + dt.timedelta(days=1))
             next_date = dt.date.fromisoformat(next_day["date"])
             n_open_h, n_open_m = int(next_day["open"][:2]), int(next_day["open"][3:5])
