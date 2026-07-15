@@ -13,10 +13,10 @@ ALPACA_PAPER = False  # False = live account, True = paper trading
 ALPACA_BASE_URL = "https://api.alpaca.markets"
 ALPACA_DATA_URL = "https://data.alpaca.markets"
 
-# Data feed: SIP (all exchanges, consolidated tape)
-DATA_FEED = "sip"
+# Data feed: IEX for live trading (SIP requires real-time subscription)
+DATA_FEED = "iex"
 from alpaca.data.enums import DataFeed as _DF
-DATA_FEED_OBJ = _DF.SIP
+DATA_FEED_OBJ = _DF.IEX
 
 # Scanner filters — aligned with 0.4.10/0.4.14
 GAP_THRESHOLD = 0.10   # min 10% gap
