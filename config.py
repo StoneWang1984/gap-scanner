@@ -1,4 +1,4 @@
-"""Stone 0.4.14 — Main config (synced with versions/config_stone_0.4.14.py)"""
+"""Stone 0.4.17 — Main config (synced with versions/config_stone_0.4.17.py)"""
 
 import os
 from pathlib import Path
@@ -13,10 +13,10 @@ ALPACA_PAPER = False  # False = live account, True = paper trading
 ALPACA_BASE_URL = "https://api.alpaca.markets"
 ALPACA_DATA_URL = "https://data.alpaca.markets"
 
-# Data feed: IEX for live trading (SIP requires real-time subscription)
-DATA_FEED = "iex"
+# Data feed: IEX (SIP subscription currently unavailable)
+DATA_FEED = "sip"
 from alpaca.data.enums import DataFeed as _DF
-DATA_FEED_OBJ = _DF.IEX
+DATA_FEED_OBJ = _DF.SIP
 
 # Scanner filters — aligned with 0.4.10/0.4.14
 GAP_THRESHOLD = 0.10   # min 10% gap
@@ -43,17 +43,22 @@ STOP_LOSS_PCT_FALLBACK = 0.20
 # 0.4.14: Stop loss max cap
 STOP_LOSS_MAX_PCT = 0.10
 
-# Profit targets — first trade (three tiers)
+# Profit targets — first trade (six tiers)
+PROFIT_RETRACEMENT_TIERS = [0.25, 0.50, 0.75, 1.00, 1.25, 1.50]
+TARGET_CAP_TIERS =         [0.05, 0.10, 0.15, 0.20, 0.25, 0.35]
+PARTIAL_SELL_RATIOS =      [1/8,  1/8,  1/8,  1/8,  1/8,  1/8]   # 6×1/8 = 75%
+TRAILING_STOP_PCTS =       [0.02, 0.025, 0.03, 0.035, 0.04, 0.05]
+
+# Legacy aliases (for backward compat)
 PROFIT_RETRACEMENT_75 = 0.75
 PROFIT_RETRACEMENT_1125 = 1.125
 PROFIT_RETRACEMENT_150 = 1.50
-
-# Partial profit — first trade
+TARGET_CAP_TIER1 = 0.15
+TARGET_CAP_TIER2 = 0.25
+TARGET_CAP_TIER3 = 0.35
 PARTIAL_SELL_RATIO_75 = 0.25
 PARTIAL_SELL_RATIO_1125 = 1/3
 PARTIAL_SELL_RATIO_150 = 1/3
-
-# Trailing stop — first trade
 TRAILING_STOP_PCT_75 = 0.03
 TRAILING_STOP_PCT_1125 = 0.04
 TRAILING_STOP_PCT_150 = 0.05
@@ -85,6 +90,9 @@ MAX_POSITION_SIZE = 100000
 MIN_POSITION_SIZE = 250
 INITIAL_CAPITAL = 500
 FORCE_CLOSE_TIME = "15:50"
+
+# WebSocket real-time streaming
+USE_WEBSOCKET = True
 
 # Market hours (EST)
 MARKET_OPEN = "09:30"

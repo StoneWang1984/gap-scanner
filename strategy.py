@@ -49,27 +49,56 @@ class TradePlan:
     symbol: str
     open_price: float
     pullback: float
-    target_75: float
-    target_1125: float
-    target_150: float
+    targets: list       # list of target prices (6 tiers)
+    sell_ratios: list   # list of sell ratios per tier (6 tiers)
+    trail_pcts: list    # list of trailing stop pcts per tier (6 tiers)
     stop_price: float
     shares: int = 0
     atr: float = 0.0
+    target_mode: str = "retracement"  # "retracement" or "capped"
+
+    # Legacy fields for backward compat
+    @property
+    def target_75(self):
+        return self.targets[2] if len(self.targets) > 2 else 0.0
+
+    @property
+    def target_1125(self):
+        return self.targets[4] if len(self.targets) > 4 else 0.0
+
+    @property
+    def target_150(self):
+        return self.targets[5] if len(self.targets) > 5 else 0.0
 
 
 def build_trade_plan(symbol: str, open_price: float, pullback: float, atr: float = 0.0,
                      position_size: float = None) -> TradePlan:
     if position_size is None:
         position_size = config.MIN_POSITION_SIZE
-    target_75 = calc_price_at_retracement(pullback, open_price, config.PROFIT_RETRACEMENT_75)
-    target_1125 = calc_price_at_retracement(pullback, open_price, config.PROFIT_RETRACEMENT_1125)
-    target_150 = calc_price_at_retracement(pullback, open_price, config.PROFIT_RETRACEMENT_150)
+
+    retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.25, 0.50, 0.75, 1.00, 1.25, 1.50])
+    caps = getattr(config, "TARGET_CAP_TIERS", [0.05, 0.10, 0.15, 0.20, 0.25, 0.35])
+    sell_ratios = getattr(config, "PARTIAL_SELL_RATIOS", [1/8]*6)
+    trail_pcts = getattr(config, "TRAILING_STOP_PCTS", [0.02, 0.025, 0.03, 0.035, 0.04, 0.05])
+
+    targets = []
+    any_capped = False
+    for i in range(len(retracements)):
+        ret_price = calc_price_at_retracement(pullback, open_price, retracements[i])
+        cap_price = round(pullback * (1 + caps[i]), 2)
+        t = min(ret_price, cap_price)
+        if t < ret_price:
+            any_capped = True
+        targets.append(t)
+
+    target_mode = "capped" if any_capped else "retracement"
+
     stop_price = calc_stop_price(pullback, atr)
     shares = int(position_size / pullback) if pullback > 0 else 0
     return TradePlan(
         symbol=symbol, open_price=open_price, pullback=pullback,
-        target_75=target_75, target_1125=target_1125, target_150=target_150,
-        stop_price=stop_price, shares=shares, atr=atr,
+        targets=targets, sell_ratios=sell_ratios, trail_pcts=trail_pcts,
+        stop_price=stop_price, shares=shares, atr=atr, target_mode=target_mode,
     )
 
 
@@ -87,18 +116,44 @@ class TradeResult:
     sell_target: float = 0.0
     stop_price: float = 0.0
     bars_5m: list | None = None
-    partial_sell_price: float = 0.0
-    partial_sell_shares: int = 0
-    partial2_sell_price: float = 0.0
-    partial2_sell_shares: int = 0
-    partial3_sell_price: float = 0.0
-    partial3_sell_shares: int = 0
+    partial_sells: list = None  # list of (price, shares) tuples per tier
     trailing_high: float = 0.0
     trailing_exit_price: float = 0.0
     atr: float = 0.0
     exit_bar_idx: int = -1
     position_size: float = 0.0
     trade_type: str = "first"  # "first" or "reentry"
+
+    # Legacy fields for backward compat
+    @property
+    def partial_sell_price(self):
+        ps = self.partial_sells
+        return ps[0][0] if ps and len(ps) > 0 and ps[0][1] > 0 else 0.0
+
+    @property
+    def partial_sell_shares(self):
+        ps = self.partial_sells
+        return ps[0][1] if ps and len(ps) > 0 else 0
+
+    @property
+    def partial2_sell_price(self):
+        ps = self.partial_sells
+        return ps[1][0] if ps and len(ps) > 1 and ps[1][1] > 0 else 0.0
+
+    @property
+    def partial2_sell_shares(self):
+        ps = self.partial_sells
+        return ps[1][1] if ps and len(ps) > 1 else 0
+
+    @property
+    def partial3_sell_price(self):
+        ps = self.partial_sells
+        return ps[2][0] if ps and len(ps) > 2 and ps[2][1] > 0 else 0.0
+
+    @property
+    def partial3_sell_shares(self):
+        ps = self.partial_sells
+        return ps[2][1] if ps and len(ps) > 2 else 0
 
 
 def evaluate_trade_stone(
@@ -110,46 +165,38 @@ def evaluate_trade_stone(
     trail_pct_150: float = None,
     time_limit_bars: int = 0,
 ) -> TradeResult:
-    """Stone 0.4 first trade: sell 1/4 at 75%, 1/3 at 112.5%, all remaining at 150%.
+    """Stone 0.4 first trade: N-tier partial sells with trailing stop.
 
+    Sells sell_ratios[i] of original shares at each target.
     time_limit_bars: if > 0 and no target hit within this many bars,
                      sell all when price >= entry price.
     """
-    if trail_pct_75 is None:
-        trail_pct_75 = config.TRAILING_STOP_PCT_75
-    if trail_pct_1125 is None:
-        trail_pct_1125 = config.TRAILING_STOP_PCT_1125
-    if trail_pct_150 is None:
-        trail_pct_150 = config.TRAILING_STOP_PCT_150
-
-    reached_75 = reached_1125 = reached_150 = False
-    sold_partial_75 = sold_partial_1125 = sold_partial_150 = False
-    partial_sell_price_75 = 0.0
-    partial_sell_shares_75 = 0
-    partial_sell_price_1125 = 0.0
-    partial_sell_shares_1125 = 0
-    partial_sell_price_150 = 0.0
-    partial_sell_shares_150 = 0
-    highest = plan.pullback
+    n_tiers = len(plan.targets)
+    reached = [False] * n_tiers
+    sold = [False] * n_tiers
+    partial_prices = [0.0] * n_tiers
+    partial_shares = [0] * n_tiers
     remaining_shares = plan.shares
+    highest = plan.pullback
     time_limit_active = False
 
     def _make_result(reason, exit_price, bi):
-        pnl_75 = (partial_sell_price_75 - plan.pullback) * partial_sell_shares_75 if sold_partial_75 else 0
-        pnl_1125 = (partial_sell_price_1125 - plan.pullback) * partial_sell_shares_1125 if sold_partial_1125 else 0
-        pnl_150 = (partial_sell_price_150 - plan.pullback) * partial_sell_shares_150 if sold_partial_150 else 0
+        pnl = 0.0
+        partial_sells = []
+        for i in range(n_tiers):
+            if sold[i]:
+                pnl += (partial_prices[i] - plan.pullback) * partial_shares[i]
+            partial_sells.append((partial_prices[i], partial_shares[i]))
         pnl_rest = (exit_price - plan.pullback) * remaining_shares
-        pnl = pnl_75 + pnl_1125 + pnl_150 + pnl_rest
+        pnl += pnl_rest
         pnl_pct = pnl / (plan.pullback * plan.shares) if plan.pullback > 0 else 0
         return TradeResult(
             symbol=plan.symbol, date=str(bar.get("timestamp", pd.Timestamp.now()).date()) if bi >= 0 else "",
             entry_price=plan.pullback, exit_price=exit_price, shares=plan.shares,
             pnl=round(pnl, 2), pnl_pct=round(pnl_pct, 4), exit_reason=reason,
-            open_price=plan.open_price, sell_target=plan.target_150,
+            open_price=plan.open_price, sell_target=plan.targets[-1],
             stop_price=plan.stop_price,
-            partial_sell_price=partial_sell_price_75, partial_sell_shares=partial_sell_shares_75,
-            partial2_sell_price=partial_sell_price_1125, partial2_sell_shares=partial_sell_shares_1125,
-            partial3_sell_price=partial_sell_price_150, partial3_sell_shares=partial_sell_shares_150,
+            partial_sells=partial_sells,
             trailing_high=highest, trailing_exit_price=exit_price, atr=plan.atr,
             exit_bar_idx=bi, position_size=plan.pullback * plan.shares,
             trade_type="first",
@@ -166,67 +213,57 @@ def evaluate_trade_stone(
             return _make_result("stop_loss", plan.stop_price, bi)
 
         # Time limit: if no target hit within time_limit_bars, sell at breakeven or better
-        if time_limit_bars > 0 and not reached_75 and bi >= time_limit_bars:
+        if time_limit_bars > 0 and not reached[0] and bi >= time_limit_bars:
             time_limit_active = True
         if time_limit_active and bh >= plan.pullback:
             exit_price = max(bh, plan.pullback)
             return _make_result("time_limit_exit", exit_price, bi)
 
-        if not reached_150 and bh >= plan.target_150:
-            reached_150 = reached_1125 = reached_75 = True
-            if not sold_partial_150:
-                sold_partial_150 = True
-                partial_sell_price_150 = plan.target_150
-                partial_sell_shares_150 = remaining_shares // 3
-                remaining_shares -= partial_sell_shares_150
-            if not sold_partial_1125:
-                sold_partial_1125 = True
-                partial_sell_price_1125 = plan.target_150
-                partial_sell_shares_1125 = 0
-            if not sold_partial_75:
-                sold_partial_75 = True
-                partial_sell_price_75 = plan.target_150
-                partial_sell_shares_75 = 0
+        # Check targets from highest to lowest (skip-gap handling)
+        for ti in range(n_tiers - 1, -1, -1):
+            if not reached[ti] and bh >= plan.targets[ti]:
+                # Mark all lower tiers as reached
+                for tj in range(ti + 1):
+                    reached[tj] = True
+                # Sell at this tier
+                if not sold[ti]:
+                    sold[ti] = True
+                    partial_prices[ti] = plan.targets[ti]
+                    sell_n = int(plan.shares * plan.sell_ratios[ti])
+                    sell_n = min(sell_n, remaining_shares)
+                    partial_shares[ti] = sell_n
+                    remaining_shares -= sell_n
+                # Handle lower unsold tiers in a skip-gap
+                for tj in range(ti):
+                    if not sold[tj]:
+                        sold[tj] = True
+                        partial_prices[tj] = plan.targets[ti]
+                        sell_n = int(plan.shares * plan.sell_ratios[tj])
+                        sell_n = min(sell_n, remaining_shares)
+                        partial_shares[tj] = sell_n
+                        remaining_shares -= sell_n
 
-        if not reached_1125 and bh >= plan.target_1125:
-            reached_1125 = reached_75 = True
-            if not sold_partial_1125:
-                sold_partial_1125 = True
-                partial_sell_price_1125 = plan.target_1125
-                partial_sell_shares_1125 = remaining_shares // 3
-                remaining_shares -= partial_sell_shares_1125
-            if not sold_partial_75:
-                sold_partial_75 = True
-                partial_sell_price_75 = plan.target_1125
-                partial_sell_shares_75 = plan.shares // 4
-                remaining_shares -= partial_sell_shares_75
-
-        if not reached_75 and bh >= plan.target_75:
-            reached_75 = True
-            if not sold_partial_75:
-                sold_partial_75 = True
-                partial_sell_price_75 = plan.target_75
-                partial_sell_shares_75 = plan.shares // 4
-                remaining_shares -= partial_sell_shares_75
-
-        if reached_75:
-            if reached_150:
-                pct = trail_pct_150
-            elif reached_1125:
-                pct = trail_pct_1125
-            else:
-                pct = trail_pct_75
+        # Trailing stop after first target reached
+        if reached[0]:
+            # Find highest reached tier
+            highest_tier = 0
+            for ti in range(n_tiers - 1, -1, -1):
+                if reached[ti]:
+                    highest_tier = ti
+                    break
+            pct = plan.trail_pcts[highest_tier]
             tsp = round(highest * (1 - pct), 2)
             tsp = max(tsp, plan.pullback)
             if bl <= tsp:
-                suffix = "_150" if reached_150 else "_1125" if reached_1125 else "_75"
+                retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.25, 0.50, 0.75, 1.00, 1.25, 1.50])
+                suffix = f"_{int(retracements[highest_tier] * 100)}"
                 return _make_result(f"trailing_stop{suffix}", tsp, bi)
 
     if force_close_price is not None:
         exit_price = force_close_price
     else:
         exit_price = bars_after_entry[-1]["close"] if bars_after_entry else plan.pullback
-    if not reached_75 and not sold_partial_75 and not sold_partial_1125 and not sold_partial_150:
+    if not any(reached):
         exit_price = plan.pullback
 
     return _make_result("force_close", exit_price, len(bars_after_entry) - 1)
@@ -334,7 +371,7 @@ def evaluate_reentry_trade(
             entry_price=entry_price, exit_price=exit_price, shares=shares,
             pnl=round(pnl, 2), pnl_pct=round(pnl_pct, 4), exit_reason=reason,
             open_price=open_price, sell_target=target_1, stop_price=stop_price,
-            partial_sell_price=partial_sell_price, partial_sell_shares=partial_sell_shares,
+            partial_sells=[(partial_sell_price, partial_sell_shares)] if sold_partial else [],
             trailing_high=highest, trailing_exit_price=exit_price,
             exit_bar_idx=bi, position_size=entry_price * shares,
             trade_type="reentry",

@@ -270,7 +270,13 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
     print(f"[Stone 0.4.14] Backtesting {len(trading_days)} trading days: {trading_days[0].date()} to {trading_days[-1].date()}")
     print(f"Capital: ${config.INITIAL_CAPITAL:,.0f} | Deploy: {config.EQUITY_POSITION_RATIO:.0%} | "
           f"Per-stock cap: ${config.MAX_POSITION_SIZE:,.0f} | Max daily trades: {config.MAX_DAILY_TRADES}")
-    print(f"First trade: 1/4@75% + 1/3@112.5% + 1/3@150% | Trail: {config.TRAILING_STOP_PCT_75:.0%}/{config.TRAILING_STOP_PCT_1125:.0%}/{config.TRAILING_STOP_PCT_150:.0%}")
+    retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.25, 0.50, 0.75, 1.00, 1.25, 1.50])
+    sell_ratios = getattr(config, "PARTIAL_SELL_RATIOS", [1/8]*6)
+    caps = getattr(config, "TARGET_CAP_TIERS", [0.05, 0.10, 0.15, 0.20, 0.25, 0.35])
+    trail_pcts = getattr(config, "TRAILING_STOP_PCTS", [0.02, 0.025, 0.03, 0.035, 0.04, 0.05])
+    tier_desc = " + ".join(f"{int(r*100)}%/1÷{int(round(1/s))}" for r, s in zip(retracements, sell_ratios))
+    cap_desc = "/".join(f"{int(c*100)}%" for c in caps)
+    print(f"First trade: {tier_desc} | Caps: {cap_desc} | Trail: {'/'.join(f'{t:.1%}' for t in trail_pcts)}")
     reentry_ret1 = getattr(config, "REENTRY_PROFIT_RETRACEMENT_1", 0.75)
     reentry_trail = getattr(config, "REENTRY_TRAILING_PCT_2", 0.03)
     reentry_max_bars = getattr(config, "REENTRY_MAX_BARS_BEFORE_TARGET", 0)
@@ -300,13 +306,14 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
         if date_key not in gap_data or gap_data[date_key].empty:
             continue
 
-        deployable = calc_position_size(equity)
-        pos_per_stock = min(deployable, config.MAX_POSITION_SIZE)
-        max_stocks_today = max(config.MAX_POSITIONS_PER_DAY, int(deployable / pos_per_stock))
+        n_cands = len(gap_data[date_key])
+        max_stocks_today = min(config.MAX_POSITIONS_PER_DAY, n_cands)
+        pos_per_stock = equity / max_stocks_today if max_stocks_today > 0 else equity
+        pos_per_stock = min(pos_per_stock, config.MAX_POSITION_SIZE)
         candidates = gap_data[date_key].head(max_stocks_today)
 
         print(f"\n--- {date_key} ({len(gap_data[date_key])} candidates, equity: ${equity:,.0f}, "
-              f"deploy: ${deployable:,.0f}, per-stock: ${pos_per_stock:,.0f}) ---")
+              f"per-stock: ${pos_per_stock:,.0f}) ---")
 
         daily_trades = 0
         daily_stopped = False
@@ -370,20 +377,14 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
             if stop_max_pct > 0:
                 min_stop = round(pullback * (1 - stop_max_pct), 2)
                 stop_price = max(stop_price, min_stop)
-            target_75 = calc_price_at_retracement(pullback, open_price, config.PROFIT_RETRACEMENT_75)
-            target_1125 = calc_price_at_retracement(pullback, open_price, config.PROFIT_RETRACEMENT_1125)
-            target_150 = calc_price_at_retracement(pullback, open_price, config.PROFIT_RETRACEMENT_150)
+            # Build trade plan using 6-tier system
+            plan = build_trade_plan(symbol, open_price, pullback, atr,
+                                     position_size=min(pos_per_stock, config.MAX_POSITION_SIZE))
 
-            pos_size = min(calc_position_size(equity), config.MAX_POSITION_SIZE)
+            pos_size = min(pos_per_stock, config.MAX_POSITION_SIZE)
             shares = int(pos_size / pullback)
             if shares <= 0:
                 continue
-
-            plan = TradePlan(
-                symbol=symbol, open_price=open_price, pullback=pullback,
-                target_75=target_75, target_1125=target_1125, target_150=target_150,
-                stop_price=stop_price, shares=shares, atr=atr,
-            )
 
             # Remaining bars after entry
             remaining_list = all_bars[entry_bar_idx + 1:]
@@ -392,24 +393,20 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
             time_limit = getattr(config, "FIRST_TRADE_TIME_LIMIT_BARS", 0)
             result = evaluate_trade_stone(
                 plan, remaining_list, force_close_price,
-                trail_pct_75=config.TRAILING_STOP_PCT_75,
-                trail_pct_1125=config.TRAILING_STOP_PCT_1125,
-                trail_pct_150=config.TRAILING_STOP_PCT_150,
                 time_limit_bars=time_limit,
             )
             result.date = str(date_key)
             result.open_price = open_price
-            result.sell_target = plan.target_150
+            result.sell_target = plan.targets[-1]
             result.stop_price = plan.stop_price
 
-            type_tag = "[1st]"
+            type_tag = f"[1st/{plan.target_mode}]"
             extra = ""
-            if result.partial_sell_shares > 0:
-                extra += f", 1/4@${result.partial_sell_price:.4f}"
-            if result.partial2_sell_shares > 0:
-                extra += f", 1/3@${result.partial2_sell_price:.4f}"
-            if result.partial3_sell_shares > 0:
-                extra += f", 1/3@${result.partial3_sell_price:.4f}"
+            retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.25, 0.50, 0.75, 1.00, 1.25, 1.50])
+            if result.partial_sells:
+                for ti, (p, s) in enumerate(result.partial_sells):
+                    if s > 0:
+                        extra += f", {retracements[ti]*100:.0f}%@${p:.4f}"
             if result.trailing_high > result.entry_price:
                 extra += f", high=${result.trailing_high:.4f}"
             print(f"  {symbol} {type_tag} entry=${pullback:.4f} exit=${result.exit_price:.4f} ({result.exit_reason}), "
@@ -429,38 +426,35 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
                            "price": round(pullback, 4), "label": f"BUY {shares}sh"})
             # Target sells — find actual bar times
             next_search = entry_bar_idx + 1
-            if result.partial_sell_shares > 0:
-                t75_idx = _find_target_bar(all_bars, next_search, target_75)
-                ts_75 = _bar_ts_str(all_bars, t75_idx) if t75_idx is not None else _bar_ts_str(all_bars, entry_bar_idx + 1)
-                events.append({"ts": ts_75, "type": "sell", "price": round(result.partial_sell_price, 4),
-                               "label": f"TARGET_75 {result.partial_sell_shares}sh"})
-                next_search = (t75_idx or entry_bar_idx) + 1
-            if result.partial2_sell_shares > 0:
-                t1125_idx = _find_target_bar(all_bars, next_search, target_1125)
-                ts_1125 = _bar_ts_str(all_bars, t1125_idx) if t1125_idx is not None else _bar_ts_str(all_bars, next_search)
-                events.append({"ts": ts_1125, "type": "sell", "price": round(result.partial2_sell_price, 4),
-                               "label": f"TARGET_1125 {result.partial2_sell_shares}sh"})
-                next_search = (t1125_idx or next_search) + 1
-            if result.partial3_sell_shares > 0:
-                t150_idx = _find_target_bar(all_bars, next_search, target_150)
-                ts_150 = _bar_ts_str(all_bars, t150_idx) if t150_idx is not None else _bar_ts_str(all_bars, next_search)
-                events.append({"ts": ts_150, "type": "sell", "price": round(result.partial3_sell_price, 4),
-                               "label": f"TARGET_150 {result.partial3_sell_shares}sh"})
+            retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.25, 0.50, 0.75, 1.00, 1.25, 1.50])
+            if result.partial_sells:
+                for ti, (p, s) in enumerate(result.partial_sells):
+                    if s > 0:
+                        t_idx = _find_target_bar(all_bars, next_search, plan.targets[ti])
+                        ts_str = _bar_ts_str(all_bars, t_idx) if t_idx is not None else _bar_ts_str(all_bars, next_search)
+                        pct_label = f"{int(retracements[ti]*100)}%"
+                        events.append({"ts": ts_str, "type": "sell", "price": round(p, 4),
+                                       "label": f"TARGET_{pct_label} {s}sh"})
+                        next_search = (t_idx or next_search) + 1
             # Exit event
             exit_bar_in_all = entry_bar_idx + 1 + result.exit_bar_idx
-            if result.exit_reason not in ("target_75", "target_1125", "target_150", "target_150_full"):
+            target_reasons = {f"target_{int(r*100)}" for r in getattr(config, "PROFIT_RETRACEMENT_TIERS", [])}
+            if result.exit_reason not in target_reasons:
                 exit_label = result.exit_reason.upper().replace("_", " ")
-                remaining_shares = shares - result.partial_sell_shares - result.partial2_sell_shares - result.partial3_sell_shares
+                total_sold = sum(s for _, s in (result.partial_sells or []))
+                remaining_shares = shares - total_sold
                 if remaining_shares > 0:
                     events.append({"ts": _bar_ts_str(all_bars, exit_bar_in_all), "type": "sell",
                                    "price": round(result.exit_price, 4), "label": f"{exit_label} {remaining_shares}sh"})
 
+            retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.25, 0.50, 0.75, 1.00, 1.25, 1.50])
+            targets_dict = {f"{int(r*100)}%": round(t, 4) for r, t in zip(retracements, plan.targets)}
             chart_entries[sym_key] = {
                 "date": str(date_key), "bars_5m": chart_bars, "bars_1m": [],
                 "events": events,
                 "entry_price": round(pullback, 4),
                 "stop_price": round(plan.stop_price, 4),
-                "targets": {"75%": round(target_75, 4), "112.5%": round(target_1125, 4), "150%": round(target_150, 4)},
+                "targets": targets_dict,
                 "pnl": round(result.pnl, 2), "open_price": round(open_price, 4),
             }
 
@@ -525,7 +519,7 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
                 reentry_retracement_1 = getattr(config, "REENTRY_PROFIT_RETRACEMENT_1", 0.75)
                 reentry_target_1 = round(reentry_price + reentry_retracement_1 * (prev_high - reentry_price), 2)
 
-                pos_size_re = min(calc_position_size(equity), config.MAX_POSITION_SIZE)
+                pos_size_re = min(pos_per_stock, config.MAX_POSITION_SIZE)
                 reentry_pos_ratio = getattr(config, "REENTRY_POSITION_RATIO", 0.5)
                 reentry_shares = int((pos_size_re * reentry_pos_ratio) / reentry_price)
                 if reentry_shares <= 0:

@@ -53,7 +53,7 @@ def scan_gaps_for_symbols(
         start=start,
         end=end,
         adjustment=Adjustment.RAW,
-        feed=DataFeed.IEX,
+        feed=getattr(config, "DATA_FEED_OBJ", DataFeed.IEX),
     )
 
     try:
