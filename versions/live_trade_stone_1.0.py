@@ -1271,7 +1271,7 @@ def run_live():
         force_close_dt = dt.datetime(today.year, today.month, today.day,
                                      fc_h, fc_m, tzinfo=ZoneInfo("America/New_York"))
         if now_est >= force_close_dt:
-            next_day = get_next_trading_day(trading_client, today + dt.timedelta(days=1))
+            next_day = get_next_trading_day(trading_client, today)
             next_date = dt.date.fromisoformat(next_day["date"])
             n_open_h, n_open_m = int(next_day["open"][:2]), int(next_day["open"][3:5])
             target = dt.datetime(next_date.year, next_date.month, next_date.day,
@@ -1326,7 +1326,7 @@ def run_live():
         )
 
         # Wait for next trading day (wake at 9:20 EST for pre-market scan)
-        next_day = get_next_trading_day(trading_client, today + dt.timedelta(days=1))
+        next_day = get_next_trading_day(trading_client, today)
         next_date = dt.date.fromisoformat(next_day["date"])
         n_open_h, n_open_m = int(next_day["open"][:2]), int(next_day["open"][3:5])
         target = dt.datetime(next_date.year, next_date.month, next_date.day,
