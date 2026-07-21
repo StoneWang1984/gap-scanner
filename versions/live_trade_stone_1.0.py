@@ -1,4 +1,4 @@
-"""Stone 0.4.17 Live Paper Trading — 6-tier targets, WebSocket, position recovery.
+"""Stone 1.0 Live Paper Trading — 6-tier targets, WebSocket, position recovery.
 
 Changes over 0.4.15:
 - 6-tier profit targets with list-based fields (replaces 3-tier target_75/1125/150)
@@ -51,7 +51,7 @@ if _parent_dir not in sys.path:
     sys.path.insert(0, _parent_dir)
 
 # Load version-specific config
-_spec = importlib.util.spec_from_file_location("config", os.path.join(_ver_dir, "config_stone_0.4.17.py"))
+_spec = importlib.util.spec_from_file_location("config", os.path.join(_ver_dir, "config_stone_1.0.py"))
 config = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(config)
 sys.modules["config"] = config
@@ -161,7 +161,7 @@ class LivePosition:
     # 0.4.11: Time limit exit
     bar_count: int = 0
     time_limit_active: bool = False
-    # 0.4.17: 6-tier list-based fields
+    # 1.0: 6-tier list-based fields
     targets: list = field(default_factory=list)
     sell_ratios: list = field(default_factory=list)
     trail_pcts: list = field(default_factory=list)
@@ -238,7 +238,7 @@ def save_state(positions, candidates, daily_trades, daily_stopped,
     all_syms = set([c["symbol"] for c in candidates] + [p.symbol for p in positions])
     state = {
         "updated": dt.datetime.now().isoformat(),
-        "version": "0.4.17",
+        "version": "1.0",
         "data_feed": "SIP" if DATA_FEED == DataFeed.SIP else "IEX",
         "ws_connected": _stream_state.is_running() if _stream_state else False,
         "daily_trades": daily_trades,
@@ -318,7 +318,7 @@ def save_chart_data(accumulator, positions, chart_events, date_str):
             if pos.symbol == sym and pos.remaining_shares > 0:
                 sym_entry["entry_price"] = round(pos.entry_price, 4)
                 sym_entry["stop_price"] = round(pos.stop_price, 4)
-                # 0.4.17: Chart targets use dict comprehension from retracement tiers
+                # 1.0: Chart targets use dict comprehension from retracement tiers
                 retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.25, 0.50, 0.75, 1.00, 1.25, 1.50])
                 chart_targets = {f"{int(r*100)}%": round(t, 4) for r, t in zip(retracements, pos.targets)}
                 sym_entry["targets"] = chart_targets
@@ -917,7 +917,7 @@ def replace_stop_for_remaining(pos: LivePosition) -> str | None:
     if pos.remaining_shares <= 0:
         return None
 
-    # 0.4.17: Use any(reached_list) instead of pos.reached_75
+    # 1.0: Use any(reached_list) instead of pos.reached_75
     if pos.reached_list and any(pos.reached_list):
         if pos.trade_type in ("first", "recovered"):
             trail_pct = get_trailing_pct(pos)
@@ -1059,7 +1059,7 @@ def generate_daily_report(date_str, version, equity_start, equity_end,
 # ── Main scheduler ────────────────────────────────────────────────
 def run_live():
     log("=" * 60)
-    log("Stone 0.4.17 Live Paper Trading -- Auto Scheduler")
+    log("Stone 1.0 Live Paper Trading -- Auto Scheduler")
     equity = _get_account_equity()
     log(f"Capital: ${equity:,.2f} | Max daily trades: {config.MAX_DAILY_TRADES}")
     log(f"Entry buffer: +{ENTRY_LIMIT_BUFFER:.1%} | Stop-limit buffer: -{STOP_LIMIT_BUFFER:.1%}")
@@ -1068,7 +1068,7 @@ def run_live():
     log(f"6-tier targets with list-based fields | calc_targets() | get_trailing_pct()")
     log(f"WebSocket: {'ON' if getattr(config, 'USE_WEBSOCKET', False) else 'OFF'} | "
         f"Data feed: {'SIP' if DATA_FEED == DataFeed.SIP else 'IEX'}")
-    log(f"0.4.17: 6-tier targets, position recovery, SIP data feed, WebSocket streaming")
+    log(f"1.0: 6-tier targets, position recovery, SIP data feed, WebSocket streaming")
     log("=" * 60)
 
     if not test_connectivity():
@@ -1154,7 +1154,7 @@ def run_live():
         # Generate daily report
         generate_daily_report(
             date_str=today_str,
-            version="0.4.17",
+            version="1.0",
             equity_start=equity_start,
             equity_end=equity_end,
             daily_trades=result["daily_trades"],
@@ -1319,7 +1319,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     log(f"RECOVER: Found protective order {ao.id} stop=${stop_price:.4f}")
                     break
 
-            # 0.4.17: Calculate 6-tier targets for recovered position
+            # 1.0: Calculate 6-tier targets for recovered position
             targets, sell_ratios, trail_pcts, target_mode = calc_targets(avg_entry, open_price)
 
             # Reconstruct sold_shares_list from today's Alpaca order history
@@ -1565,7 +1565,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
             break
 
         # ── Collect snapshot data ──
-        # 0.4.17: Include position symbols in stream
+        # 1.0: Include position symbols in stream
         stream_symbols = list(set(
             [c['symbol'] for c in candidates] +
             [p.symbol for p in positions]
@@ -1689,7 +1689,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     positions.remove(pos)
                     continue
 
-                # 0.4.17: 6-tier exit logic with skip-gap
+                # 1.0: 6-tier exit logic with skip-gap
                 # Check from highest to lowest tier; skip already-reached tiers
                 n_tiers = len(pos.targets)
                 for ti in range(n_tiers - 1, -1, -1):
@@ -1757,7 +1757,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     replace_stop_for_remaining(pos)
 
                 # ── Trailing stop (polled fallback) ──
-                # 0.4.17: Use get_trailing_pct for generic N-tier lookup
+                # 1.0: Use get_trailing_pct for generic N-tier lookup
                 if pos.reached_list and any(pos.reached_list) and pos.remaining_shares > 0:
                     pct = get_trailing_pct(pos)
                     tsp = round(pos.highest * (1 - pct), 2)
@@ -1888,7 +1888,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
 
                 stop = calc_stop_price(entry_price, atr)
 
-                # 0.4.17: 6-tier targets via calc_targets
+                # 1.0: 6-tier targets via calc_targets
                 targets, sell_ratios, trail_pcts, target_mode = calc_targets(entry_price, cand["open_price"])
 
                 pos_size = min(pos_per_stock, config.MAX_POSITION_SIZE)
@@ -2007,7 +2007,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 limit_price = round(entry_price * (1 + ENTRY_LIMIT_BUFFER), 2)
                 order = place_buy_limit(symbol, shares, limit_price)
                 if order:
-                    # 0.4.17: Re-entry positions also use 6-tier target lists (empty targets for re-entry)
+                    # 1.0: Re-entry positions also use 6-tier target lists (empty targets for re-entry)
                     pos = LivePosition(
                         symbol=symbol, entry_price=entry_price, shares=shares,
                         stop_price=stop, open_price=cand["open_price"],

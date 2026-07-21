@@ -1,4 +1,4 @@
-"""Stone 0.4.17 策略 — Streamlit Web UI (交易显示 + 回测)"""
+"""Stone 1.0 策略 — Streamlit Web UI (交易显示 + 回测)"""
 
 import json
 import time
@@ -26,11 +26,11 @@ import importlib.util
 # Use current 6-tier backtest engine
 from backtest import run_backtest as run_backtest_6tier
 
-st.set_page_config(page_title="Stone 0.4.17 交易", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Stone 1.0 交易", page_icon="📊", layout="wide")
 
 # ── Sidebar ──────────────────────────────────────────────────────
 
-st.sidebar.title("Stone 0.4.17 交易")
+st.sidebar.title("Stone 1.0 交易")
 st.sidebar.caption("WebSocket即时 · SIP数据源 · 6档止盈 · 仓位恢复")
 
 tab = st.sidebar.radio("导航", ["实盘交易", "策略概览", "运行回测", "交易详情"])
@@ -215,7 +215,7 @@ if tab == "实盘交易":
 # ══════════════════════════════════════════════════════════════════
 
 elif tab == "策略概览":
-    st.title("Stone 0.4.17 策略概览")
+    st.title("Stone 1.0 策略概览")
 
     col1, col2 = st.columns(2)
 
@@ -269,7 +269,7 @@ elif tab == "策略概览":
         """)
 
     st.divider()
-    st.subheader("0.4.17 新增特性")
+    st.subheader("1.0 新增特性")
     st.markdown("""
     - **6档分批止盈**: 替代旧3档，更精细地捕捉不同级别的利润
     - **WebSocket 实时交易**: 5min K线完成后1-2秒内下单，逐笔成交即时止损

@@ -1,4 +1,4 @@
-"""Config — Stone 0.4.17: based on 0.4.14 + operational fixes.
+"""Config — Stone 1.0: based on 0.4.14 + operational fixes.
 
 Changes over 0.4.14:
 - Same config parameters, version bump for clean tracking

@@ -1,4 +1,4 @@
-"""Stone 0.4.17 — Main config (synced with versions/config_stone_0.4.17.py)"""
+"""Stone 1.0 — Main config (synced with versions/config_stone_1.0.py)"""
 
 import os
 from pathlib import Path

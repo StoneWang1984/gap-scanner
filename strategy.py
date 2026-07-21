@@ -1,4 +1,4 @@
-"""Gap pullback strategy — Stone 0.4: three-tier first trade + re-entry."""
+"""Gap pullback strategy — Stone 1.0: 6-tier first trade + re-entry."""
 
 from dataclasses import dataclass
 import config

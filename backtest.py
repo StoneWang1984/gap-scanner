@@ -1,4 +1,4 @@
-"""Backtesting engine — Stone 0.4.14: three-tier + re-entry + safety features + equity compounding."""
+"""Backtesting engine — Stone 1.0: 6-tier targets + re-entry + safety features + equity compounding."""
 
 import json
 import os
@@ -267,7 +267,7 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
         print("No trading days found.")
         return []
 
-    print(f"[Stone 0.4.14] Backtesting {len(trading_days)} trading days: {trading_days[0].date()} to {trading_days[-1].date()}")
+    print(f"[Stone 1.0] Backtesting {len(trading_days)} trading days: {trading_days[0].date()} to {trading_days[-1].date()}")
     print(f"Capital: ${config.INITIAL_CAPITAL:,.0f} | Deploy: {config.EQUITY_POSITION_RATIO:.0%} | "
           f"Per-stock cap: ${config.MAX_POSITION_SIZE:,.0f} | Max daily trades: {config.MAX_DAILY_TRADES}")
     retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.25, 0.50, 0.75, 1.00, 1.25, 1.50])
@@ -600,7 +600,7 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
                     break
 
     print(f"\n{'='*60}")
-    print(f"[Stone 0.4.14] Backtest complete. Final equity: ${equity:,.2f}")
+    print(f"[Stone 1.0] Backtest complete. Final equity: ${equity:,.2f}")
     print(f"Total trades: {len(all_trades)}")
 
     if chart_entries:
