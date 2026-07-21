@@ -31,8 +31,9 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import (
     LimitOrderRequest, MarketOrderRequest,
     StopLimitOrderRequest, TrailingStopOrderRequest,
+    GetOrdersRequest,
 )
-from alpaca.trading.enums import OrderSide, TimeInForce, OrderType, QueryOrderStatus
+from alpaca.trading.enums import OrderSide, TimeInForce, OrderType, QueryOrderStatus, OrderStatus
 from alpaca.data.historical.stock import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, StockSnapshotRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
@@ -107,7 +108,7 @@ def log(msg):
 
 
 def smart_sleep_until(target_dt, check_interval=30):
-    """Sleep until target EST datetime, with progressive logging."""
+    """Sleep until target EST datetime. Wakes frequently to handle macOS sleep."""
     while True:
         now = dt.datetime.now(tz=ZoneInfo("America/New_York"))
         remaining = (target_dt - now).total_seconds()
@@ -115,9 +116,11 @@ def smart_sleep_until(target_dt, check_interval=30):
             break
         if remaining > 300:
             log(f"Next event in {remaining / 60:.0f} min, sleeping...")
-            time.sleep(min(remaining * 0.85, 600))
-        else:
+            time.sleep(60)  # max 60s so macOS sleep/wake is handled
+        elif remaining > 30:
             log(f"Starting in {remaining / 60:.1f} min...")
+            time.sleep(30)
+        else:
             time.sleep(check_interval)
 
 
@@ -728,6 +731,18 @@ def check_entry(symbol, open_price, accumulator):
     return pullback_price, True
 
 
+# ── Account equity ──────────────────────────────────────────────────
+def _get_account_equity() -> float:
+    try:
+        acct = trading_client.get_account()
+        eq = float(acct.equity)
+        log(f"Account equity: ${eq:.2f}")
+        return max(eq, config.MIN_POSITION_SIZE)
+    except Exception as e:
+        log(f"get_account_equity error: {e}, using INITIAL_CAPITAL")
+        return config.INITIAL_CAPITAL
+
+
 # ── Test connectivity ──────────────────────────────────────────────
 def test_connectivity():
     log("Testing data connectivity...")
@@ -818,7 +833,8 @@ def generate_daily_report(date_str, version, equity_start, equity_end,
 def run_live():
     log("=" * 60)
     log("Stone 0.4.14 Live Paper Trading — Auto Scheduler")
-    log(f"Capital: ${config.INITIAL_CAPITAL:,.0f} | Max daily trades: {config.MAX_DAILY_TRADES}")
+    equity = _get_account_equity()
+    log(f"Capital: ${equity:,.2f} | Max daily trades: {config.MAX_DAILY_TRADES}")
     log(f"Entry buffer: +{ENTRY_LIMIT_BUFFER:.1%} | Stop-limit buffer: -{STOP_LIMIT_BUFFER:.1%}")
     log(f"Target buffer: -{TARGET_LIMIT_BUFFER:.1%} | Force-close timeout: {FORCE_CLOSE_LIMIT_TIMEOUT}s")
     log(f"Re-entry cutoff: {REENTRY_CUTOFF} EST | Leveraged ETF filter: ON")
@@ -938,7 +954,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     today_info: dict) -> dict:
     """Execute one trading day. Returns result dict for daily report."""
 
-    capital = config.INITIAL_CAPITAL
+    capital = _get_account_equity()
 
     positions: list[LivePosition] = []
     daily_trades = 0
@@ -1004,15 +1020,109 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
         log("No gap stocks after price refresh.")
         return {"daily_trades": 0, "trades_detail": [], "candidates": [], "events_log": events_log}
 
-    deployable = calc_position_size(capital)
-    pos_per_stock = min(deployable, config.MAX_POSITION_SIZE)
-    max_stocks = max(config.MAX_POSITIONS_PER_DAY, int(deployable / pos_per_stock))
+    n_candidates = len(candidates)
+    max_stocks = min(config.MAX_POSITIONS_PER_DAY, n_candidates)
+    pos_per_stock = capital / max_stocks if max_stocks > 0 else capital
+    pos_per_stock = min(pos_per_stock, config.MAX_POSITION_SIZE)
     candidates = candidates[:max_stocks]
 
     log(f"Candidates: {[c['symbol'] for c in candidates]}")
     for c in candidates:
         log(f"  {c['symbol']}: gap +{c['gap_pct']:.1%}, open=${c['open_price']:.4f}")
         day_highs[c['symbol']] = c['open_price']
+
+    # ── Backfill historical 5-min bars for candidates ──
+    if candidates:
+        now_est = dt.datetime.now(tz=ZoneInfo("America/New_York"))
+        today_open = now_est.replace(hour=9, minute=30, second=0, microsecond=0)
+        try:
+            req = StockBarsRequest(
+                symbol_or_symbols=[c['symbol'] for c in candidates],
+                timeframe=TimeFrame(5, TimeFrameUnit.Minute),
+                start=today_open, end=now_est,
+                feed=DATA_FEED,
+            )
+            hist_bars = data_client.get_stock_bars(req)
+            if not hist_bars.df.empty:
+                df = hist_bars.df
+                for c in candidates:
+                    sym = c['symbol']
+                    if isinstance(df.index[0], tuple):
+                        sym_df = df[df.index.get_level_values("symbol") == sym]
+                    else:
+                        sym_df = df
+                    for _, row in sym_df.iterrows():
+                        class _Bar:
+                            pass
+                        b = _Bar()
+                        b.timestamp = row.name if not isinstance(row.name, tuple) else row.name[1]
+                        if hasattr(b.timestamp, "to_pydatetime"):
+                            b.timestamp = b.timestamp.to_pydatetime()
+                        b.open = row["open"]; b.high = row["high"]
+                        b.low = row["low"]; b.close = row["close"]
+                        b.volume = int(row["volume"])
+                        accumulator.add_bar(sym, b)
+                log(f"Backfilled bars: {dict((c['symbol'], accumulator.bar_count(c['symbol'])) for c in candidates)}")
+        except Exception as e:
+            log(f"Backfill error: {e}")
+
+    # ── Recover existing Alpaca positions ──
+    try:
+        alpaca_positions = trading_client.get_all_positions()
+        alpaca_orders = trading_client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN))
+        for ap in alpaca_positions:
+            sym = ap.symbol
+            qty = int(float(ap.qty))
+            avg_entry = float(ap.avg_entry_price)
+            cur_price = float(ap.current_price)
+            # Skip if already tracked
+            if sym in [p.symbol for p in positions]:
+                continue
+            log(f"RECOVER: Found orphan position {sym} | {qty} shares @ ${avg_entry:.4f} (current ${cur_price:.4f})")
+
+            # Find matching candidate for open_price
+            cand = next((c for c in candidates if c["symbol"] == sym), None)
+            open_price = cand["open_price"] if cand else avg_entry
+            prev_close = cand["prev_close"] if cand else avg_entry
+
+            # Find existing protective (SELL) order
+            prot_order_id = None
+            stop_price = avg_entry * 0.95  # default 5% stop
+            for ao in alpaca_orders:
+                if ao.symbol == sym and ao.side == OrderSide.SELL:
+                    prot_order_id = str(ao.id)
+                    if ao.stop_price:
+                        stop_price = float(ao.stop_price)
+                    log(f"RECOVER: Found protective order {ao.id} stop=${stop_price:.4f}")
+                    break
+
+            # Calculate targets (for reference, but mark all as reached to avoid
+            # re-triggering partial sells on recovery — existing protective order
+            # handles exit)
+            target_75 = calc_price_at_retracement(avg_entry, open_price, config.PROFIT_RETRACEMENT_75)
+            target_1125 = calc_price_at_retracement(avg_entry, open_price, config.PROFIT_RETRACEMENT_1125)
+            target_150 = calc_price_at_retracement(avg_entry, open_price, config.PROFIT_RETRACEMENT_150)
+
+            day_high = day_highs.get(sym, cur_price)
+            # Mark ALL targets as reached to prevent main loop from selling again.
+            # The protective order (trailing stop or stop-limit) already handles exit.
+            pos = LivePosition(
+                symbol=sym, entry_price=avg_entry, shares=qty,
+                stop_price=stop_price,
+                target_75=target_75, target_1125=target_1125, target_150=target_150,
+                open_price=open_price, trade_type="first",
+                reached_75=True, reached_1125=True, reached_150=True,
+                highest=max(day_high, avg_entry), prev_high=avg_entry,
+                entry_time=now_est, protective_order_id=prot_order_id,
+                atr=0.0,
+            )
+            positions.append(pos)
+            entry_checked.add(sym)
+            daily_trades += 1
+            events_log.append(f"{now_est.strftime('%H:%M:%S')} RECOVERED {sym} @ ${avg_entry:.4f} ({qty}sh, stop=${stop_price:.4f})")
+            log(f"RECOVER: {sym} restored — stop=${stop_price:.4f}, t75=${target_75:.4f}, t1125=${target_1125:.4f}, t150=${target_150:.4f}")
+    except Exception as e:
+        log(f"Position recovery error: {e}")
 
     # ── Main loop ──
     cutoff_time = dt.time(10, 0)
@@ -1395,7 +1505,17 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 target_1125 = calc_price_at_retracement(entry_price, cand["open_price"], config.PROFIT_RETRACEMENT_1125)
                 target_150 = calc_price_at_retracement(entry_price, cand["open_price"], config.PROFIT_RETRACEMENT_150)
 
-                pos_size = min(calc_position_size(capital), config.MAX_POSITION_SIZE)
+                pos_size = min(pos_per_stock, config.MAX_POSITION_SIZE)
+                # Check actual buying power before placing order
+                try:
+                    bp = float(trading_client.get_account().buying_power)
+                    if bp < pos_size:
+                        log(f"  {symbol}: buying power ${bp:.2f} < alloc ${pos_size:.2f}, skipping")
+                        entry_checked.add(symbol)
+                        continue
+                    pos_size = min(pos_size, bp * 0.95)
+                except Exception:
+                    pass
                 shares = int(pos_size / entry_price)
                 if shares <= 0:
                     entry_checked.add(symbol)
@@ -1473,9 +1593,20 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 target = round(entry_price + retrace_1 * (prev_high - entry_price), 2)
 
                 # 0.4.10: Half position size for re-entry
-                pos_size = min(calc_position_size(capital), config.MAX_POSITION_SIZE)
+                pos_size = min(pos_per_stock, config.MAX_POSITION_SIZE)
                 reentry_pos_ratio = getattr(config, "REENTRY_POSITION_RATIO", 0.5)
-                shares = int((pos_size * reentry_pos_ratio) / entry_price)
+                reentry_size = pos_size * reentry_pos_ratio
+                # Check actual buying power before re-entry
+                try:
+                    bp = float(trading_client.get_account().buying_power)
+                    if bp < reentry_size:
+                        log(f"  {symbol}: re-entry skipped, buying power ${bp:.2f} < alloc ${reentry_size:.2f}")
+                        reentry_checked.add(symbol)
+                        continue
+                    reentry_size = min(reentry_size, bp * 0.95)
+                except Exception:
+                    pass
+                shares = int(reentry_size / entry_price)
                 if shares <= 0:
                     reentry_checked.add(symbol)
                     continue

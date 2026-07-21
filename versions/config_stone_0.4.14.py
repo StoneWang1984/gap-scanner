@@ -22,7 +22,7 @@ ALPACA_BASE_URL = "https://api.alpaca.markets"  # live account
 ALPACA_DATA_URL = "https://data.alpaca.markets"
 
 # Data feed: IEX for live trading (SIP requires real-time subscription)
-# SIP works for historical data only (backtest)
+# IEX (SIP subscription currently unavailable)
 DATA_FEED = "iex"
 from alpaca.data.enums import DataFeed as _DF
 DATA_FEED_OBJ = _DF.IEX

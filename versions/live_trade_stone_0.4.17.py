@@ -1436,6 +1436,16 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 log(f"BUY FILLED: {symbol} order {order_id} ({filled_qty}sh)")
                 pos = LivePosition(**pos_data)
                 positions.append(pos)
+                # Cancel bracket order's auto-created stop_loss/take_profit legs
+                # to prevent double stop orders (we place our own below)
+                try:
+                    open_orders = trading_client.get_orders(filter={"status": "open", "symbols": symbol})
+                    for o in open_orders:
+                        if o.side == OrderSide.SELL and str(o.id) != order_id:
+                            cancel_order(str(o.id))
+                            log(f"CANCELLED bracket leg {o.id} for {symbol}")
+                except Exception:
+                    pass
                 place_protective_stop(pos)
                 events_log.append(f"{now_est.strftime('%H:%M:%S')} BUY FILLED {symbol} @ ${pos.entry_price:.4f}")
                 add_chart_event(symbol, "buy", pos.entry_price,
@@ -1456,7 +1466,16 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
             sell_shares = info["shares"]
             tier_idx = info.get("tier_idx")
             if check_order_filled(order_id):
-                log(f"SELL LIMIT FILLED: {symbol} {sell_shares}sh (T{tier_idx+1 if tier_idx is not None else '?'}) order {order_id}")
+                actual_filled = get_order_filled_qty(order_id)
+                # Handle partial fills: if fewer shares filled than expected,
+                # adjust remaining_shares to account for the difference
+                if actual_filled > 0 and actual_filled < sell_shares:
+                    shortfall = sell_shares - actual_filled
+                    log(f"SELL LIMIT PARTIAL FILL: {symbol} {actual_filled}/{sell_shares}sh, adding {shortfall} back to remaining_shares")
+                    pos = next((p for p in positions if p.symbol == symbol), None)
+                    if pos:
+                        pos.remaining_shares += shortfall
+                log(f"SELL LIMIT FILLED: {symbol} {actual_filled}sh (T{tier_idx+1 if tier_idx is not None else '?'}) order {order_id}")
                 del pending_sells[order_id]
                 # Now that the sell is confirmed, replace protective stop for actual remaining shares
                 pos = next((p for p in positions if p.symbol == symbol), None)
@@ -1464,12 +1483,27 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     replace_stop_for_remaining(pos)
             elif check_order_canceled(order_id):
                 log(f"SELL LIMIT CANCELED: {symbol} order {order_id}, rolling back sold_shares_list")
-                # Roll back the sold_shares_list entry since sell didn't execute
+                # Roll back the sold_shares_list AND reached_list entries since sell didn't execute
                 pos = next((p for p in positions if p.symbol == symbol), None)
-                if pos and tier_idx is not None and tier_idx < len(pos.sold_shares_list):
+                affected_tiers = info.get("affected_tiers")
+                if pos and affected_tiers:
+                    for t in affected_tiers:
+                        if t < len(pos.sold_shares_list):
+                            pos.sold_shares_list[t] = 0
+                        if t < len(pos.reached_list):
+                            pos.reached_list[t] = False
+                elif pos and tier_idx is not None and tier_idx < len(pos.sold_shares_list):
+                    # Fallback for entries without affected_tiers (backward compat)
                     pos.sold_shares_list[tier_idx] = 0
+                    if tier_idx < len(pos.reached_list):
+                        pos.reached_list[tier_idx] = False
                 if pos:
                     pos.remaining_shares += sell_shares
+                    # For re-entry sells (tier_idx is None), also reset re-entry state
+                    if tier_idx is None and pos.trade_type == "reentry":
+                        pos.reached_target1 = False
+                        pos.breakeven_active = False
+                        pos.sold_partial1_shares = 0
                 del pending_sells[order_id]
 
         # ── Check protective order fills ──
@@ -1693,8 +1727,13 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                             pos.protective_order_id = None
                         order = place_sell_limit(pos.symbol, total_sell, sell_price)
                         if order:
+                            # Store ALL affected tier indices for proper rollback on cancel
+                            affected_tiers = [sell_ti for sell_ti in range(ti + 1)
+                                              if sell_ti < len(pos.sold_shares_list)
+                                              and pos.sold_shares_list[sell_ti] > 0]
                             pending_sells[str(order.id)] = {
-                                "symbol": pos.symbol, "shares": total_sell, "tier_idx": ti
+                                "symbol": pos.symbol, "shares": total_sell, "tier_idx": ti,
+                                "affected_tiers": affected_tiers
                             }
                             pos.remaining_shares -= total_sell
                         else:
@@ -1767,10 +1806,13 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                             pending_sells[str(order.id)] = {
                                 "symbol": pos.symbol, "shares": n, "tier_idx": None
                             }
-                        pos.sold_partial1_shares = n
-                        pos.remaining_shares -= n
-                        pos.breakeven_active = True
-                        need_replace_protective = True
+                            pos.sold_partial1_shares = n
+                            pos.remaining_shares -= n
+                            pos.breakeven_active = True
+                            need_replace_protective = True
+                        else:
+                            # Sell failed — don't activate breakeven or decrement shares
+                            pos.reached_target1 = False
 
                 # Breakeven stop after tier-1
                 if pos.breakeven_active and cur_price <= pos.entry_price and pos.remaining_shares > 0:
