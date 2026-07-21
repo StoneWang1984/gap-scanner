@@ -28,6 +28,7 @@ from zoneinfo import ZoneInfo
 from collections import defaultdict
 from dataclasses import dataclass, field
 import threading
+from uuid import uuid4
 
 import pandas as pd
 from alpaca.trading.client import TradingClient
@@ -197,6 +198,47 @@ class LivePosition:
     def sold_1125_shares(self): return self.sold_shares_list[4] if self.sold_shares_list and len(self.sold_shares_list) > 4 else 0
     @property
     def sold_150_shares(self): return self.sold_shares_list[5] if self.sold_shares_list and len(self.sold_shares_list) > 5 else 0
+
+
+# ── DRY_RUN mode ─────────────────────────────────────────────────────
+DRY_RUN = getattr(config, "DRY_RUN", False)
+
+@dataclass
+class MockOrder:
+    """Simulated order for DRY_RUN mode."""
+    id: str
+    symbol: str
+    qty: int
+    side: str          # "buy" / "sell"
+    order_type: str    # "limit" / "stop_limit" / "trailing_stop" / "market"
+    limit_price: float | None
+    stop_price: float | None
+    trail_percent: float | None
+    status: str = "new"
+    filled_qty: int = 0
+    filled_price: float = 0.0
+
+dry_run_orders: dict[str, MockOrder] = {}
+_dry_run_day_highs: dict[str, float] = {}  # set from day_highs in run_trading_day
+
+SLIPPAGE_ENTRY = getattr(config, "SLIPPAGE_ENTRY_PCT", 0.005)
+SLIPPAGE_STOP = getattr(config, "SLIPPAGE_STOP_PCT", 0.02)
+SLIPPAGE_TARGET = getattr(config, "SLIPPAGE_TARGET_PCT", 0.003)
+SLIPPAGE_TRAILING = getattr(config, "SLIPPAGE_TRAILING_PCT", 0.01)
+SLIPPAGE_FORCE = getattr(config, "SLIPPAGE_FORCE_CLOSE_PCT", 0.01)
+
+
+def _dry_run_get_price(symbol):
+    """Get latest trade price for fill simulation."""
+    from alpaca.data.requests import StockLatestTradeRequest
+    try:
+        trade = data_client.get_stock_latest_trade(StockLatestTradeRequest(
+            symbol_or_symbols=symbol, feed=DATA_FEED))
+        if isinstance(trade, dict):
+            return float(trade[symbol].price)
+        return float(trade.price)
+    except Exception:
+        return None
 
 
 # ── 6-tier target calculation ──────────────────────────────────────
@@ -644,6 +686,13 @@ def refresh_candidates(candidates):
 # ── Order execution ────────────────────────────────────────────────
 
 def place_buy_limit(symbol, shares, price):
+    if DRY_RUN:
+        oid = f"DRY-B-{uuid4().hex[:8]}"
+        mock = MockOrder(id=oid, symbol=symbol, qty=shares, side="buy",
+                         order_type="limit", limit_price=price, stop_price=None, trail_percent=None)
+        dry_run_orders[oid] = mock
+        log(f"[DRY] BUY LIMIT {symbol} {shares} @ ${price:.2f} -> {oid}")
+        return mock
     try:
         order = trading_client.submit_order(LimitOrderRequest(
             symbol=symbol, qty=shares, side=OrderSide.BUY,
@@ -658,6 +707,14 @@ def place_buy_limit(symbol, shares, price):
 
 def place_bracket_entry(symbol, shares, entry_price, stop_price):
     """Place a bracket entry order with stop_loss and take_profit."""
+    if DRY_RUN:
+        oid = f"DRY-BR-{uuid4().hex[:8]}"
+        mock = MockOrder(id=oid, symbol=symbol, qty=shares, side="buy",
+                         order_type="limit", limit_price=round(entry_price * (1 + ENTRY_LIMIT_BUFFER), 2),
+                         stop_price=stop_price, trail_percent=None)
+        dry_run_orders[oid] = mock
+        log(f"[DRY] BRACKET ENTRY {symbol} {shares} @ ${entry_price:.2f} stop=${stop_price:.2f} -> {oid}")
+        return mock
     try:
         order = trading_client.submit_order(LimitOrderRequest(
             symbol=symbol, qty=shares, side=OrderSide.BUY,
@@ -675,6 +732,13 @@ def place_bracket_entry(symbol, shares, entry_price, stop_price):
 
 
 def place_sell_limit(symbol, shares, price):
+    if DRY_RUN:
+        oid = f"DRY-S-{uuid4().hex[:8]}"
+        mock = MockOrder(id=oid, symbol=symbol, qty=shares, side="sell",
+                         order_type="limit", limit_price=price, stop_price=None, trail_percent=None)
+        dry_run_orders[oid] = mock
+        log(f"[DRY] SELL LIMIT {symbol} {shares} @ ${price:.2f} -> {oid}")
+        return mock
     try:
         order = trading_client.submit_order(LimitOrderRequest(
             symbol=symbol, qty=shares, side=OrderSide.SELL,
@@ -688,6 +752,16 @@ def place_sell_limit(symbol, shares, price):
 
 
 def place_sell_market(symbol, shares):
+    if DRY_RUN:
+        oid = f"DRY-SM-{uuid4().hex[:8]}"
+        price = _dry_run_get_price(symbol) or 0
+        fill_price = round(price * (1 - SLIPPAGE_FORCE), 2) if price else 0
+        mock = MockOrder(id=oid, symbol=symbol, qty=shares, side="sell",
+                         order_type="market", limit_price=None, stop_price=None, trail_percent=None,
+                         status="filled", filled_qty=shares, filled_price=fill_price)
+        dry_run_orders[oid] = mock
+        log(f"[DRY] SELL MARKET {symbol} {shares} @ ~${fill_price:.2f} -> {oid}")
+        return mock
     try:
         order = trading_client.submit_order(MarketOrderRequest(
             symbol=symbol, qty=shares, side=OrderSide.SELL,
@@ -701,6 +775,13 @@ def place_sell_market(symbol, shares):
 
 
 def place_stop_limit_sell(symbol, shares, stop_price, limit_price):
+    if DRY_RUN:
+        oid = f"DRY-SL-{uuid4().hex[:8]}"
+        mock = MockOrder(id=oid, symbol=symbol, qty=shares, side="sell",
+                         order_type="stop_limit", limit_price=limit_price, stop_price=stop_price, trail_percent=None)
+        dry_run_orders[oid] = mock
+        log(f"[DRY] STOP-LIMIT {symbol} {shares} stop=${stop_price:.2f} limit=${limit_price:.2f} -> {oid}")
+        return mock
     try:
         order = trading_client.submit_order(StopLimitOrderRequest(
             symbol=symbol, qty=shares, side=OrderSide.SELL,
@@ -716,6 +797,13 @@ def place_stop_limit_sell(symbol, shares, stop_price, limit_price):
 
 
 def place_trailing_stop_sell(symbol, shares, trail_percent):
+    if DRY_RUN:
+        oid = f"DRY-TS-{uuid4().hex[:8]}"
+        mock = MockOrder(id=oid, symbol=symbol, qty=shares, side="sell",
+                         order_type="trailing_stop", limit_price=None, stop_price=None, trail_percent=trail_percent)
+        dry_run_orders[oid] = mock
+        log(f"[DRY] TRAILING STOP {symbol} {shares} trail={trail_percent:.1f}% -> {oid}")
+        return mock
     try:
         order = trading_client.submit_order(TrailingStopOrderRequest(
             symbol=symbol, qty=shares, side=OrderSide.SELL,
@@ -730,6 +818,12 @@ def place_trailing_stop_sell(symbol, shares, trail_percent):
 
 
 def cancel_order(order_id):
+    if DRY_RUN:
+        if order_id in dry_run_orders:
+            dry_run_orders[order_id].status = "canceled"
+            del dry_run_orders[order_id]
+            log(f"[DRY] CANCELLED order {order_id}")
+        return
     try:
         trading_client.cancel_order_by_id(order_id)
         log(f"CANCELLED order {order_id}")
@@ -738,6 +832,9 @@ def cancel_order(order_id):
 
 
 def cancel_all_orders():
+    if DRY_RUN:
+        dry_run_orders.clear()
+        return
     try:
         trading_client.cancel_orders()
     except Exception:
@@ -745,6 +842,9 @@ def cancel_all_orders():
 
 
 def close_all_positions():
+    if DRY_RUN:
+        log("[DRY] CLOSE ALL POSITIONS (no-op)")
+        return
     try:
         positions = trading_client.get_all_positions()
         for pos in positions:
@@ -755,6 +855,16 @@ def close_all_positions():
 
 
 def force_sell_position(symbol: str, qty: int) -> bool:
+    if DRY_RUN:
+        # Cancel any DRY sell orders for this symbol
+        to_cancel = [oid for oid, m in dry_run_orders.items() if m.symbol == symbol and m.side == "sell"]
+        for oid in to_cancel:
+            del dry_run_orders[oid]
+        order = place_sell_market(symbol, qty)
+        if order:
+            log(f"[DRY] FORCE SELL {symbol} {qty} -> {order.id}")
+            return True
+        return False
     # Cancel any pending sell orders for this symbol first
     # (they lock shares and will be replaced by this sell)
     try:
@@ -828,6 +938,45 @@ def force_sell_position(symbol: str, qty: int) -> bool:
 
 
 def check_order_filled(order_id) -> bool:
+    if DRY_RUN:
+        mock = dry_run_orders.get(order_id)
+        if not mock:
+            return False
+        if mock.status == "filled":
+            return True
+        # Simulate fill based on current price
+        price = _dry_run_get_price(mock.symbol)
+        if not price:
+            return False
+        filled = False
+        fill_price = 0.0
+        if mock.side == "buy" and mock.order_type == "limit":
+            if price <= mock.limit_price:
+                fill_price = round(price * (1 + SLIPPAGE_ENTRY), 2)
+                filled = True
+        elif mock.side == "sell" and mock.order_type == "limit":
+            if price >= mock.limit_price:
+                fill_price = round(price * (1 - SLIPPAGE_TARGET), 2)
+                filled = True
+        elif mock.side == "sell" and mock.order_type == "stop_limit":
+            if price <= mock.stop_price:
+                fill_price = round(min(mock.limit_price, price * (1 - SLIPPAGE_STOP)), 2)
+                filled = True
+        elif mock.side == "sell" and mock.order_type == "trailing_stop":
+            # Use day_highs from run_trading_day scope
+            dh = _dry_run_day_highs.get(mock.symbol, price)
+            if dh > 0 and price <= dh * (1 - mock.trail_percent / 100):
+                fill_price = round(price * (1 - SLIPPAGE_TRAILING), 2)
+                filled = True
+        elif mock.order_type == "market":
+            fill_price = round(price * (1 - SLIPPAGE_FORCE), 2)
+            filled = True
+        if filled:
+            mock.status = "filled"
+            mock.filled_qty = mock.qty
+            mock.filled_price = fill_price
+            log(f"[DRY] FILLED {mock.side} {mock.symbol} {mock.qty} @ ${fill_price:.2f}")
+        return filled
     try:
         order = trading_client.get_order_by_id(order_id)
         return order.status in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED)
@@ -838,6 +987,9 @@ def check_order_filled(order_id) -> bool:
 
 def get_order_filled_qty(order_id) -> int:
     """Return the number of shares actually filled for an order."""
+    if DRY_RUN:
+        mock = dry_run_orders.get(order_id)
+        return mock.filled_qty if mock else 0
     try:
         order = trading_client.get_order_by_id(order_id)
         if order.filled_qty:
@@ -848,6 +1000,9 @@ def get_order_filled_qty(order_id) -> int:
 
 
 def check_order_canceled(order_id) -> bool:
+    if DRY_RUN:
+        mock = dry_run_orders.get(order_id)
+        return mock.status == "canceled" if mock else True  # not found = canceled
     try:
         order = trading_client.get_order_by_id(order_id)
         return order.status in (OrderStatus.CANCELED, OrderStatus.EXPIRED, OrderStatus.REJECTED)
@@ -960,6 +1115,10 @@ def check_entry(symbol, open_price, accumulator):
 
 # ── Account equity ──────────────────────────────────────────────────
 def _get_account_equity() -> float:
+    if DRY_RUN:
+        eq = getattr(config, "INITIAL_CAPITAL", 500)
+        log(f"[DRY] Account equity: ${eq:.2f} (simulated)")
+        return eq
     try:
         acct = trading_client.get_account()
         eq = float(acct.equity)
@@ -1069,6 +1228,8 @@ def run_live():
     log(f"WebSocket: {'ON' if getattr(config, 'USE_WEBSOCKET', False) else 'OFF'} | "
         f"Data feed: {'SIP' if DATA_FEED == DataFeed.SIP else 'IEX'}")
     log(f"1.0: 6-tier targets, position recovery, SIP data feed, WebSocket streaming")
+    if DRY_RUN:
+        log("*** DRY_RUN MODE - No real orders will be placed ***")
     log("=" * 60)
 
     if not test_connectivity():
@@ -1188,6 +1349,9 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
     reentry_checked = set()
     accumulator = BarAccumulator()
     day_highs = {}
+    if DRY_RUN:
+        global _dry_run_day_highs
+        _dry_run_day_highs = day_highs
     poll_count = 0
     events_log = []
     pending_buys = {}
@@ -1290,7 +1454,10 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
             log(f"Backfill error: {e}")
 
     # ── Recover existing Alpaca positions ──
-    try:
+    if DRY_RUN:
+        log("[DRY] Skip position recovery (no real positions in DRY_RUN)")
+    else:
+      try:
         alpaca_positions = trading_client.get_all_positions()
         alpaca_orders = trading_client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN))
         for ap in alpaca_positions:
@@ -1383,8 +1550,8 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
             daily_trades += 1
             events_log.append(f"{now_est.strftime('%H:%M:%S')} RECOVERED {sym} @ ${avg_entry:.4f} ({qty}sh, stop=${stop_price:.4f}, mode={target_mode})")
             log(f"RECOVER: {sym} restored -- stop=${stop_price:.4f}, targets={[round(t, 2) for t in targets]}, mode={target_mode}")
-    except Exception as e:
-        log(f"Position recovery error: {e}")
+      except Exception as e:
+          log(f"Position recovery error: {e}")
 
     # ── Start WebSocket stream ──
     global _stream_state
@@ -2126,4 +2293,7 @@ def _wait_force_close(force_close_started: dict, positions: list[LivePosition]):
 
 
 if __name__ == "__main__":
+    if "--dry-run" in sys.argv:
+        config.DRY_RUN = True
+        DRY_RUN = True
     run_live()

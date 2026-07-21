@@ -17,6 +17,7 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
 ALPACA_PAPER = False  # False = live account, True = paper trading
+DRY_RUN = False  # True = simulate orders, no real trades; use --dry-run CLI flag
 ALPACA_BASE_URL = "https://api.alpaca.markets"  # live account
 ALPACA_DATA_URL = "https://data.alpaca.markets"
 
