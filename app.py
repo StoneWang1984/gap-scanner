@@ -23,18 +23,15 @@ config.SLIPPAGE_FORCE_CLOSE_PCT = getattr(config, "SLIPPAGE_FORCE_CLOSE_PCT", 0.
 config.SLIPPAGE_REENTRY_STOP_PCT = getattr(config, "SLIPPAGE_REENTRY_STOP_PCT", 0.025)
 
 import importlib.util
-_ver_dir = Path(__file__).parent / "versions"
-_spec = importlib.util.spec_from_file_location("backtest_045", _ver_dir / "backtest_stone_0.4.5.py")
-_mod_045 = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_mod_045)
-run_backtest_045 = _mod_045.run_backtest_045
+# Use current 6-tier backtest engine
+from backtest import run_backtest as run_backtest_6tier
 
 st.set_page_config(page_title="Stone 0.4.17 交易", page_icon="📊", layout="wide")
 
 # ── Sidebar ──────────────────────────────────────────────────────
 
 st.sidebar.title("Stone 0.4.17 交易")
-st.sidebar.caption("WebSocket即时 · SIP数据源 · 三档止盈 · 仓位恢复")
+st.sidebar.caption("WebSocket即时 · SIP数据源 · 6档止盈 · 仓位恢复")
 
 tab = st.sidebar.radio("导航", ["实盘交易", "策略概览", "运行回测", "交易详情"])
 
@@ -126,8 +123,15 @@ if tab == "实盘交易":
             if sp:
                 row["类型"] = sp.get("trade_type", "first")
                 row["止损"] = f"${sp.get('stop_price', 0):.4f}"
-                row["目标75%"] = f"${sp.get('target_75', 0):.4f}"
-                row["目标150%"] = f"${sp.get('target_150', 0):.4f}"
+                # Show 6-tier targets
+                targets = sp.get("targets", [])
+                reached = sp.get("reached_list", [])
+                if targets:
+                    tier_strs = []
+                    for ti, t in enumerate(targets):
+                        mark = "✓" if ti < len(reached) and reached[ti] else "·"
+                        tier_strs.append(f"{mark}{t:.2f}")
+                    row["6档目标"] = " | ".join(tier_strs)
                 row["最高价"] = f"${sp.get('highest', 0):.4f}"
 
             pos_rows.append(row)
@@ -137,14 +141,22 @@ if tab == "实盘交易":
         # Fallback: show from state file
         pos_rows = []
         for p in state["positions"]:
+            targets = p.get("targets", [])
+            reached = p.get("reached_list", [])
+            tier_str = ""
+            if targets:
+                tier_strs = []
+                for ti, t in enumerate(targets):
+                    mark = "✓" if ti < len(reached) and reached[ti] else "·"
+                    tier_strs.append(f"{mark}{t:.2f}")
+                tier_str = " | ".join(tier_strs)
             pos_rows.append({
                 "股票": p["symbol"],
                 "类型": p.get("trade_type", "first"),
                 "数量": p.get("remaining_shares", 0),
                 "入场价": f"${p.get('entry_price', 0):.4f}",
                 "止损": f"${p.get('stop_price', 0):.4f}",
-                "目标75%": f"${p.get('target_75', 0):.4f}",
-                "目标150%": f"${p.get('target_150', 0):.4f}",
+                "6档目标": tier_str,
             })
         st.dataframe(pd.DataFrame(pos_rows), hide_index=True, use_container_width=True)
     else:
@@ -235,15 +247,16 @@ elif tab == "策略概览":
         - 止损上限: **{config.STOP_LOSS_MAX_PCT:.0%}**
         """)
 
-        st.subheader("首笔出场 — 三档止盈")
-        st.markdown(f"""
-        - 75%目标: 卖出 **1/4** 仓位
-        - 112.5%目标: 卖出 **1/3** 剩余
-        - 150%目标: 卖出 **1/3** 剩余
-        - 75%后移动止盈: **{config.TRAILING_STOP_PCT_75:.0%}**
-        - 112.5%后移动止盈: **{config.TRAILING_STOP_PCT_1125:.0%}**
-        - 150%后移动止盈: **{config.TRAILING_STOP_PCT_150:.0%}**
-        """)
+        st.subheader("首笔出场 — 6档止盈")
+        retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.25, 0.50, 0.75, 1.00, 1.25, 1.50])
+        caps = getattr(config, "TARGET_CAP_TIERS", [0.05, 0.10, 0.15, 0.20, 0.25, 0.35])
+        sell_ratios = getattr(config, "PARTIAL_SELL_RATIOS", [1/8]*6)
+        trail_pcts = getattr(config, "TRAILING_STOP_PCTS", [0.02, 0.025, 0.03, 0.035, 0.04, 0.05])
+        tier_lines = []
+        for i in range(len(retracements)):
+            tier_lines.append(f"- T{i+1} ({int(retracements[i]*100)}%回撤, cap {int(caps[i]*100)}%): 卖出 **1/{int(round(1/sell_ratios[i]))}** 仓位, 追踪止损 **{trail_pcts[i]:.1%}**")
+        tier_lines.append(f"- 总计卖出: **{sum(sell_ratios):.0%}**, 剩余 **{1-sum(sell_ratios):.0%}** 由最终追踪止损保护")
+        st.markdown("\n".join(tier_lines))
 
         st.subheader("再入场规则")
         st.markdown(f"""
@@ -258,11 +271,15 @@ elif tab == "策略概览":
     st.divider()
     st.subheader("0.4.17 新增特性")
     st.markdown("""
+    - **6档分批止盈**: 替代旧3档，更精细地捕捉不同级别的利润
     - **WebSocket 实时交易**: 5min K线完成后1-2秒内下单，逐笔成交即时止损
     - **SIP 数据源**: 覆盖100%成交量（替代IEX 3%）
     - **WS 健康检查**: >120秒无消息自动切回快照轮询
-    - **仓位恢复**: 脚本重启自动从 Alpaca 恢复持仓
-    - **购买力修复**: 使用 equity/stocks 而非 entry_price×10
+    - **仓位恢复**: 脚本重启自动从 Alpaca 恢复持仓，含6档目标重建
+    - **Skip-gap**: 价格跳过多档时一次性卖出所有跳过档位
+    - **Pending sell 追踪**: 卖单成交确认后才更新状态，失败自动回滚
+    - **Partial fill 处理**: 部分成交时精确调整剩余股数
+    - **Bracket order 入场**: 原子性买入+止损，避免 wash trade
     """)
 
 # ══════════════════════════════════════════════════════════════════
@@ -276,7 +293,8 @@ elif tab == "运行回测":
 
     if st.button("开始回测", type="primary"):
         with st.spinner("回测运行中，请等待..."):
-            trades_raw, slippage = run_backtest_045(n_days=n_days)
+            config.BACKTEST_DAYS = n_days
+            trades_raw = run_backtest_6tier()
             trades = trades_raw
 
         if not trades:
@@ -385,19 +403,18 @@ elif tab == "交易详情":
     c7.metric("止损价", f"${t.stop_price:.4f}" if t.stop_price else "N/A")
     c8.metric("出场原因", t.exit_reason.replace("_", " ").title())
 
-    st.subheader("三档止盈详情")
-    tier1 = tier2 = tier3 = "未触发"
-    if t.partial_sell_shares > 0:
-        tier1 = f"**{t.partial_sell_shares:,}股** @ ${t.partial_sell_price:.4f} (75%目标)"
-    if t.partial2_sell_shares > 0:
-        tier2 = f"**{t.partial2_sell_shares:,}股** @ ${t.partial2_sell_price:.4f} (112.5%目标)"
-    if t.partial3_sell_shares > 0:
-        tier3 = f"**{t.partial3_sell_shares:,}股** @ ${t.partial3_sell_price:.4f} (150%目标)"
-
-    tc1, tc2, tc3 = st.columns(3)
-    tc1.markdown(f"75%: {tier1}")
-    tc2.markdown(f"112.5%: {tier2}")
-    tc3.markdown(f"150%: {tier3}")
+    st.subheader("6档止盈详情")
+    if t.partial_sells:
+        n_tiers = len(t.partial_sells)
+        retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.25, 0.50, 0.75, 1.00, 1.25, 1.50])
+        for ti, (price, shares) in enumerate(t.partial_sells):
+            if shares > 0:
+                pct_label = f"{int(retracements[ti]*100)}%" if ti < len(retracements) else f"T{ti+1}"
+                st.markdown(f"- **T{ti+1} ({pct_label})**: {shares:,}股 @ ${price:.4f}")
+        total_sold = sum(s for _, s in t.partial_sells)
+        st.caption(f"分档共卖出 {total_sold:,}股 / 总 {t.shares:,}股")
+    else:
+        st.info("无分档卖出")
 
     if t.trailing_high > t.entry_price:
         st.caption(f"最高价: ${t.trailing_high:.4f} | 移动止盈出场: ${t.trailing_exit_price:.4f}")
