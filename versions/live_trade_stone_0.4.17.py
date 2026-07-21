@@ -465,7 +465,7 @@ class StreamState:
 _stream_state: StreamState | None = None
 
 
-def _on_bar(bar):
+async def _on_bar(bar):
     """WebSocket bar handler — accumulates bars and triggers 5-min completion checks."""
     global _stream_state
     if _stream_state is None:
@@ -486,7 +486,7 @@ def _on_bar(bar):
         _on_updated_bar(symbol, b)
 
 
-def _on_trade(trade):
+async def _on_trade(trade):
     """WebSocket trade handler — caches latest trade for real-time price checks."""
     global _stream_state
     if _stream_state is None:
@@ -765,7 +765,7 @@ def force_sell_position(symbol: str, qty: int) -> bool:
     # Only use close_position when total_qty matches our tracked qty
     if total_qty > 0 and total_qty == qty:
         try:
-            result = trading_client.close_position(symbol, cancel_orders=True)
+            result = trading_client.close_position(symbol)
             if result:
                 log(f"FORCE SELL (close_position): {symbol} {qty} shares")
                 return True
@@ -1311,6 +1311,10 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 target_mode=target_mode,
             )
             positions.append(pos)
+            # Place protective stop if none exists
+            if not prot_order_id:
+                place_protective_stop(pos)
+                log(f"RECOVER: Placed protective stop for {sym} @ ${stop_price:.4f}")
             entry_checked.add(sym)
             daily_trades += 1
             events_log.append(f"{now_est.strftime('%H:%M:%S')} RECOVERED {sym} @ ${avg_entry:.4f} ({qty}sh, stop=${stop_price:.4f}, mode={target_mode})")
@@ -1458,6 +1462,8 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
         for pos in positions[:]:
             if pos.remaining_shares <= 0:
                 continue
+            if pos.trade_type == "recovered":
+                continue  # Skip pullback stop for recovered positions
             symbol = pos.symbol
             snap = snaps.get(symbol)
             if not snap or not snap.daily_bar:
@@ -1523,11 +1529,13 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 need_replace_protective = False
 
                 # 0.4.11: Time limit -- if no target hit in 40 min, sell at breakeven+
-                pos.bar_count += 1
-                time_limit = getattr(config, "FIRST_TRADE_TIME_LIMIT_BARS", 0)
-                if time_limit > 0 and not (pos.reached_list and pos.reached_list[0]) and pos.bar_count >= time_limit:
-                    pos.time_limit_active = True
-                if pos.time_limit_active and cur_price >= pos.entry_price and pos.remaining_shares > 0:
+                # Only applies to first trade, NOT recovered positions
+                if pos.trade_type == "first":
+                    pos.bar_count += 1
+                    time_limit = getattr(config, "FIRST_TRADE_TIME_LIMIT_BARS", 0)
+                    if time_limit > 0 and not (pos.reached_list and pos.reached_list[0]) and pos.bar_count >= time_limit:
+                        pos.time_limit_active = True
+                if pos.trade_type == "first" and pos.time_limit_active and cur_price >= pos.entry_price and pos.remaining_shares > 0:
                     log(f"TIME LIMIT EXIT: {pos.symbol} @ ${cur_price:.4f} (no target in {time_limit * 5}min)")
                     events_log.append(f"{now_est.strftime('%H:%M:%S')} TIME LIMIT EXIT {pos.symbol} @ ${cur_price:.4f}")
                     add_chart_event(pos.symbol, "sell", cur_price, f"TIME LIMIT {pos.remaining_shares}sh")
@@ -1566,7 +1574,9 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                             pos.sold_shares_list[sell_ti] = n_sell
                             total_sell += n_sell
 
-                    if total_sell > 0 and total_sell <= pos.remaining_shares:
+                    if total_sell > pos.remaining_shares:
+                        total_sell = pos.remaining_shares
+                    if total_sell > 0:
                         retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.25, 0.50, 0.75, 1.00, 1.25, 1.50])
                         tier_pct = f"{int(retracements[ti]*100)}%" if ti < len(retracements) else f"T{ti+1}"
                         sell_price = round(pos.targets[ti] * (1 - TARGET_LIMIT_BUFFER), 2)
@@ -1677,6 +1687,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
         if now_time >= cutoff_time and poll_count == 1:
             log(f"Entry window closed (10:00 AM). No entries will be placed.")
         if now_time < cutoff_time and daily_trades < config.MAX_DAILY_TRADES and not daily_stopped:
+            force_qty = getattr(config, "FORCE_QTY", 0)
             for cand in candidates:
                 symbol = cand["symbol"]
                 if symbol in entry_checked or symbol in pending_buys:
@@ -1695,7 +1706,8 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     continue
 
                 # 0.4.11: Skip if entry price >= open price (no chasing above open)
-                if getattr(config, "ENTRY_BELOW_OPEN", True) and entry_price >= cand["open_price"]:
+                # In FORCE_QTY test mode, allow momentum entries to verify cap-only targets
+                if getattr(config, "ENTRY_BELOW_OPEN", True) and entry_price >= cand["open_price"] and force_qty == 0:
                     log(f"  {symbol}: entry ${entry_price:.4f} >= open ${cand['open_price']:.4f}, skipping")
                     entry_checked.add(symbol)
                     continue
@@ -1723,6 +1735,8 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 except Exception:
                     pass
                 shares = int(pos_size / entry_price)
+                if force_qty > 0:
+                    shares = force_qty
                 if shares <= 0:
                     entry_checked.add(symbol)
                     continue
@@ -1816,6 +1830,8 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 except Exception:
                     pass
                 shares = int(reentry_size / entry_price)
+                if force_qty > 0:
+                    shares = 1  # Re-entry also 1 share in test mode
                 if shares <= 0:
                     reentry_checked.add(symbol)
                     continue

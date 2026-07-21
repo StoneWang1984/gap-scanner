@@ -102,7 +102,8 @@ MAX_POSITIONS_PER_DAY = 5
 MAX_DAILY_TRADES = 5
 EQUITY_POSITION_RATIO = 0.80
 MAX_POSITION_SIZE = 100000
-MIN_POSITION_SIZE = 250
+MIN_POSITION_SIZE = 1  # Test mode: allow small positions
+FORCE_QTY = 8  # 8 shares: each tier sells 1 share (8×1/8=1), full 6-tier verification
 INITIAL_CAPITAL = 500
 FORCE_CLOSE_TIME = "15:50"
 
