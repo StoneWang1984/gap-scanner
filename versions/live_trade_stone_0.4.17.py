@@ -814,10 +814,21 @@ def force_sell_position(symbol: str, qty: int) -> bool:
 def check_order_filled(order_id) -> bool:
     try:
         order = trading_client.get_order_by_id(order_id)
-        return order.status == OrderStatus.FILLED
+        return order.status in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED)
     except Exception as e:
         log(f"check_order_filled error for {order_id}: {e}")
         return False
+
+
+def get_order_filled_qty(order_id) -> int:
+    """Return the number of shares actually filled for an order."""
+    try:
+        order = trading_client.get_order_by_id(order_id)
+        if order.filled_qty:
+            return int(float(order.filled_qty))
+        return 0
+    except Exception:
+        return 0
 
 
 def check_order_canceled(order_id) -> bool:
@@ -1164,6 +1175,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
     poll_count = 0
     events_log = []
     pending_buys = {}
+    pending_sells = {}  # {order_id: {"symbol": str, "shares": int, "tier_idx": int|None}}
     chart_events = {}  # {symbol: [{ts, type, price, label}, ...]}
     trades_detail = []
 
@@ -1293,7 +1305,43 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
 
             # 0.4.17: Calculate 6-tier targets for recovered position
             targets, sell_ratios, trail_pcts, target_mode = calc_targets(avg_entry, open_price)
-            reached = [bool(t <= cur_price) for t in targets]
+
+            # Reconstruct sold_shares_list from today's Alpaca order history
+            # We can't know which tier each sell belonged to, but we can count
+            # total shares sold and mark the lowest tiers as sold (conservative)
+            sold_shares_list = [0] * len(targets)
+            total_sold_today = 0
+            try:
+                today_start = now_est.replace(hour=0, minute=0, second=0, microsecond=0)
+                hist_orders = trading_client.get_orders(GetOrdersRequest(
+                    status=QueryOrderStatus.CLOSED,
+                    after=today_start,
+                    direction="asc",
+                ))
+                for ho in hist_orders:
+                    if ho.symbol == sym and ho.side == OrderSide.SELL and ho.filled_qty:
+                        total_sold_today += int(float(ho.filled_qty))
+            except Exception as e:
+                log(f"RECOVER: Order history lookup failed for {sym}: {e}")
+
+            # Distribute sold shares across tiers (fill lowest tiers first)
+            remaining_sold = total_sold_today
+            for ti in range(len(targets)):
+                tier_sell = max(1, int(qty * sell_ratios[ti])) if sell_ratios else 0
+                if remaining_sold <= 0:
+                    break
+                actual = min(tier_sell, remaining_sold)
+                sold_shares_list[ti] = actual
+                remaining_sold -= actual
+
+            # reached_list: mark tiers as reached only if shares were sold at that tier
+            reached = [sold_shares_list[ti] > 0 for ti in range(len(targets))]
+
+            # If no history found, mark all as unreached (safest — won't trigger premature exits)
+            if total_sold_today == 0:
+                reached = [False] * len(targets)
+                sold_shares_list = [0] * len(targets)
+
             highest_seen = max(cur_price, avg_entry)
 
             pos = LivePosition(
@@ -1307,7 +1355,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 targets=targets, sell_ratios=sell_ratios,
                 trail_pcts=trail_pcts,
                 reached_list=reached,
-                sold_shares_list=[0] * len(targets),
+                sold_shares_list=sold_shares_list,
                 target_mode=target_mode,
             )
             positions.append(pos)
@@ -1366,7 +1414,12 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
         for symbol in list(pending_buys.keys()):
             order_id, pos_data = pending_buys[symbol]
             if check_order_filled(order_id):
-                log(f"BUY FILLED: {symbol} order {order_id}")
+                filled_qty = get_order_filled_qty(order_id)
+                # If partial fill, adjust shares to actual filled amount
+                if filled_qty > 0 and filled_qty != pos_data.get("shares", filled_qty):
+                    log(f"BUY PARTIAL FILL: {symbol} {filled_qty}/{pos_data.get('shares', '?')} shares")
+                    pos_data["shares"] = filled_qty
+                log(f"BUY FILLED: {symbol} order {order_id} ({filled_qty}sh)")
                 pos = LivePosition(**pos_data)
                 positions.append(pos)
                 place_protective_stop(pos)
@@ -1381,6 +1434,25 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 log(f"BUY CANCELED: {symbol} order {order_id}")
                 events_log.append(f"{now_est.strftime('%H:%M:%S')} BUY CANCELED {symbol}")
                 del pending_buys[symbol]
+
+        # ── Check pending sell (target tier) fills ──
+        for order_id in list(pending_sells.keys()):
+            info = pending_sells[order_id]
+            symbol = info["symbol"]
+            sell_shares = info["shares"]
+            tier_idx = info.get("tier_idx")
+            if check_order_filled(order_id):
+                log(f"SELL LIMIT FILLED: {symbol} {sell_shares}sh (T{tier_idx+1 if tier_idx is not None else '?'}) order {order_id}")
+                del pending_sells[order_id]
+            elif check_order_canceled(order_id):
+                log(f"SELL LIMIT CANCELED: {symbol} order {order_id}, rolling back sold_shares_list")
+                # Roll back the sold_shares_list entry since sell didn't execute
+                pos = next((p for p in positions if p.symbol == symbol), None)
+                if pos and tier_idx is not None and tier_idx < len(pos.sold_shares_list):
+                    pos.sold_shares_list[tier_idx] = 0
+                if pos:
+                    pos.remaining_shares += sell_shares
+                del pending_sells[order_id]
 
         # ── Check protective order fills ──
         for pos in positions[:]:
@@ -1417,7 +1489,17 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                         pos.remaining_shares = 0
             if force_close_started:
                 _wait_force_close(force_close_started, positions)
-            close_all_positions()
+            # Close any positions that still weren't sold (no duplicate — only unsold ones)
+            try:
+                remaining_alpaca = trading_client.get_all_positions()
+                for ap in remaining_alpaca:
+                    sym = ap.symbol
+                    # Only close if we don't already have a pending sell for this symbol
+                    if sym not in force_close_started:
+                        log(f"EOD CLOSE (no prior sell): selling {ap.qty} {sym}")
+                        trading_client.close_position(sym)
+            except Exception as e:
+                log(f"Final close positions error: {e}")
             # Stop WebSocket stream
             if _stream_state:
                 _stream_state.stop()
@@ -1462,8 +1544,8 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
         for pos in positions[:]:
             if pos.remaining_shares <= 0:
                 continue
-            if pos.trade_type == "recovered":
-                continue  # Skip pullback stop for recovered positions
+            if pos.trade_type in ("recovered", "reentry"):
+                continue  # Skip pullback stop for recovered/reentry positions
             symbol = pos.symbol
             snap = snaps.get(symbol)
             if not snap or not snap.daily_bar:
@@ -1586,8 +1668,18 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                         if pos.protective_order_id:
                             cancel_order(pos.protective_order_id)
                             pos.protective_order_id = None
-                        place_sell_limit(pos.symbol, total_sell, sell_price)
-                        pos.remaining_shares -= total_sell
+                        order = place_sell_limit(pos.symbol, total_sell, sell_price)
+                        if order:
+                            pending_sells[str(order.id)] = {
+                                "symbol": pos.symbol, "shares": total_sell, "tier_idx": ti
+                            }
+                            pos.remaining_shares -= total_sell
+                        else:
+                            # Sell order failed — roll back sold_shares_list
+                            log(f"SELL LIMIT FAILED for {pos.symbol}, rolling back tier sells")
+                            for sell_ti in range(ti + 1):
+                                if sell_ti < len(pos.sold_shares_list):
+                                    pos.sold_shares_list[sell_ti] = 0
                         need_replace_protective = True
 
                     break  # Only process the highest newly-reached tier per poll
@@ -1642,7 +1734,11 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                         if pos.protective_order_id:
                             cancel_order(pos.protective_order_id)
                             pos.protective_order_id = None
-                        place_sell_limit(pos.symbol, n, sell_price)
+                        order = place_sell_limit(pos.symbol, n, sell_price)
+                        if order:
+                            pending_sells[str(order.id)] = {
+                                "symbol": pos.symbol, "shares": n, "tier_idx": None
+                            }
                         pos.sold_partial1_shares = n
                         pos.remaining_shares -= n
                         pos.breakeven_active = True
