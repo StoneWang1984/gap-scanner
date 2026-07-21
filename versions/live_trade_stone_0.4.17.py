@@ -753,7 +753,19 @@ def close_all_positions():
 
 
 def force_sell_position(symbol: str, qty: int) -> bool:
-    # Get actual Alpaca position quantity for qty guard
+    # Cancel any pending sell orders for this symbol first
+    # (they lock shares and will be replaced by this sell)
+    try:
+        open_orders = trading_client.get_orders(filter={"status": "open", "symbols": symbol})
+        for o in open_orders:
+            if o.side == OrderSide.SELL:
+                cancel_order(str(o.id))
+                log(f"FORCE SELL: cancelled pending sell order {o.id} for {symbol}")
+    except Exception:
+        pass
+    time.sleep(0.5)
+
+    # Get actual Alpaca position quantity (after cancellations)
     total_qty = 0
     try:
         alpaca_pos = trading_client.get_open_position(symbol)
@@ -761,28 +773,25 @@ def force_sell_position(symbol: str, qty: int) -> bool:
     except Exception:
         pass
 
+    # When exiting (stop loss, trailing stop, force close), sell ALL actual shares
+    # because pending sell orders were just cancelled and qty may differ from tracked
+    sell_qty = total_qty if total_qty > 0 else qty
+    if sell_qty <= 0:
+        log(f"FORCE SELL: {symbol} no shares to sell")
+        return False
+
     # Method 1: Alpaca close_position API (atomic cancel + sell)
-    # Only use close_position when total_qty matches our tracked qty
-    if total_qty > 0 and total_qty == qty:
+    if total_qty > 0:
         try:
             result = trading_client.close_position(symbol)
             if result:
-                log(f"FORCE SELL (close_position): {symbol} {qty} shares")
+                log(f"FORCE SELL (close_position): {symbol} {total_qty} shares")
                 return True
         except Exception as e:
             log(f"close_position failed for {symbol}: {e}")
-    elif total_qty > 0 and total_qty != qty:
-        # Qty mismatch -- use market sell for partial instead of close_position
-        log(f"FORCE SELL: {symbol} qty mismatch (alpaca={total_qty}, local={qty}), using market sell")
 
-    # Method 2: Cancel all pending orders first, then market sell
+    # Method 2: Market sell
     try:
-        cancel_all_orders()
-        time.sleep(1)
-        sell_qty = min(qty, total_qty) if total_qty > 0 else qty
-        if sell_qty <= 0:
-            log(f"FORCE SELL: {symbol} no shares to sell")
-            return False
         order = place_sell_market(symbol, sell_qty)
         if order:
             filled = _wait_order_filled(order.id, timeout=30)
@@ -796,7 +805,12 @@ def force_sell_position(symbol: str, qty: int) -> bool:
     try:
         cancel_all_orders()
         time.sleep(3)
-        sell_qty = min(qty, total_qty) if total_qty > 0 else qty
+        # Re-check actual position
+        try:
+            alpaca_pos = trading_client.get_open_position(symbol)
+            sell_qty = int(float(alpaca_pos.qty))
+        except Exception:
+            pass
         if sell_qty <= 0:
             return False
         order = place_sell_market(symbol, sell_qty)
@@ -1444,6 +1458,10 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
             if check_order_filled(order_id):
                 log(f"SELL LIMIT FILLED: {symbol} {sell_shares}sh (T{tier_idx+1 if tier_idx is not None else '?'}) order {order_id}")
                 del pending_sells[order_id]
+                # Now that the sell is confirmed, replace protective stop for actual remaining shares
+                pos = next((p for p in positions if p.symbol == symbol), None)
+                if pos and pos.remaining_shares > 0:
+                    replace_stop_for_remaining(pos)
             elif check_order_canceled(order_id):
                 log(f"SELL LIMIT CANCELED: {symbol} order {order_id}, rolling back sold_shares_list")
                 # Roll back the sold_shares_list entry since sell didn't execute
@@ -1461,6 +1479,11 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
             if pos.protective_order_id and check_order_filled(pos.protective_order_id):
                 log(f"PROTECTIVE ORDER FILLED: {pos.symbol} order {pos.protective_order_id}")
                 events_log.append(f"{now_est.strftime('%H:%M:%S')} PROTECTIVE FILLED {pos.symbol}")
+                # Cancel any pending target sells for this symbol
+                for oid in list(pending_sells.keys()):
+                    if pending_sells[oid]["symbol"] == pos.symbol:
+                        cancel_order(oid)
+                        del pending_sells[oid]
                 pos.remaining_shares = 0
                 pos.protective_order_id = None
                 record_trade(pos, pos.stop_price, "protective_stop")
@@ -1675,16 +1698,21 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                             }
                             pos.remaining_shares -= total_sell
                         else:
-                            # Sell order failed — roll back sold_shares_list
+                            # Sell order failed — roll back sold_shares_list AND reached_list
                             log(f"SELL LIMIT FAILED for {pos.symbol}, rolling back tier sells")
                             for sell_ti in range(ti + 1):
                                 if sell_ti < len(pos.sold_shares_list):
                                     pos.sold_shares_list[sell_ti] = 0
+                                if sell_ti < len(pos.reached_list):
+                                    pos.reached_list[sell_ti] = False
                         need_replace_protective = True
 
                     break  # Only process the highest newly-reached tier per poll
 
-                if need_replace_protective and pos.remaining_shares > 0:
+                # Replace protective stop only if no pending sells for this symbol
+                # (otherwise wait for sell fill confirmation to get correct qty)
+                has_pending = any(info["symbol"] == pos.symbol for info in pending_sells.values())
+                if need_replace_protective and pos.remaining_shares > 0 and not has_pending:
                     replace_stop_for_remaining(pos)
 
                 # ── Trailing stop (polled fallback) ──
