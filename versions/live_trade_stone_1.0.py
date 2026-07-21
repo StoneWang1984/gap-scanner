@@ -240,7 +240,7 @@ def save_state(positions, candidates, daily_trades, daily_stopped,
         "updated": dt.datetime.now().isoformat(),
         "version": "1.0",
         "data_feed": "SIP" if DATA_FEED == DataFeed.SIP else "IEX",
-        "ws_connected": _stream_state.is_running() if _stream_state else False,
+        "ws_connected": _stream_state._running if _stream_state else False,
         "daily_trades": daily_trades,
         "daily_stopped": daily_stopped,
         "candidates": [
