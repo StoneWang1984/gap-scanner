@@ -1224,6 +1224,7 @@ def run_live():
     log(f"Entry buffer: +{ENTRY_LIMIT_BUFFER:.1%} | Stop-limit buffer: -{STOP_LIMIT_BUFFER:.1%}")
     log(f"Target buffer: -{TARGET_LIMIT_BUFFER:.1%} | Force-close timeout: {FORCE_CLOSE_LIMIT_TIMEOUT}s")
     log(f"Re-entry cutoff: {REENTRY_CUTOFF} EST | Leveraged ETF filter: ON")
+    log(f"Scan: 9:20 preliminary, 9:31 official (aligned with backtest)")
     log(f"6-tier targets with list-based fields | calc_targets() | get_trailing_pct()")
     log(f"WebSocket: {'ON' if getattr(config, 'USE_WEBSOCKET', False) else 'OFF'} | "
         f"Data feed: {'SIP' if DATA_FEED == DataFeed.SIP else 'IEX'}")
@@ -1369,45 +1370,32 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
             "label": label,
         })
 
-    # ── Pre-market scan gaps (BEFORE 9:30 to have candidates ready at open) ──
-    log("Pre-market scanning for gap stocks...")
+    # ── Pre-market scan (9:20 preview, NOT used for trading) ──
+    log("Pre-market scanning for gap stocks (preliminary)...")
+    preliminary = scan_gaps()
+    if preliminary:
+        log(f"Pre-market preliminary: {[c['symbol'] for c in preliminary[:5]]}... ({len(preliminary)} total)")
+    else:
+        log("Pre-market: no gap stocks found yet (pre-market prices may be incomplete)")
+
+    # ── Wait for 9:31 to re-scan with official open prices (aligns with backtest) ──
+    log("Waiting for 9:31 to re-scan with regular session open prices...")
+    while True:
+        now = dt.datetime.now(tz=ZoneInfo("America/New_York"))
+        if now.time() >= force_close_time:
+            log("Market already closed, skipping trading day.")
+            return {"daily_trades": 0, "trades_detail": [], "candidates": [], "events_log": events_log}
+        if now.time() >= dt.time(9, 31, 30):
+            break
+        time.sleep(5)
+
+    # ── Official scan with regular session open prices ──
+    log("Re-scanning with regular session open prices (aligned with backtest)...")
     candidates = scan_gaps()
     if not candidates:
-        log("No gap stocks found in pre-market scan. Waiting for market open to re-scan...")
-        # Wait for market open and try again
-        while True:
-            now = dt.datetime.now(tz=ZoneInfo("America/New_York"))
-            if now.time() >= force_close_time:
-                log("Market already closed, skipping trading day.")
-                return {"daily_trades": 0, "trades_detail": [], "candidates": [], "events_log": events_log}
-            if (now.hour == 9 and now.minute >= 30) or now.hour >= 10:
-                break
-            log(f"Waiting for market open ({today_info['open']} EST)...")
-            time.sleep(30)
-        log("Re-scanning at market open...")
-        candidates = scan_gaps()
-        if not candidates:
-            log("No gap stocks found today.")
-            return {"daily_trades": 0, "trades_detail": [], "candidates": [], "events_log": events_log}
-    else:
-        log(f"Pre-market found {len(candidates)} gap stocks")
-        # Wait for market open
-        while True:
-            now = dt.datetime.now(tz=ZoneInfo("America/New_York"))
-            if now.time() >= force_close_time:
-                log("Market already closed, skipping trading day.")
-                return {"daily_trades": 0, "trades_detail": [], "candidates": [], "events_log": events_log}
-            if (now.hour == 9 and now.minute >= 30) or now.hour >= 10:
-                break
-            log(f"Waiting for market open ({today_info['open']} EST)... candidates ready.")
-            time.sleep(30)
-
-    # ── Refresh candidate open prices at market open ──
-    if candidates:
-        candidates = refresh_candidates(candidates)
-    if not candidates:
-        log("No gap stocks after price refresh.")
+        log("No gap stocks found with regular session prices.")
         return {"daily_trades": 0, "trades_detail": [], "candidates": [], "events_log": events_log}
+    log(f"Official scan found {len(candidates)} gap stocks")
 
     n_candidates = len(candidates)
     max_stocks = min(config.MAX_POSITIONS_PER_DAY, n_candidates)
