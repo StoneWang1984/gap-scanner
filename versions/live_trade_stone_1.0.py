@@ -438,6 +438,9 @@ class BarAccumulator:
     def get_5min_bars(self, symbol):
         return list(self._5min_cache.get(symbol, []))
 
+    def get_1min_bars(self, symbol):
+        return list(self._minute_bars.get(symbol, []))
+
     def bar_count(self, symbol):
         return len(self._5min_cache.get(symbol, []))
 
@@ -685,50 +688,28 @@ def refresh_candidates(candidates):
 
 # ── Order execution ────────────────────────────────────────────────
 
-def place_buy_limit(symbol, shares, price):
+def place_buy_market(symbol, shares):
+    """Place a market buy order — used after pullback confirmation for immediate entry."""
     if DRY_RUN:
-        oid = f"DRY-B-{uuid4().hex[:8]}"
+        oid = f"DRY-BM-{uuid4().hex[:8]}"
+        price = _dry_run_get_price(symbol) or 0
+        fill_price = round(price * (1 + SLIPPAGE_ENTRY_PCT), 2) if price else 0
         mock = MockOrder(id=oid, symbol=symbol, qty=shares, side="buy",
-                         order_type="limit", limit_price=price, stop_price=None, trail_percent=None)
+                         order_type="market", limit_price=None, stop_price=None, trail_percent=None,
+                         status="filled", filled_qty=shares, filled_price=fill_price)
         dry_run_orders[oid] = mock
-        log(f"[DRY] BUY LIMIT {symbol} {shares} @ ${price:.2f} -> {oid}")
+        log(f"[DRY] BUY MARKET {symbol} {shares} @ ~${fill_price:.2f} -> {oid}")
         return mock
     try:
-        order = trading_client.submit_order(LimitOrderRequest(
-            symbol=symbol, qty=shares, side=OrderSide.BUY,
-            time_in_force=TimeInForce.DAY, limit_price=round(price, 2),
-        ))
-        log(f"BUY LIMIT {symbol} {shares} @ ${price:.2f} -> order {order.id}")
-        return order
-    except Exception as e:
-        log(f"BUY LIMIT FAILED {symbol}: {e}")
-        return None
-
-
-def place_bracket_entry(symbol, shares, entry_price, stop_price):
-    """Place a bracket entry order with stop_loss and take_profit."""
-    if DRY_RUN:
-        oid = f"DRY-BR-{uuid4().hex[:8]}"
-        mock = MockOrder(id=oid, symbol=symbol, qty=shares, side="buy",
-                         order_type="limit", limit_price=round(entry_price * (1 + ENTRY_LIMIT_BUFFER), 2),
-                         stop_price=stop_price, trail_percent=None)
-        dry_run_orders[oid] = mock
-        log(f"[DRY] BRACKET ENTRY {symbol} {shares} @ ${entry_price:.2f} stop=${stop_price:.2f} -> {oid}")
-        return mock
-    try:
-        order = trading_client.submit_order(LimitOrderRequest(
+        order = trading_client.submit_order(MarketOrderRequest(
             symbol=symbol, qty=shares, side=OrderSide.BUY,
             time_in_force=TimeInForce.DAY,
-            limit_price=round(entry_price * (1 + ENTRY_LIMIT_BUFFER), 2),
-            order_class="bracket",
-            stop_loss={"stop_price": round(stop_price, 2)},
-            take_profit={"limit_price": round(entry_price * 2, 2)},
         ))
-        log(f"BRACKET ENTRY {symbol} {shares} @ ${entry_price:.2f} stop=${stop_price:.2f} tp=${entry_price * 2:.2f} -> order {order.id}")
+        log(f"BUY MARKET {symbol} {shares} -> order {order.id}")
         return order
     except Exception as e:
-        log(f"BRACKET ENTRY FAILED {symbol}: {e}, falling back to plain limit")
-        return place_buy_limit(symbol, shares, entry_price * (1 + ENTRY_LIMIT_BUFFER))
+        log(f"BUY MARKET FAILED {symbol}: {e}")
+        return None
 
 
 def place_sell_limit(symbol, shares, price):
@@ -1084,7 +1065,38 @@ def replace_stop_for_remaining(pos: LivePosition) -> str | None:
 
 
 # ── Entry detection ────────────────────────────────────────────────
+def check_entry_1min(symbol, open_price, accumulator):
+    """1分钟K线折返点检测，5根1分钟bar确认底部（等价1根5分钟bar）。"""
+    bars = accumulator.get_1min_bars(symbol)
+    if len(bars) < 2:
+        return 0, False
+    pullback_idx = -1
+    pullback_price = 0.0
+    for i in range(len(bars)):
+        if bars[i]["low"] < open_price:
+            pullback_idx = i
+            pullback_price = bars[i]["low"]
+            break
+    if pullback_idx < 0:
+        return 0, False
+    if not config.ENTRY_CONFIRMATION:
+        return pullback_price, True
+    confirm_count = 0
+    for i in range(pullback_idx + 1, len(bars)):
+        bar_low = bars[i]["low"]
+        if bar_low < open_price and bar_low < pullback_price:
+            pullback_idx = i
+            pullback_price = bar_low
+            confirm_count = 0
+        elif bar_low >= pullback_price:
+            confirm_count += 1
+            if confirm_count >= 5:
+                return pullback_price, True
+    return pullback_price, True
+
+
 def check_entry(symbol, open_price, accumulator):
+    """DEPRECATED: 旧版5分钟K线入场检测，保留兼容。"""
     bars = accumulator.get_5min_bars(symbol)
     if len(bars) < 2:
         return 0, False
@@ -1408,14 +1420,15 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
         log(f"  {c['symbol']}: gap +{c['gap_pct']:.1%}, open=${c['open_price']:.4f}")
         day_highs[c['symbol']] = c['open_price']
 
-    # ── Backfill historical 5-min bars for candidates ──
+    # ── Backfill historical 1-min bars for candidates ──
+    # 1-min bars auto-aggregate into 5-min cache via BarAccumulator
     now_est = dt.datetime.now(tz=ZoneInfo("America/New_York"))
     if candidates:
         today_open = now_est.replace(hour=9, minute=30, second=0, microsecond=0)
         try:
             req = StockBarsRequest(
                 symbol_or_symbols=[c['symbol'] for c in candidates],
-                timeframe=TimeFrame(5, TimeFrameUnit.Minute),
+                timeframe=TimeFrame(1, TimeFrameUnit.Minute),
                 start=today_open, end=now_est,
                 feed=DATA_FEED,
             )
@@ -1437,7 +1450,8 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                         b.low = row["low"]; b.close = row["close"]
                         b.volume = int(row["volume"])
                         accumulator.add_bar(sym, b)
-                log(f"Backfilled bars: {dict((c['symbol'], accumulator.bar_count(c['symbol'])) for c in candidates)}")
+                log(f"Backfilled 1min bars: {dict((c['symbol'], len(accumulator.get_1min_bars(c['symbol']))) for c in candidates)}")
+                log(f"Backfilled 5min cache: {dict((c['symbol'], accumulator.bar_count(c['symbol'])) for c in candidates)}")
         except Exception as e:
             log(f"Backfill error: {e}")
 
@@ -1586,23 +1600,33 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
             order_id, pos_data = pending_buys[symbol]
             if check_order_filled(order_id):
                 filled_qty = get_order_filled_qty(order_id)
+                # For market orders: update entry_price to actual fill price
+                try:
+                    order_obj = trading_client.get_order_by_id(order_id)
+                    if order_obj and float(order_obj.filled_avg_price) > 0:
+                        actual_fill_price = float(order_obj.filled_avg_price)
+                        log(f"BUY MARKET actual fill price: {symbol} @ ${actual_fill_price:.4f}")
+                        pos_data["entry_price"] = actual_fill_price
+                        # Recalc stop price based on actual fill
+                        atr_val = pos_data.get("atr", 0)
+                        pos_data["stop_price"] = calc_stop_price(actual_fill_price, atr_val)
+                        # Recalc targets based on actual fill and open_price
+                        targets_new, ratios_new, trails_new, mode_new = calc_targets(actual_fill_price, pos_data["open_price"])
+                        pos_data["targets"] = targets_new
+                        pos_data["sell_ratios"] = ratios_new
+                        pos_data["trail_pcts"] = trails_new
+                        pos_data["target_mode"] = mode_new
+                        pos_data["reached_list"] = [False] * len(targets_new)
+                        pos_data["sold_shares_list"] = [0] * len(targets_new)
+                except Exception as e:
+                    log(f"Could not get actual fill price for {symbol}: {e}")
                 # If partial fill, adjust shares to actual filled amount
                 if filled_qty > 0 and filled_qty != pos_data.get("shares", filled_qty):
                     log(f"BUY PARTIAL FILL: {symbol} {filled_qty}/{pos_data.get('shares', '?')} shares")
                     pos_data["shares"] = filled_qty
-                log(f"BUY FILLED: {symbol} order {order_id} ({filled_qty}sh)")
+                log(f"BUY FILLED: {symbol} order {order_id} ({filled_qty}sh) @ ${pos_data['entry_price']:.4f}")
                 pos = LivePosition(**pos_data)
                 positions.append(pos)
-                # Cancel bracket order's auto-created stop_loss/take_profit legs
-                # to prevent double stop orders (we place our own below)
-                try:
-                    open_orders = trading_client.get_orders(filter={"status": "open", "symbols": symbol})
-                    for o in open_orders:
-                        if o.side == OrderSide.SELL and str(o.id) != order_id:
-                            cancel_order(str(o.id))
-                            log(f"CANCELLED bracket leg {o.id} for {symbol}")
-                except Exception:
-                    pass
                 place_protective_stop(pos)
                 events_log.append(f"{now_est.strftime('%H:%M:%S')} BUY FILLED {symbol} @ ${pos.entry_price:.4f}")
                 add_chart_event(symbol, "buy", pos.entry_price,
@@ -2024,7 +2048,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     entry_checked.add(symbol)
                     continue
 
-                entry_price, confirmed = check_entry(symbol, cand["open_price"], accumulator)
+                entry_price, confirmed = check_entry_1min(symbol, cand["open_price"], accumulator)
                 if not confirmed or entry_price <= 0:
                     continue
 
@@ -2064,8 +2088,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     entry_checked.add(symbol)
                     continue
 
-                limit_price = round(entry_price * (1 + ENTRY_LIMIT_BUFFER), 2)
-                order = place_bracket_entry(symbol, shares, entry_price, stop)
+                order = place_buy_market(symbol, shares)
                 if order:
                     pos_data = {
                         "symbol": symbol, "entry_price": entry_price, "shares": shares,
@@ -2078,9 +2101,9 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     }
                     pending_buys[symbol] = (str(order.id), pos_data)
                     entry_checked.add(symbol)
-                    log(f"BUY PENDING {symbol}: entry=${entry_price:.4f}, limit=${limit_price:.4f}, "
+                    log(f"BUY MARKET PENDING {symbol}: entry=${entry_price:.4f}, "
                         f"stop=${stop:.4f}, targets={[round(t, 2) for t in targets]}, mode={target_mode}, shares={shares}")
-                    events_log.append(f"{now_est.strftime('%H:%M:%S')} BUY PENDING {symbol} @ ${limit_price:.4f}")
+                    events_log.append(f"{now_est.strftime('%H:%M:%S')} BUY MARKET {symbol} @ ${entry_price:.4f}")
 
         # ── Check re-entry ──
         # 0.4.13: Re-entry v2 with half position, ATR stop, tier targets, NO time stop
@@ -2159,8 +2182,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     reentry_checked.add(symbol)
                     continue
 
-                limit_price = round(entry_price * (1 + ENTRY_LIMIT_BUFFER), 2)
-                order = place_buy_limit(symbol, shares, limit_price)
+                order = place_buy_market(symbol, shares)
                 if order:
                     # 1.0: Re-entry positions also use 6-tier target lists (empty targets for re-entry)
                     pos = LivePosition(
@@ -2176,7 +2198,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     positions.append(pos)
                     place_protective_stop(pos)
                     reentry_checked.add(symbol)
-                    log(f"RE-ENTERED {symbol}: entry=${entry_price:.4f}, limit=${limit_price:.4f}, "
+                    log(f"RE-ENTERED {symbol}: entry=${entry_price:.4f}, "
                         f"stop=${stop:.4f}, target=${target:.4f}, prev_high=${prev_high:.4f}, shares={shares}, atr=${atr:.4f}")
                     events_log.append(f"{now_est.strftime('%H:%M:%S')} RE-ENTERED {symbol} @ ${entry_price:.4f} (v2)")
                     # Update WebSocket subscriptions

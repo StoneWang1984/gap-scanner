@@ -160,7 +160,72 @@ def get_5min_bars(client, symbol, date) -> pd.DataFrame:
     return bars.df
 
 
+def get_1min_bars(client, symbol, date) -> pd.DataFrame:
+    market_open = pd.Timestamp(f"{date.date()} {config.MARKET_OPEN}", tz="America/New_York")
+    market_close = pd.Timestamp(f"{date.date()} {config.MARKET_CLOSE}", tz="America/New_York")
+    request = StockBarsRequest(
+        symbol_or_symbols=symbol, timeframe=TimeFrame(1, TimeFrameUnit.Minute),
+        start=market_open, end=market_close, adjustment=Adjustment.RAW, feed=getattr(config, "DATA_FEED_OBJ", DataFeed.IEX),
+    )
+    bars = client.get_stock_bars(request)
+    if bars.df.empty:
+        return pd.DataFrame()
+    return bars.df
+
+
+def find_entry_with_confirmation_1min(bars_1m, open_price):
+    """1分钟K线折返点检测，5根1分钟bar确认底部。"""
+    if bars_1m.empty or len(bars_1m) < 2:
+        return 0, -1, False
+    pullback_idx = -1
+    pullback_price = 0.0
+    for i in range(len(bars_1m)):
+        if bars_1m.iloc[i]["low"] < open_price:
+            pullback_idx = i
+            pullback_price = bars_1m.iloc[i]["low"]
+            break
+    if pullback_idx < 0:
+        return 0, -1, False
+    if not config.ENTRY_CONFIRMATION:
+        return pullback_price, pullback_idx, True
+    confirm_count = 0
+    for i in range(pullback_idx + 1, len(bars_1m)):
+        bar_low = bars_1m.iloc[i]["low"]
+        if bar_low < open_price and bar_low < pullback_price:
+            pullback_idx = i
+            pullback_price = bar_low
+            confirm_count = 0
+        elif bar_low >= pullback_price:
+            confirm_count += 1
+            if confirm_count >= 5:
+                return pullback_price, pullback_idx, True
+    return pullback_price, pullback_idx, True
+
+
+def locate_5min_bar_index(bars_5m, entry_timestamp):
+    """Map 1-min entry timestamp to 5-min bar index."""
+    # Handle multi-index (symbol, timestamp) tuples
+    if isinstance(entry_timestamp, tuple):
+        entry_ts = pd.Timestamp(entry_timestamp[1])
+    else:
+        entry_ts = pd.Timestamp(entry_timestamp)
+    if entry_ts.tzinfo is None:
+        entry_ts = entry_ts.tz_localize('UTC').tz_convert('America/New_York')
+    bucket_minute = (entry_ts.minute // 5) * 5
+    bucket_ts = entry_ts.replace(minute=bucket_minute, second=0, microsecond=0)
+    for i in range(len(bars_5m)):
+        idx = bars_5m.index[i]
+        bar_ts = pd.Timestamp(idx) if not isinstance(idx, tuple) else pd.Timestamp(idx[1])
+        if bar_ts.tzinfo is None:
+            bar_ts = bar_ts.tz_localize('UTC').tz_convert('America/New_York')
+        bar_bucket = bar_ts.replace(minute=(bar_ts.minute // 5) * 5, second=0, microsecond=0)
+        if bar_bucket == bucket_ts:
+            return i
+    return 0
+
+
 def find_entry_with_confirmation(bars_5m, open_price):
+    """DEPRECATED: 旧版5分钟入场检测，保留兼容。"""
     if bars_5m.empty or len(bars_5m) < 2:
         return 0, -1, False
     pullback_idx = -1
@@ -176,8 +241,6 @@ def find_entry_with_confirmation(bars_5m, open_price):
         return pullback_price, pullback_idx, True
     if pullback_idx + 1 >= len(bars_5m):
         return 0, -1, False
-    # Track the running minimum: keep updating pullback while price goes lower,
-    # return when a subsequent bar's low is higher (confirmation of bottom)
     for i in range(pullback_idx + 1, len(bars_5m)):
         bar_low = bars_5m.iloc[i]["low"]
         if bar_low < open_price and bar_low < pullback_price:
@@ -336,11 +399,23 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
             bars_5m = get_5min_bars(client, symbol, date)
             if bars_5m.empty or len(bars_5m) < 3:
                 continue
+            bars_1m = get_1min_bars(client, symbol, date)
 
-            all_bars = _bars_to_list(bars_5m)
+            all_bars_5m = _bars_to_list(bars_5m)
 
-            # ========== FIRST TRADE ==========
-            pullback, entry_bar_idx, confirmed = find_entry_with_confirmation(bars_5m, open_price)
+            # ========== FIRST TRADE: 1-min entry detection ==========
+            if bars_1m.empty or len(bars_1m) < 2:
+                # Fallback to 5-min if 1-min unavailable
+                pullback, entry_bar_idx, confirmed = find_entry_with_confirmation(bars_5m, open_price)
+                entry_bar_idx_5m = entry_bar_idx
+            else:
+                pullback, entry_bar_idx_1m, confirmed = find_entry_with_confirmation_1min(bars_1m, open_price)
+                # Map 1-min entry to 5-min bar index
+                if confirmed and entry_bar_idx_1m >= 0:
+                    entry_ts_1m = bars_1m.index[entry_bar_idx_1m]
+                    entry_bar_idx_5m = locate_5min_bar_index(bars_5m, entry_ts_1m)
+                else:
+                    entry_bar_idx_5m = -1
             if not confirmed or pullback <= 0:
                 print(f"  {symbol}: no confirmed entry, skipping")
                 continue
@@ -350,8 +425,8 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
                 print(f"  {symbol}: entry ${pullback:.4f} >= open ${open_price:.4f}, skipping")
                 continue
 
-            # Entry time check
-            idx_val = bars_5m.index[entry_bar_idx]
+            # Entry time check — use 5-min bar timestamp for cutoff
+            idx_val = bars_5m.index[entry_bar_idx_5m]
             if isinstance(idx_val, tuple):
                 entry_ts = pd.Timestamp(idx_val[1])
             else:
@@ -364,9 +439,9 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
                 print(f"  {symbol}: entry after 10:00, skipping")
                 continue
 
-            # ATR
+            # ATR (still use 5-min bars for ATR calculation)
             bars_for_atr = []
-            for j in range(min(entry_bar_idx + 1, len(bars_5m))):
+            for j in range(min(entry_bar_idx_5m + 1, len(bars_5m))):
                 b = bars_5m.iloc[j]
                 bars_for_atr.append({"high": b["high"], "low": b["low"], "close": b["close"]})
             atr = calc_atr(bars_for_atr, period=14)
@@ -386,9 +461,12 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
             if shares <= 0:
                 continue
 
-            # Remaining bars after entry
-            remaining_list = all_bars[entry_bar_idx + 1:]
+            # Remaining 5-min bars after entry (position management uses 5-min)
+            remaining_list = all_bars_5m[entry_bar_idx_5m + 1:]
             force_close_price = remaining_list[-1]["close"] if remaining_list else None
+
+            # Alias for chart events (5-min bar index)
+            entry_bar_idx = entry_bar_idx_5m
 
             time_limit = getattr(config, "FIRST_TRADE_TIME_LIMIT_BARS", 0)
             result = evaluate_trade_stone(
@@ -422,7 +500,7 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
             chart_bars = _bars_to_chart(bars_5m)
             events = []
             # Buy event
-            events.append({"ts": _bar_ts_str(all_bars, entry_bar_idx), "type": "buy",
+            events.append({"ts": _bar_ts_str(all_bars_5m, entry_bar_idx), "type": "buy",
                            "price": round(pullback, 4), "label": f"BUY {shares}sh"})
             # Target sells — find actual bar times
             next_search = entry_bar_idx + 1
@@ -430,8 +508,8 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
             if result.partial_sells:
                 for ti, (p, s) in enumerate(result.partial_sells):
                     if s > 0:
-                        t_idx = _find_target_bar(all_bars, next_search, plan.targets[ti])
-                        ts_str = _bar_ts_str(all_bars, t_idx) if t_idx is not None else _bar_ts_str(all_bars, next_search)
+                        t_idx = _find_target_bar(all_bars_5m, next_search, plan.targets[ti])
+                        ts_str = _bar_ts_str(all_bars_5m, t_idx) if t_idx is not None else _bar_ts_str(all_bars_5m, next_search)
                         pct_label = f"{int(retracements[ti]*100)}%"
                         events.append({"ts": ts_str, "type": "sell", "price": round(p, 4),
                                        "label": f"TARGET_{pct_label} {s}sh"})
@@ -444,7 +522,7 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
                 total_sold = sum(s for _, s in (result.partial_sells or []))
                 remaining_shares = shares - total_sold
                 if remaining_shares > 0:
-                    events.append({"ts": _bar_ts_str(all_bars, exit_bar_in_all), "type": "sell",
+                    events.append({"ts": _bar_ts_str(all_bars_5m, exit_bar_in_all), "type": "sell",
                                    "price": round(result.exit_price, 4), "label": f"{exit_label} {remaining_shares}sh"})
 
             retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.25, 0.50, 0.75, 1.00, 1.25, 1.50])
@@ -461,7 +539,7 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
             # ========== RE-ENTRY TRADES ==========
             # Find bars after first trade's exit
             exit_bar_in_all = entry_bar_idx + 1 + result.exit_bar_idx
-            bars_after_exit = all_bars[exit_bar_in_all + 1:]
+            bars_after_exit = all_bars_5m[exit_bar_in_all + 1:]
 
             if result.exit_reason == "force_close" or not bars_after_exit:
                 continue
@@ -561,15 +639,15 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
 
                 # ── Collect chart data for re-entry trade ──
                 re_sym_key = f"{symbol} RE ({date_key})"
-                # Re-entry bars: offset into all_bars
+                # Re-entry bars: offset into all_bars_5m
                 reentry_start_in_all = exit_bar_in_all + 1 + reentry_idx
                 re_events = []
-                re_events.append({"ts": _bar_ts_str(all_bars, reentry_start_in_all), "type": "buy",
+                re_events.append({"ts": _bar_ts_str(all_bars_5m, reentry_start_in_all), "type": "buy",
                                   "price": round(reentry_price, 4), "label": f"RE-ENTRY BUY {reentry_shares}sh"})
                 # Tier-1 sell (retracement target)
                 if reentry_result.partial_sell_shares > 0:
-                    t1_idx = _find_target_bar(all_bars, reentry_start_in_all + 1, reentry_target_1)
-                    ts_t1 = _bar_ts_str(all_bars, t1_idx) if t1_idx is not None else _bar_ts_str(all_bars, reentry_start_in_all + 1)
+                    t1_idx = _find_target_bar(all_bars_5m, reentry_start_in_all + 1, reentry_target_1)
+                    ts_t1 = _bar_ts_str(all_bars_5m, t1_idx) if t1_idx is not None else _bar_ts_str(all_bars_5m, reentry_start_in_all + 1)
                     re_events.append({"ts": ts_t1, "type": "sell", "price": round(reentry_result.partial_sell_price, 4),
                                       "label": f"TIER-1 {reentry_result.partial_sell_shares}sh"})
                 # Exit event (trailing, stop, force close)
@@ -578,7 +656,7 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
                     re_exit_label = reentry_result.exit_reason.upper().replace("_", " ")
                     re_remaining = reentry_shares - reentry_result.partial_sell_shares
                     if re_remaining > 0:
-                        re_events.append({"ts": _bar_ts_str(all_bars, reentry_exit_in_all), "type": "sell",
+                        re_events.append({"ts": _bar_ts_str(all_bars_5m, reentry_exit_in_all), "type": "sell",
                                           "price": round(reentry_result.exit_price, 4), "label": f"{re_exit_label} {re_remaining}sh"})
 
                 chart_entries[re_sym_key] = {
