@@ -169,6 +169,8 @@ class LivePosition:
     reached_list: list = None
     sold_shares_list: list = None
     target_mode: str = "retracement"
+    # Ladder sell: index of next tier to place (0=T1, 1=T2, ...; = len(targets) after all sold)
+    next_tier_idx: int = 0
 
     def __post_init__(self):
         self.remaining_shares = self.shares
@@ -310,6 +312,7 @@ def save_state(positions, candidates, daily_trades, daily_stopped,
                 "reached_target1": p.reached_target1,
                 "sold_partial1_shares": p.sold_partial1_shares,
                 "breakeven_active": p.breakeven_active,
+                "next_tier_idx": p.next_tier_idx,
                 "reentry_bar_count": p.reentry_bar_count,
                 "atr": p.atr,
             }
@@ -1053,12 +1056,16 @@ def replace_stop_for_remaining(pos: LivePosition) -> str | None:
     if pos.remaining_shares <= 0:
         return None
 
-    # 1.0: Use any(reached_list) instead of pos.reached_75
-    if pos.reached_list and any(pos.reached_list):
-        if pos.trade_type in ("first", "recovered"):
-            trail_pct = get_trailing_pct(pos)
+    # Ladder: use next_tier_idx to determine trailing pct
+    if pos.trade_type in ("first", "recovered") and pos.targets:
+        if pos.next_tier_idx > 0:
+            filled_tier = pos.next_tier_idx - 1
+            trail_pct = pos.trail_pcts[min(filled_tier, len(pos.trail_pcts) - 1)]
             return replace_with_trailing_stop(pos, trail_pct)
-        elif pos.trade_type == "reentry":
+        else:
+            return place_protective_stop(pos)
+    elif pos.reached_list and any(pos.reached_list):
+        if pos.trade_type == "reentry":
             return replace_with_trailing_stop(pos, config.REENTRY_TRAILING_PCT_2)
 
     return place_protective_stop(pos)
@@ -1527,6 +1534,15 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 reached = [False] * len(targets)
                 sold_shares_list = [0] * len(targets)
 
+            # Compute next_tier_idx from reached_list
+            next_tier_idx = 0
+            for ti in range(len(reached)):
+                if not reached[ti]:
+                    next_tier_idx = ti
+                    break
+            else:
+                next_tier_idx = len(targets)
+
             highest_seen = max(cur_price, avg_entry)
 
             pos = LivePosition(
@@ -1542,12 +1558,30 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 reached_list=reached,
                 sold_shares_list=sold_shares_list,
                 target_mode=target_mode,
+                next_tier_idx=next_tier_idx,
             )
             positions.append(pos)
-            # Place protective stop if none exists
+            # Scan Alpaca open orders for pending ladder sells to avoid duplicate placement
+            for ao in alpaca_orders:
+                if ao.symbol == sym and ao.side == OrderSide.SELL and ao.type == "limit":
+                    for ti in range(len(targets)):
+                        expected = round(targets[ti] * (1 - TARGET_LIMIT_BUFFER), 2)
+                        if abs(float(ao.limit_price) - expected) < 0.02:
+                            pending_sells[str(ao.id)] = {
+                                "symbol": sym,
+                                "shares": max(1, int(qty * sell_ratios[ti])),
+                                "tier_idx": ti,
+                                "affected_tiers": [ti],
+                                "is_ladder_tier": True,
+                            }
+                            sold_shares_list[ti] = max(1, int(qty * sell_ratios[ti]))
+                            # Don't advance next_tier_idx for unfilled pending sells
+                            log(f"RECOVER: Found pending ladder sell for {sym} T{ti+1} @ ${float(ao.limit_price):.4f}")
+                            break
+            # Place protective stop if none exists (or if ladder system needs one)
             if not prot_order_id:
-                place_protective_stop(pos)
-                log(f"RECOVER: Placed protective stop for {sym} @ ${stop_price:.4f}")
+                replace_stop_for_remaining(pos)
+                log(f"RECOVER: Placed protective stop for {sym}")
             entry_checked.add(sym)
             daily_trades += 1
             events_log.append(f"{now_est.strftime('%H:%M:%S')} RECOVERED {sym} @ ${avg_entry:.4f} ({qty}sh, stop=${stop_price:.4f}, mode={target_mode})")
@@ -1628,6 +1662,22 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 pos = LivePosition(**pos_data)
                 positions.append(pos)
                 place_protective_stop(pos)
+                # ── Ladder: Place T1 sell immediately after buy fill ──
+                if pos.trade_type in ("first", "recovered") and pos.targets:
+                    t1_shares = max(1, int(pos.shares * pos.sell_ratios[0]))
+                    t1_price = round(pos.targets[0] * (1 - TARGET_LIMIT_BUFFER), 2)
+                    order = place_sell_limit(pos.symbol, t1_shares, t1_price)
+                    if order:
+                        pending_sells[str(order.id)] = {
+                            "symbol": pos.symbol, "shares": t1_shares, "tier_idx": 0,
+                            "affected_tiers": [0], "is_ladder_tier": True,
+                        }
+                        pos.sold_shares_list[0] = t1_shares
+                        pos.remaining_shares -= t1_shares
+                        pos.next_tier_idx = 1
+                        log(f"T1 LADDER SELL placed: {pos.symbol} {t1_shares} @ ${t1_price:.4f}")
+                    else:
+                        log(f"T1 LADDER SELL FAILED: {pos.symbol}, will retry in main loop")
                 events_log.append(f"{now_est.strftime('%H:%M:%S')} BUY FILLED {symbol} @ ${pos.entry_price:.4f}")
                 add_chart_event(symbol, "buy", pos.entry_price,
                                 f"BUY {pos.shares}sh" if pos.trade_type != "reentry" else f"RE-ENTRY BUY {pos.shares}sh")
@@ -1656,11 +1706,22 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     pos = next((p for p in positions if p.symbol == symbol), None)
                     if pos:
                         pos.remaining_shares += shortfall
+                        # Adjust sold_shares_list for partial fill
+                        if info.get("is_ladder_tier") and tier_idx is not None and tier_idx < len(pos.sold_shares_list):
+                            pos.sold_shares_list[tier_idx] = actual_filled
                 log(f"SELL LIMIT FILLED: {symbol} {actual_filled}sh (T{tier_idx+1 if tier_idx is not None else '?'}) order {order_id}")
                 del pending_sells[order_id]
-                # Now that the sell is confirmed, replace protective stop for actual remaining shares
+                # ── Ladder: advance next_tier_idx and move trailing stop ──
                 pos = next((p for p in positions if p.symbol == symbol), None)
-                if pos and pos.remaining_shares > 0:
+                if pos and info.get("is_ladder_tier") and tier_idx is not None:
+                    pos.reached_list[tier_idx] = True
+                    pos.next_tier_idx = tier_idx + 1
+                    # Move trailing stop for remaining shares
+                    if pos.remaining_shares > 0 and pos.trail_pcts:
+                        trail_pct = pos.trail_pcts[min(tier_idx, len(pos.trail_pcts) - 1)]
+                        replace_with_trailing_stop(pos, trail_pct)
+                        log(f"LADDER T{tier_idx+1} filled → trailing stop {trail_pct*100:.1f}% for {pos.symbol}")
+                elif pos and pos.remaining_shares > 0:
                     replace_stop_for_remaining(pos)
             elif check_order_canceled(order_id):
                 log(f"SELL LIMIT CANCELED: {symbol} order {order_id}, rolling back sold_shares_list")
@@ -1680,6 +1741,9 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                         pos.reached_list[tier_idx] = False
                 if pos:
                     pos.remaining_shares += sell_shares
+                    # Ladder: roll back next_tier_idx if ladder sell cancelled
+                    if info.get("is_ladder_tier") and tier_idx is not None:
+                        pos.next_tier_idx = tier_idx
                     # For re-entry sells (tier_idx is None), also reset re-entry state
                     if tier_idx is None and pos.trade_type == "reentry":
                         pos.reached_target1 = False
@@ -1844,21 +1908,32 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 positions.remove(pos)
                 continue
 
-            # ── First trade / recovered: 6-tier profit targets with skip-gap ──
+            # ── First trade / recovered: ladder sell system ──
             if pos.trade_type in ("first", "recovered"):
                 need_replace_protective = False
 
-                # 0.4.11: Time limit -- if no target hit in 40 min, sell at breakeven+
-                # Only applies to first trade, NOT recovered positions
+                # ── Time limit: if no tier filled in 40 min, sell at breakeven+ ──
                 if pos.trade_type == "first":
                     pos.bar_count += 1
                     time_limit = getattr(config, "FIRST_TRADE_TIME_LIMIT_BARS", 0)
-                    if time_limit > 0 and not (pos.reached_list and pos.reached_list[0]) and pos.bar_count >= time_limit:
+                    has_any_filled = any(pos.reached_list[:pos.next_tier_idx]) if pos.reached_list else False
+                    if time_limit > 0 and not has_any_filled and pos.bar_count >= time_limit:
                         pos.time_limit_active = True
                 if pos.trade_type == "first" and pos.time_limit_active and cur_price >= pos.entry_price and pos.remaining_shares > 0:
                     log(f"TIME LIMIT EXIT: {pos.symbol} @ ${cur_price:.4f} (no target in {time_limit * 5}min)")
                     events_log.append(f"{now_est.strftime('%H:%M:%S')} TIME LIMIT EXIT {pos.symbol} @ ${cur_price:.4f}")
                     add_chart_event(pos.symbol, "sell", cur_price, f"TIME LIMIT {pos.remaining_shares}sh")
+                    # Cancel pending ladder sells for this symbol
+                    for oid in list(pending_sells.keys()):
+                        if pending_sells[oid]["symbol"] == pos.symbol and pending_sells[oid].get("is_ladder_tier"):
+                            cancel_order(oid)
+                            affected = pending_sells[oid].get("affected_tiers", [])
+                            for t in affected:
+                                if t < len(pos.sold_shares_list): pos.sold_shares_list[t] = 0
+                                if t < len(pos.reached_list): pos.reached_list[t] = False
+                            pos.remaining_shares += pending_sells[oid]["shares"]
+                            pos.next_tier_idx = min(pos.next_tier_idx, pending_sells[oid].get("tier_idx", 0) or 0)
+                            del pending_sells[oid]
                     if pos.protective_order_id:
                         cancel_order(pos.protective_order_id)
                         pos.protective_order_id = None
@@ -1868,81 +1943,55 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     positions.remove(pos)
                     continue
 
-                # 1.0: 6-tier exit logic with skip-gap
-                # Check from highest to lowest tier; skip already-reached tiers
-                n_tiers = len(pos.targets)
-                for ti in range(n_tiers - 1, -1, -1):
-                    if ti >= len(pos.reached_list) or ti >= len(pos.sell_ratios):
-                        continue
-                    if pos.reached_list[ti]:
-                        continue  # already processed this tier
-                    if pos.highest < pos.targets[ti]:
-                        continue  # haven't reached this target yet
-
-                    # Mark this tier and all lower tiers as reached (skip-gap)
-                    for lower_ti in range(ti + 1):
-                        if lower_ti < len(pos.reached_list):
-                            pos.reached_list[lower_ti] = True
-
-                    # Calculate shares to sell for all newly reached tiers
-                    total_sell = 0
-                    for sell_ti in range(ti + 1):
-                        if sell_ti >= len(pos.sell_ratios) or sell_ti >= len(pos.sold_shares_list):
-                            continue
-                        if pos.sold_shares_list[sell_ti] == 0:
-                            n_sell = max(1, int(pos.shares * pos.sell_ratios[sell_ti]))
-                            pos.sold_shares_list[sell_ti] = n_sell
-                            total_sell += n_sell
-
-                    if total_sell > pos.remaining_shares:
-                        total_sell = pos.remaining_shares
-                    if total_sell > 0:
+                # ── Ladder: place next tier sell if one is due ──
+                has_pending_ladder = any(
+                    info["symbol"] == pos.symbol and info.get("is_ladder_tier")
+                    for info in pending_sells.values()
+                )
+                if pos.next_tier_idx < len(pos.targets) and not has_pending_ladder:
+                    ti = pos.next_tier_idx
+                    tier_shares = max(1, int(pos.shares * pos.sell_ratios[ti]))
+                    tier_shares = min(tier_shares, pos.remaining_shares)
+                    if tier_shares > 0:
+                        sell_price = round(pos.targets[ti] * (1 - TARGET_LIMIT_BUFFER), 2)
                         retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.25, 0.50, 0.75, 1.00, 1.25, 1.50])
                         tier_pct = f"{int(retracements[ti]*100)}%" if ti < len(retracements) else f"T{ti+1}"
-                        sell_price = round(pos.targets[ti] * (1 - TARGET_LIMIT_BUFFER), 2)
-                        log(f"{tier_pct} TARGET: {pos.symbol} selling {total_sell} @ ${sell_price:.4f}")
-                        events_log.append(f"{now_est.strftime('%H:%M:%S')} {tier_pct} TARGET {pos.symbol} sell {total_sell} @ ${sell_price:.4f}")
-                        add_chart_event(pos.symbol, "sell", sell_price, f"TARGET_{tier_pct} {total_sell}sh")
-                        if pos.protective_order_id:
-                            cancel_order(pos.protective_order_id)
-                            pos.protective_order_id = None
-                        order = place_sell_limit(pos.symbol, total_sell, sell_price)
+                        log(f"{tier_pct} LADDER SELL: {pos.symbol} placing {tier_shares} @ ${sell_price:.4f}")
+                        events_log.append(f"{now_est.strftime('%H:%M:%S')} {tier_pct} LADDER {pos.symbol} place {tier_shares} @ ${sell_price:.4f}")
+                        add_chart_event(pos.symbol, "sell", sell_price, f"LADDER_{tier_pct} {tier_shares}sh")
+                        order = place_sell_limit(pos.symbol, tier_shares, sell_price)
                         if order:
-                            # Store ALL affected tier indices for proper rollback on cancel
-                            affected_tiers = [sell_ti for sell_ti in range(ti + 1)
-                                              if sell_ti < len(pos.sold_shares_list)
-                                              and pos.sold_shares_list[sell_ti] > 0]
                             pending_sells[str(order.id)] = {
-                                "symbol": pos.symbol, "shares": total_sell, "tier_idx": ti,
-                                "affected_tiers": affected_tiers
+                                "symbol": pos.symbol, "shares": tier_shares, "tier_idx": ti,
+                                "affected_tiers": [ti], "is_ladder_tier": True,
                             }
-                            pos.remaining_shares -= total_sell
+                            pos.sold_shares_list[ti] = tier_shares
+                            pos.remaining_shares -= tier_shares
+                            need_replace_protective = True
                         else:
-                            # Sell order failed — roll back sold_shares_list AND reached_list
-                            log(f"SELL LIMIT FAILED for {pos.symbol}, rolling back tier sells")
-                            for sell_ti in range(ti + 1):
-                                if sell_ti < len(pos.sold_shares_list):
-                                    pos.sold_shares_list[sell_ti] = 0
-                                if sell_ti < len(pos.reached_list):
-                                    pos.reached_list[sell_ti] = False
-                        need_replace_protective = True
+                            log(f"LADDER SELL FAILED for {pos.symbol} tier {ti+1}, will retry next poll")
 
-                    break  # Only process the highest newly-reached tier per poll
-
-                # Replace protective stop only if no pending sells for this symbol
-                # (otherwise wait for sell fill confirmation to get correct qty)
-                has_pending = any(info["symbol"] == pos.symbol for info in pending_sells.values())
-                if need_replace_protective and pos.remaining_shares > 0 and not has_pending:
+                # ── Replace protective stop ──
+                if need_replace_protective and pos.remaining_shares > 0 and not has_pending_ladder:
                     replace_stop_for_remaining(pos)
 
                 # ── Trailing stop (polled fallback) ──
-                # 1.0: Use get_trailing_pct for generic N-tier lookup
                 if pos.reached_list and any(pos.reached_list) and pos.remaining_shares > 0:
                     pct = get_trailing_pct(pos)
                     tsp = round(pos.highest * (1 - pct), 2)
                     tsp = max(tsp, pos.entry_price)
                     if cur_price <= tsp:
-                        # Find highest reached tier for label
+                        # Cancel pending ladder sells before trailing stop exit
+                        for oid in list(pending_sells.keys()):
+                            if pending_sells[oid]["symbol"] == pos.symbol and pending_sells[oid].get("is_ladder_tier"):
+                                cancel_order(oid)
+                                affected = pending_sells[oid].get("affected_tiers", [])
+                                for t in affected:
+                                    if t < len(pos.sold_shares_list): pos.sold_shares_list[t] = 0
+                                    if t < len(pos.reached_list): pos.reached_list[t] = False
+                                pos.remaining_shares += pending_sells[oid]["shares"]
+                                pos.next_tier_idx = pending_sells[oid].get("tier_idx", pos.next_tier_idx)
+                                del pending_sells[oid]
                         tier_label = "trailing"
                         if pos.reached_list:
                             for tidx in range(len(pos.reached_list) - 1, -1, -1):
@@ -2227,9 +2276,9 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     log(f"  {pos.symbol}({pos.trade_type}): {pos.remaining_shares} shares, "
                         f"entry=${pos.entry_price:.4f} cur=${cur:.4f} pnl=${pnl:.2f}{tier_info}{protective}")
                 else:
-                    # Show target mode and reached tiers
+                    # Show target mode, reached tiers, and ladder progress
                     reached_tiers = [i+1 for i, r in enumerate(pos.reached_list) if r] if pos.reached_list else []
-                    mode_info = f", mode={pos.target_mode}, tiers={reached_tiers}" if pos.targets else ""
+                    mode_info = f", mode={pos.target_mode}, tiers={reached_tiers}, ladder=T{pos.next_tier_idx+1}" if pos.targets else ""
                     log(f"  {pos.symbol}({pos.trade_type}): {pos.remaining_shares} shares, "
                         f"entry=${pos.entry_price:.4f} cur=${cur:.4f} pnl=${pnl:.2f}{mode_info}{protective}")
 
