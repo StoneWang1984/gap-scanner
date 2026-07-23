@@ -1562,22 +1562,29 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
             )
             positions.append(pos)
             # Scan Alpaca open orders for pending ladder sells to avoid duplicate placement
+            recovered_pending_shares = 0
             for ao in alpaca_orders:
                 if ao.symbol == sym and ao.side == OrderSide.SELL and ao.type == "limit":
                     for ti in range(len(targets)):
                         expected = round(targets[ti] * (1 - TARGET_LIMIT_BUFFER), 2)
                         if abs(float(ao.limit_price) - expected) < 0.02:
+                            t_shares = max(1, int(qty * sell_ratios[ti]))
                             pending_sells[str(ao.id)] = {
                                 "symbol": sym,
-                                "shares": max(1, int(qty * sell_ratios[ti])),
+                                "shares": t_shares,
                                 "tier_idx": ti,
                                 "affected_tiers": [ti],
                                 "is_ladder_tier": True,
                             }
-                            sold_shares_list[ti] = max(1, int(qty * sell_ratios[ti]))
+                            sold_shares_list[ti] = t_shares
+                            recovered_pending_shares += t_shares
                             # Don't advance next_tier_idx for unfilled pending sells
                             log(f"RECOVER: Found pending ladder sell for {sym} T{ti+1} @ ${float(ao.limit_price):.4f}")
                             break
+            # Deduct pending ladder sell shares from remaining so protective stop covers only what's left
+            if recovered_pending_shares > 0:
+                pos.remaining_shares -= recovered_pending_shares
+                log(f"RECOVER: Deducted {recovered_pending_shares} pending ladder shares from remaining")
             # Place protective stop if none exists (or if ladder system needs one)
             if not prot_order_id:
                 replace_stop_for_remaining(pos)
@@ -1661,8 +1668,10 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 log(f"BUY FILLED: {symbol} order {order_id} ({filled_qty}sh) @ ${pos_data['entry_price']:.4f}")
                 pos = LivePosition(**pos_data)
                 positions.append(pos)
-                place_protective_stop(pos)
-                # ── Ladder: Place T1 sell immediately after buy fill ──
+                # ── Ladder: Place T1 sell FIRST, then protective stop for remaining ──
+                # Order matters: protective stop holds shares via "held_for_orders",
+                # blocking T1 placement. Place T1 first so remaining_shares shrinks.
+                t1_placed = False
                 if pos.trade_type in ("first", "recovered") and pos.targets:
                     t1_shares = max(1, int(pos.shares * pos.sell_ratios[0]))
                     t1_price = round(pos.targets[0] * (1 - TARGET_LIMIT_BUFFER), 2)
@@ -1675,9 +1684,14 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                         pos.sold_shares_list[0] = t1_shares
                         pos.remaining_shares -= t1_shares
                         pos.next_tier_idx = 1
+                        t1_placed = True
                         log(f"T1 LADDER SELL placed: {pos.symbol} {t1_shares} @ ${t1_price:.4f}")
                     else:
-                        log(f"T1 LADDER SELL FAILED: {pos.symbol}, will retry in main loop")
+                        log(f"T1 LADDER SELL FAILED: {pos.symbol}, protective stop will cover all shares")
+                # Place protective stop for remaining (7 if T1 placed, all if T1 failed or reentry)
+                place_protective_stop(pos)
+                if not t1_placed and pos.trade_type in ("first", "recovered") and pos.targets:
+                    log(f"T1 LADDER SELL RETRY needed: {pos.symbol} (stop holds all shares, main loop will cancel-then-place)")
                 events_log.append(f"{now_est.strftime('%H:%M:%S')} BUY FILLED {symbol} @ ${pos.entry_price:.4f}")
                 add_chart_event(symbol, "buy", pos.entry_price,
                                 f"BUY {pos.shares}sh" if pos.trade_type != "reentry" else f"RE-ENTRY BUY {pos.shares}sh")
@@ -1944,6 +1958,8 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     continue
 
                 # ── Ladder: place next tier sell if one is due ──
+                # Must cancel protective stop first — it holds remaining_shares via
+                # "held_for_orders", blocking the new ladder sell from placing.
                 has_pending_ladder = any(
                     info["symbol"] == pos.symbol and info.get("is_ladder_tier")
                     for info in pending_sells.values()
@@ -1953,6 +1969,10 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     tier_shares = max(1, int(pos.shares * pos.sell_ratios[ti]))
                     tier_shares = min(tier_shares, pos.remaining_shares)
                     if tier_shares > 0:
+                        # Cancel protective stop so shares are free for ladder sell
+                        if pos.protective_order_id:
+                            cancel_order(pos.protective_order_id)
+                            pos.protective_order_id = None
                         sell_price = round(pos.targets[ti] * (1 - TARGET_LIMIT_BUFFER), 2)
                         retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.25, 0.50, 0.75, 1.00, 1.25, 1.50])
                         tier_pct = f"{int(retracements[ti]*100)}%" if ti < len(retracements) else f"T{ti+1}"
@@ -1969,7 +1989,8 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                             pos.remaining_shares -= tier_shares
                             need_replace_protective = True
                         else:
-                            log(f"LADDER SELL FAILED for {pos.symbol} tier {ti+1}, will retry next poll")
+                            log(f"LADDER SELL FAILED for {pos.symbol} tier {ti+1}, re-placing protective stop")
+                            need_replace_protective = True  # re-place stop since we cancelled it
 
                 # ── Replace protective stop ──
                 if need_replace_protective and pos.remaining_shares > 0 and not has_pending_ladder:
