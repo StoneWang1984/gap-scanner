@@ -1773,10 +1773,18 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 log(f"PROTECTIVE ORDER FILLED: {pos.symbol} order {pos.protective_order_id}")
                 events_log.append(f"{now_est.strftime('%H:%M:%S')} PROTECTIVE FILLED {pos.symbol}")
                 # Cancel any pending target sells for this symbol
+                # After cancelling, freed shares must be sold immediately —
+                # otherwise they're orphaned with no protection (e.g. T1's 1 share).
+                freed_shares = 0
                 for oid in list(pending_sells.keys()):
                     if pending_sells[oid]["symbol"] == pos.symbol:
+                        freed_shares += pending_sells[oid]["shares"]
                         cancel_order(oid)
                         del pending_sells[oid]
+                # Force sell any shares freed by cancelling ladder sells
+                if freed_shares > 0:
+                    log(f"STOP EXIT: force selling {freed_shares} orphaned shares for {pos.symbol}")
+                    force_sell_position(pos.symbol, freed_shares)
                 pos.remaining_shares = 0
                 pos.protective_order_id = None
                 record_trade(pos, pos.stop_price, "protective_stop")
@@ -1871,10 +1879,16 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
             if dh > 0 and (dh - dl) / dh > config.PULLBACK_STOP_THRESHOLD:
                 log(f"PULLBACK STOP: {symbol} dropped {(dh - dl) / dh:.1%} from high ${dh:.4f}")
                 events_log.append(f"{now_est.strftime('%H:%M:%S')} PULLBACK STOP {symbol} -{(dh - dl) / dh:.1%}")
+                # Cancel pending ladder sells and force sell freed shares too
+                for oid in list(pending_sells.keys()):
+                    if pending_sells[oid]["symbol"] == symbol and pending_sells[oid].get("is_ladder_tier"):
+                        freed = pending_sells[oid]["shares"]
+                        cancel_order(oid)
+                        pos.remaining_shares += freed
+                        del pending_sells[oid]
                 sold = force_sell_position(symbol, pos.remaining_shares)
                 if sold:
                     log(f"PULLBACK STOP FILLED: {symbol} {pos.remaining_shares} shares")
-                record_trade(pos, dl, "pullback_stop")
                 pos.remaining_shares = 0
                 pos.protective_order_id = None
                 # Remove this stock from candidates to prevent re-entry
