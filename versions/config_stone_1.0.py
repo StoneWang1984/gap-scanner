@@ -3,7 +3,7 @@
 Changes over 0.4.14:
 - Same config parameters, version bump for clean tracking
 - Daily loss circuit breaker: 5% (MAX_DAILY_LOSS_PCT = 0.05)
-- Re-entry min pullback: 3% from peak (REENTRY_MIN_PULLBACK = 0.03)
+- Re-entry min pullback: 4% from peak (REENTRY_MIN_PULLBACK = 0.04)
 - Scanner: PRICE_MIN = $1.0, MIN_VOL = 10K, MIN_$VOL = $100K (aligned with 0.4.10)
 """
 
@@ -55,13 +55,13 @@ STOP_LOSS_PCT_FALLBACK = 0.20
 
 # 0.4.14: Stop loss max cap — ATR/fallback can produce very wide stops;
 # cap the maximum loss from entry at this percentage
-STOP_LOSS_MAX_PCT = 0.10
+STOP_LOSS_MAX_PCT = 0.12
 
 # Profit targets — first trade (six tiers)
 PROFIT_RETRACEMENT_TIERS = [0.25, 0.50, 0.75, 1.00, 1.25, 1.50]
 TARGET_CAP_TIERS =         [0.05, 0.10, 0.15, 0.20, 0.25, 0.35]
 PARTIAL_SELL_RATIOS =      [1/8,  1/8,  1/8,  1/8,  1/8,  1/8]   # 6×1/8 = 75%
-TRAILING_STOP_PCTS =       [0.02, 0.025, 0.03, 0.035, 0.04, 0.05]
+TRAILING_STOP_PCTS =       [0.015, 0.02, 0.025, 0.03, 0.04, 0.05]
 
 # Legacy aliases (for backward compat)
 PROFIT_RETRACEMENT_75 = 0.75
@@ -90,7 +90,7 @@ REENTRY_MAX_BARS_BEFORE_TARGET = 0      # 0.4.13: no time stop (removed)
 
 # 0.4.14: Minimum pullback from peak before re-entry
 # Prevents re-entering during shallow pullbacks / choppy consolidation
-REENTRY_MIN_PULLBACK = 0.03
+REENTRY_MIN_PULLBACK = 0.04
 
 PULLBACK_STOP_THRESHOLD = 0.15
 

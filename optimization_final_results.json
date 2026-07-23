@@ -1,0 +1,143 @@
+{
+  "baseline": {
+    "n_trades": 149,
+    "total_pnl": 3062.73,
+    "win_rate": 96.6,
+    "avg_win": 21.62,
+    "avg_loss": -10.02,
+    "profit_factor": 62.11,
+    "gross_profit": 3112.85,
+    "gross_loss": 50.12,
+    "exit_reasons": {
+      "trailing_stop_150": 72,
+      "trailing_stop_50": 15,
+      "trailing_stop_75": 9,
+      "trailing_stop_125": 6,
+      "reentry_trailing": 18,
+      "trailing_stop_100": 9,
+      "time_limit_exit": 1,
+      "stop_loss": 2,
+      "trailing_stop_25": 13,
+      "reentry_stop": 3,
+      "force_close": 1
+    },
+    "params": {}
+  },
+  "results": [
+    {
+      "label": "TARGET_CAP_TIERS=[0.06,0.12,0.18,0.24,0.3,0.4]",
+      "n_trades": 149,
+      "total_pnl": 3045.65,
+      "win_rate": 96.6,
+      "avg_win": 21.5,
+      "avg_loss": -10.0,
+      "profit_factor": 61.93,
+      "gross_profit": 3095.64,
+      "gross_loss": 49.99,
+      "exit_reasons": {
+        "trailing_stop_150": 72,
+        "trailing_stop_50": 14,
+        "trailing_stop_75": 9,
+        "trailing_stop_125": 5,
+        "reentry_trailing": 18,
+        "trailing_stop_100": 10,
+        "time_limit_exit": 1,
+        "stop_loss": 2,
+        "trailing_stop_25": 14,
+        "reentry_stop": 3,
+        "force_close": 1
+      },
+      "params": {
+        "TARGET_CAP_TIERS": [
+          0.06,
+          0.12,
+          0.18,
+          0.24,
+          0.3,
+          0.4
+        ]
+      }
+    },
+    {
+      "label": "REENTRY_MIN_PULLBACK=0.02",
+      "n_trades": 149,
+      "total_pnl": 3062.73,
+      "win_rate": 96.6,
+      "avg_win": 21.62,
+      "avg_loss": -10.02,
+      "profit_factor": 62.11,
+      "gross_profit": 3112.85,
+      "gross_loss": 50.12,
+      "exit_reasons": {
+        "trailing_stop_150": 72,
+        "trailing_stop_50": 15,
+        "trailing_stop_75": 9,
+        "trailing_stop_125": 6,
+        "reentry_trailing": 18,
+        "trailing_stop_100": 9,
+        "time_limit_exit": 1,
+        "stop_loss": 2,
+        "trailing_stop_25": 13,
+        "reentry_stop": 3,
+        "force_close": 1
+      },
+      "params": {
+        "REENTRY_MIN_PULLBACK": 0.02
+      }
+    },
+    {
+      "label": "REENTRY_MIN_PULLBACK=0.04",
+      "n_trades": 149,
+      "total_pnl": 3147.68,
+      "win_rate": 96.6,
+      "avg_win": 22.21,
+      "avg_loss": -10.02,
+      "profit_factor": 63.8,
+      "gross_profit": 3197.8,
+      "gross_loss": 50.12,
+      "exit_reasons": {
+        "trailing_stop_150": 73,
+        "trailing_stop_50": 15,
+        "trailing_stop_75": 9,
+        "trailing_stop_125": 6,
+        "reentry_trailing": 16,
+        "trailing_stop_100": 9,
+        "time_limit_exit": 1,
+        "stop_loss": 2,
+        "trailing_stop_25": 14,
+        "reentry_stop": 3,
+        "force_close": 1
+      },
+      "params": {
+        "REENTRY_MIN_PULLBACK": 0.04
+      }
+    },
+    {
+      "label": "REENTRY_MIN_PULLBACK=0.05",
+      "n_trades": 149,
+      "total_pnl": 3192.93,
+      "win_rate": 96.6,
+      "avg_win": 22.52,
+      "avg_loss": -10.05,
+      "profit_factor": 64.54,
+      "gross_profit": 3243.18,
+      "gross_loss": 50.25,
+      "exit_reasons": {
+        "trailing_stop_150": 73,
+        "trailing_stop_50": 15,
+        "trailing_stop_75": 9,
+        "trailing_stop_125": 7,
+        "reentry_trailing": 15,
+        "trailing_stop_100": 9,
+        "time_limit_exit": 1,
+        "stop_loss": 2,
+        "trailing_stop_25": 14,
+        "reentry_stop": 3,
+        "force_close": 1
+      },
+      "params": {
+        "REENTRY_MIN_PULLBACK": 0.05
+      }
+    }
+  ]
+}
