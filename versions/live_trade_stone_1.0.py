@@ -1668,30 +1668,11 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 log(f"BUY FILLED: {symbol} order {order_id} ({filled_qty}sh) @ ${pos_data['entry_price']:.4f}")
                 pos = LivePosition(**pos_data)
                 positions.append(pos)
-                # ── Ladder: Place T1 sell FIRST, then protective stop for remaining ──
-                # Order matters: protective stop holds shares via "held_for_orders",
-                # blocking T1 placement. Place T1 first so remaining_shares shrinks.
-                t1_placed = False
-                if pos.trade_type in ("first", "recovered") and pos.targets:
-                    t1_shares = max(1, int(pos.shares * pos.sell_ratios[0]))
-                    t1_price = round(pos.targets[0] * (1 - TARGET_LIMIT_BUFFER), 2)
-                    order = place_sell_limit(pos.symbol, t1_shares, t1_price)
-                    if order:
-                        pending_sells[str(order.id)] = {
-                            "symbol": pos.symbol, "shares": t1_shares, "tier_idx": 0,
-                            "affected_tiers": [0], "is_ladder_tier": True,
-                        }
-                        pos.sold_shares_list[0] = t1_shares
-                        pos.remaining_shares -= t1_shares
-                        pos.next_tier_idx = 1
-                        t1_placed = True
-                        log(f"T1 LADDER SELL placed: {pos.symbol} {t1_shares} @ ${t1_price:.4f}")
-                    else:
-                        log(f"T1 LADDER SELL FAILED: {pos.symbol}, protective stop will cover all shares")
-                # Place protective stop for remaining (7 if T1 placed, all if T1 failed or reentry)
+                # ── Approach 3: Protective stop covers ALL shares, T1 activated on price reach ──
+                # Stop covers 100% of position from the start. T1 limit sell is only placed
+                # when main loop detects price >= T1 target, ensuring no orphan fraction.
                 place_protective_stop(pos)
-                if not t1_placed and pos.trade_type in ("first", "recovered") and pos.targets:
-                    log(f"T1 LADDER SELL RETRY needed: {pos.symbol} (stop holds all shares, main loop will cancel-then-place)")
+                log(f"PROTECTIVE STOP placed for all {pos.shares} shares: {pos.symbol} stop=${pos.stop_price:.4f}")
                 events_log.append(f"{now_est.strftime('%H:%M:%S')} BUY FILLED {symbol} @ ${pos.entry_price:.4f}")
                 add_chart_event(symbol, "buy", pos.entry_price,
                                 f"BUY {pos.shares}sh" if pos.trade_type != "reentry" else f"RE-ENTRY BUY {pos.shares}sh")
@@ -1758,6 +1739,11 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     # Ladder: roll back next_tier_idx if ladder sell cancelled
                     if info.get("is_ladder_tier") and tier_idx is not None:
                         pos.next_tier_idx = tier_idx
+                        # Approach 3: T1 cancelled → next_tier_idx rolled back to 0
+                        # Trailing stop only covers remaining fraction; need full protective stop
+                        if tier_idx == 0 and pos.trade_type in ("first", "recovered") and pos.targets:
+                            replace_stop_for_remaining(pos)
+                            log(f"T1 CANCEL ROLLBACK: {pos.symbol} replaced stop for {pos.remaining_shares} shares (full coverage)")
                     # For re-entry sells (tier_idx is None), also reset re-entry state
                     if tier_idx is None and pos.trade_type == "reentry":
                         pos.reached_target1 = False
@@ -1939,6 +1925,41 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
             # ── First trade / recovered: ladder sell system ──
             if pos.trade_type in ("first", "recovered"):
                 need_replace_protective = False
+
+                # ── T1 Activation (Approach 3): price reaches T1 → start ladder ──
+                # Before T1 activation, protective stop covers 100% of position.
+                # When price reaches T1 target, cancel stop → place T1 sell → trailing stop for remaining.
+                if pos.next_tier_idx == 0 and pos.targets:
+                    has_pending_ladder = any(
+                        info["symbol"] == pos.symbol and info.get("is_ladder_tier")
+                        for info in pending_sells.values()
+                    )
+                    if not has_pending_ladder:
+                        t1_limit_price = round(pos.targets[0] * (1 - TARGET_LIMIT_BUFFER), 2)
+                        if cur_price >= t1_limit_price:
+                            # Cancel protective stop so shares are free for T1 sell
+                            if pos.protective_order_id:
+                                cancel_order(pos.protective_order_id)
+                                pos.protective_order_id = None
+                            t1_shares = max(1, int(pos.shares * pos.sell_ratios[0]))
+                            t1_shares = min(t1_shares, pos.remaining_shares)
+                            if t1_shares > 0:
+                                log(f"T1 ACTIVATION: {pos.symbol} price ${cur_price:.4f} >= T1 ${t1_limit_price:.4f}, placing {t1_shares}sh")
+                                events_log.append(f"{now_est.strftime('%H:%M:%S')} T1 ACTIVATION {pos.symbol} {t1_shares}sh @ ${t1_limit_price:.4f}")
+                                add_chart_event(pos.symbol, "sell", t1_limit_price, f"T1_ACTIVATION {t1_shares}sh")
+                                order = place_sell_limit(pos.symbol, t1_shares, t1_limit_price)
+                                if order:
+                                    pending_sells[str(order.id)] = {
+                                        "symbol": pos.symbol, "shares": t1_shares, "tier_idx": 0,
+                                        "affected_tiers": [0], "is_ladder_tier": True,
+                                    }
+                                    pos.sold_shares_list[0] = t1_shares
+                                    pos.remaining_shares -= t1_shares
+                                    pos.next_tier_idx = 1
+                                    need_replace_protective = True
+                                else:
+                                    log(f"T1 ACTIVATION FAILED: {pos.symbol}, re-placing protective stop for all shares")
+                                    need_replace_protective = True
 
                 # ── Time limit: if no tier filled in 40 min, sell at breakeven+ ──
                 if pos.trade_type == "first":
