@@ -22,6 +22,7 @@ Changes over 0.4.15:
 
 import re
 import json
+import math
 import time
 import datetime as dt
 from zoneinfo import ZoneInfo
@@ -842,7 +843,10 @@ def close_all_positions():
         log(f"Close positions error: {e}")
 
 
-def force_sell_position(symbol: str, qty: int) -> bool:
+def force_sell_position(symbol: str, qty: int) -> int:
+    """Force sell shares. Returns number of shares actually sold (0 = failed).
+    close_position sells ALL Alpaca shares — returns total_qty even if qty was less.
+    Caller must check: if result >= pos.remaining_shares, position is fully closed."""
     if DRY_RUN:
         # Cancel any DRY sell orders for this symbol
         to_cancel = [oid for oid, m in dry_run_orders.items() if m.symbol == symbol and m.side == "sell"]
@@ -851,8 +855,8 @@ def force_sell_position(symbol: str, qty: int) -> bool:
         order = place_sell_market(symbol, qty)
         if order:
             log(f"[DRY] FORCE SELL {symbol} {qty} -> {order.id}")
-            return True
-        return False
+            return qty
+        return 0
     # Cancel any pending sell orders for this symbol first
     # (they lock shares and will be replaced by this sell)
     try:
@@ -873,15 +877,16 @@ def force_sell_position(symbol: str, qty: int) -> bool:
     except Exception:
         pass
 
-    # When exiting (stop loss, trailing stop, force close), sell ALL actual shares
-    # because pending sell orders were just cancelled and qty may differ from tracked
-    sell_qty = total_qty if total_qty > 0 else qty
-    if sell_qty <= 0:
-        log(f"FORCE SELL: {symbol} no shares to sell")
-        return False
+    # If Alpaca shows no position, stock was already sold (e.g. stop filled)
+    # Return qty (caller's requested amount) as sold — position is gone
+    if total_qty <= 0:
+        log(f"FORCE SELL: {symbol} no Alpaca position (already closed)")
+        return qty
 
-    # Method 1: Alpaca close_position API (atomic cancel + sell)
-    if total_qty > 0:
+    # close_position sells ALL Alpaca shares — only use when qty >= total_qty
+    # (exit scenarios: stop loss, trailing stop, force close)
+    # For partial sells (ladder tiers), use market sell directly.
+    if qty >= total_qty:
         try:
             result = trading_client.close_position(symbol)
             if result:
@@ -892,17 +897,20 @@ def force_sell_position(symbol: str, qty: int) -> bool:
                     remaining = int(float(alpaca_pos.qty))
                     if remaining > 0:
                         log(f"FORCE SELL: close_position partial fill for {symbol}, {remaining} shares remain")
-                        # Fall through to Method 2 to sell remaining
                         sell_qty = remaining
                     else:
                         log(f"FORCE SELL (close_position): {symbol} {total_qty} shares")
-                        return True
+                        return total_qty
                 except Exception:
                     # Position not found = fully closed
                     log(f"FORCE SELL (close_position): {symbol} {total_qty} shares")
-                    return True
+                    return total_qty
         except Exception as e:
             log(f"close_position failed for {symbol}: {e}")
+            sell_qty = total_qty
+    else:
+        # Partial sell: qty < total_qty. Use market sell for exact qty.
+        sell_qty = qty
 
     # Method 2: Market sell
     try:
@@ -911,7 +919,7 @@ def force_sell_position(symbol: str, qty: int) -> bool:
             filled = _wait_order_filled(order.id, timeout=30)
             if filled:
                 log(f"FORCE SELL (market): {symbol} {sell_qty} shares")
-                return True
+                return sell_qty
     except Exception as e:
         log(f"market sell failed for {symbol}: {e}")
 
@@ -926,17 +934,18 @@ def force_sell_position(symbol: str, qty: int) -> bool:
         except Exception:
             pass
         if sell_qty <= 0:
-            return False
+            log(f"FORCE SELL (retry): {symbol} position already closed")
+            return qty
         order = place_sell_market(symbol, sell_qty)
         if order:
             filled = _wait_order_filled(order.id, timeout=30)
             if filled:
                 log(f"FORCE SELL (retry): {symbol} {sell_qty} shares")
-                return True
+                return sell_qty
     except Exception as e:
         log(f"All sell methods failed for {symbol}: {e}")
 
-    return False
+    return 0
 
 
 def check_order_filled(order_id) -> bool:
@@ -1034,8 +1043,8 @@ def _force_close_remaining(positions: list[LivePosition]):
             if pos.symbol in held:
                 log(f"FORCE CLOSE: {pos.symbol} still has {held[pos.symbol]} shares on Alpaca")
                 sold = force_sell_position(pos.symbol, held[pos.symbol])
-                if sold:
-                    log(f"FORCE CLOSE SUCCESS: {pos.symbol}")
+                if sold > 0:
+                    log(f"FORCE CLOSE SUCCESS: {pos.symbol} {sold} shares")
                 else:
                     log(f"FORCE CLOSE FAILED: {pos.symbol}")
                 pos.remaining_shares = 0
@@ -1437,10 +1446,8 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
     log(f"Official scan found {len(candidates)} gap stocks")
 
     n_candidates = len(candidates)
-    max_stocks = min(config.MAX_POSITIONS_PER_DAY, n_candidates)
-    pos_per_stock = capital / max_stocks if max_stocks > 0 else capital
-    pos_per_stock = min(pos_per_stock, config.MAX_POSITION_SIZE)
-    candidates = candidates[:max_stocks]
+    max_monitored = min(getattr(config, "MAX_CANDIDATES", 10), n_candidates)
+    candidates = candidates[:max_monitored]
 
     log(f"Candidates: {[c['symbol'] for c in candidates]}")
     for c in candidates:
@@ -1762,16 +1769,22 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                         else:
                             # Limit sell failed — use force_sell_position as fallback
                             sold = force_sell_position(pos.symbol, pos.remaining_shares)
-                            if sold:
+                            if sold >= pos.remaining_shares:
                                 record_trade(pos, bid_price, "force_close")
                                 pos.remaining_shares = 0
+                            elif sold > 0:
+                                pos.remaining_shares -= sold
+                                log(f"FORCE CLOSE PARTIAL: {pos.symbol} {sold} sold, {pos.remaining_shares} remain")
                             else:
                                 log(f"FORCE CLOSE FAILED for {pos.symbol} — will try close_position in final sweep")
                     else:
                         sold = force_sell_position(pos.symbol, pos.remaining_shares)
-                        if sold:
+                        if sold >= pos.remaining_shares:
                             record_trade(pos, pos.entry_price, "force_close")
                             pos.remaining_shares = 0
+                        elif sold > 0:
+                            pos.remaining_shares -= sold
+                            log(f"FORCE CLOSE PARTIAL: {pos.symbol} {sold} sold, {pos.remaining_shares} remain")
                         else:
                             log(f"FORCE CLOSE FAILED for {pos.symbol} — will try close_position in final sweep")
             if force_close_started:
@@ -1848,12 +1861,17 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     pos.protective_order_id = None
                 sold_shares = pos.remaining_shares
                 sold = force_sell_position(symbol, pos.remaining_shares)
-                if sold:
-                    log(f"PULLBACK STOP FILLED: {symbol} {sold_shares} shares")
+                if sold >= pos.remaining_shares:
+                    actual_sold = max(sold, sold_shares)
+                    log(f"PULLBACK STOP FILLED: {symbol} {actual_sold} shares")
                     pos.remaining_shares = 0
                     pos.protective_order_id = None
                     entry_checked.add(symbol)
-                    record_trade(pos, dl, "pullback_stop", sold_shares=sold_shares)
+                    record_trade(pos, dl, "pullback_stop", sold_shares=actual_sold)
+                elif sold > 0:
+                    pos.remaining_shares -= sold
+                    log(f"PULLBACK STOP PARTIAL: {symbol} {sold} sold, {pos.remaining_shares} remain — re-placing stop")
+                    replace_stop_for_remaining(pos)
                 else:
                     log(f"PULLBACK STOP FORCE SELL FAILED: {symbol}, re-placing protective stop")
                     replace_stop_for_remaining(pos)
@@ -1893,10 +1911,14 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     cancel_order(pos.protective_order_id)
                     pos.protective_order_id = None
                 sold = force_sell_position(pos.symbol, pos.remaining_shares)
-                if sold:
+                if sold >= pos.remaining_shares:
                     pos.remaining_shares = 0
                     record_trade(pos, pos.stop_price, "stop_loss")
                     positions.remove(pos)
+                elif sold > 0:
+                    pos.remaining_shares -= sold
+                    log(f"STOP LOSS PARTIAL: {pos.symbol} {sold} sold, {pos.remaining_shares} remain")
+                    replace_stop_for_remaining(pos)
                 else:
                     log(f"STOP LOSS FORCE SELL FAILED: {pos.symbol}, re-placing protective stop")
                     replace_stop_for_remaining(pos)
@@ -1916,19 +1938,28 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                         if pos.protective_order_id:
                             cancel_order(pos.protective_order_id)
                             pos.protective_order_id = None
-                        t1_shares = max(1, int(pos.shares * pos.sell_ratios[0]))
+                        t1_shares = math.ceil(pos.shares / 8) if pos.shares >= 8 else 1
                         t1_shares = min(t1_shares, pos.remaining_shares)
                         if t1_shares > 0:
                             sold = force_sell_position(pos.symbol, t1_shares)
-                            if sold:
-                                pos.sold_shares_list[0] = t1_shares
-                                pos.remaining_shares -= t1_shares
+                            if sold >= pos.remaining_shares:
+                                # close_position sold ALL shares (more than t1_shares)
+                                sold_shares = pos.remaining_shares
+                                pos.remaining_shares = 0
+                                pos.reached_list[0] = True
+                                log(f"T1 MARKET SELL (full exit): {pos.symbol} {sold}sh — close_position sold entire position")
+                                record_trade(pos, cur_price, "t1_full_exit", sold_shares=sold_shares)
+                                positions.remove(pos)
+                                continue
+                            elif sold > 0:
+                                pos.sold_shares_list[0] = sold
+                                pos.remaining_shares -= sold
                                 pos.reached_list[0] = True
                                 pos.next_tier_idx = 1
                                 need_replace_protective = True
-                                log(f"T1 MARKET SELL: {pos.symbol} {t1_shares}sh @ ~${cur_price:.4f}")
-                                events_log.append(f"{now_est.strftime('%H:%M:%S')} T1 MARKET SELL {pos.symbol} {t1_shares}sh @ ~${cur_price:.4f}")
-                                add_chart_event(pos.symbol, "sell", cur_price, f"T1 {t1_shares}sh")
+                                log(f"T1 MARKET SELL: {pos.symbol} {sold}sh @ ~${cur_price:.4f}")
+                                events_log.append(f"{now_est.strftime('%H:%M:%S')} T1 MARKET SELL {pos.symbol} {sold}sh @ ~${cur_price:.4f}")
+                                add_chart_event(pos.symbol, "sell", cur_price, f"T1 {sold}sh")
                             else:
                                 log(f"T1 MARKET SELL FAILED: {pos.symbol}, re-placing protective stop NOW")
                                 if pos.remaining_shares > 0:
@@ -1952,10 +1983,13 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                         cancel_order(pos.protective_order_id)
                         pos.protective_order_id = None
                     sold = force_sell_position(pos.symbol, pos.remaining_shares)
-                    if sold:
+                    if sold >= pos.remaining_shares:
                         pos.remaining_shares = 0
                         record_trade(pos, cur_price, "time_limit_exit")
                         positions.remove(pos)
+                    elif sold > 0:
+                        pos.remaining_shares -= sold
+                        replace_stop_for_remaining(pos)
                     else:
                         log(f"TIME LIMIT FORCE SELL FAILED: {pos.symbol}, re-placing protective stop")
                         replace_stop_for_remaining(pos)
@@ -1967,22 +2001,31 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 if pos.next_tier_idx < len(pos.targets) and pos.targets:
                     ti = pos.next_tier_idx
                     if cur_price >= pos.targets[ti]:
-                        tier_shares = max(1, int(pos.shares * pos.sell_ratios[ti]))
+                        tier_shares = math.ceil(pos.shares / 8) if pos.shares >= 8 else 1
                         tier_shares = min(tier_shares, pos.remaining_shares)
                         if tier_shares > 0:
                             if pos.protective_order_id:
                                 cancel_order(pos.protective_order_id)
                                 pos.protective_order_id = None
                             sold = force_sell_position(pos.symbol, tier_shares)
-                            if sold:
-                                pos.sold_shares_list[ti] = tier_shares
-                                pos.remaining_shares -= tier_shares
+                            if sold >= pos.remaining_shares:
+                                # close_position sold ALL shares
+                                sold_shares = pos.remaining_shares
+                                pos.remaining_shares = 0
+                                pos.reached_list[ti] = True
+                                log(f"T{ti+1} MARKET SELL (full exit): {pos.symbol} {sold}sh — close_position sold entire position")
+                                record_trade(pos, cur_price, f"t{ti+1}_full_exit", sold_shares=sold_shares)
+                                positions.remove(pos)
+                                continue
+                            elif sold > 0:
+                                pos.sold_shares_list[ti] = sold
+                                pos.remaining_shares -= sold
                                 pos.reached_list[ti] = True
                                 pos.next_tier_idx = ti + 1
                                 need_replace_protective = True
-                                log(f"T{ti+1} MARKET SELL: {pos.symbol} {tier_shares}sh @ ~${cur_price:.4f}")
-                                events_log.append(f"{now_est.strftime('%H:%M:%S')} T{ti+1} MARKET SELL {pos.symbol} {tier_shares}sh @ ~${cur_price:.4f}")
-                                add_chart_event(pos.symbol, "sell", cur_price, f"T{ti+1} {tier_shares}sh")
+                                log(f"T{ti+1} MARKET SELL: {pos.symbol} {sold}sh @ ~${cur_price:.4f}")
+                                events_log.append(f"{now_est.strftime('%H:%M:%S')} T{ti+1} MARKET SELL {pos.symbol} {sold}sh @ ~${cur_price:.4f}")
+                                add_chart_event(pos.symbol, "sell", cur_price, f"T{ti+1} {sold}sh")
                             else:
                                 log(f"T{ti+1} MARKET SELL FAILED: {pos.symbol}, re-placing protective stop NOW")
                                 if pos.remaining_shares > 0:
@@ -2012,10 +2055,14 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                             cancel_order(pos.protective_order_id)
                             pos.protective_order_id = None
                         sold = force_sell_position(pos.symbol, pos.remaining_shares)
-                        if sold:
+                        if sold >= pos.remaining_shares:
                             pos.remaining_shares = 0
                             record_trade(pos, cur_price, "trailing_stop")
                             positions.remove(pos)
+                        elif sold > 0:
+                            pos.remaining_shares -= sold
+                            log(f"TRAILING STOP PARTIAL: {pos.symbol} {sold} sold, {pos.remaining_shares} remain")
+                            replace_stop_for_remaining(pos)
                         else:
                             log(f"TRAILING STOP FORCE SELL FAILED: {pos.symbol}, re-placing protective stop")
                             replace_stop_for_remaining(pos)
@@ -2064,10 +2111,13 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                         cancel_order(pos.protective_order_id)
                         pos.protective_order_id = None
                     sold = force_sell_position(pos.symbol, pos.remaining_shares)
-                    if sold:
+                    if sold >= pos.remaining_shares:
                         pos.remaining_shares = 0
                         record_trade(pos, pos.entry_price, "reentry_breakeven")
                         positions.remove(pos)
+                    elif sold > 0:
+                        pos.remaining_shares -= sold
+                        replace_stop_for_remaining(pos)
                     else:
                         log(f"RE-ENTRY BREAKEVEN FORCE SELL FAILED: {pos.symbol}, re-placing protective stop")
                         replace_stop_for_remaining(pos)
@@ -2090,10 +2140,13 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                             cancel_order(pos.protective_order_id)
                             pos.protective_order_id = None
                         sold = force_sell_position(pos.symbol, pos.remaining_shares)
-                        if sold:
+                        if sold >= pos.remaining_shares:
                             pos.remaining_shares = 0
                             record_trade(pos, tsp, "reentry_trailing")
                             positions.remove(pos)
+                        elif sold > 0:
+                            pos.remaining_shares -= sold
+                            replace_stop_for_remaining(pos)
                         else:
                             log(f"RE-ENTRY TRAILING FORCE SELL FAILED: {pos.symbol}, re-placing protective stop")
                             replace_stop_for_remaining(pos)
@@ -2139,17 +2192,20 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 # 1.0: 6-tier targets via calc_targets
                 targets, sell_ratios, trail_pcts, target_mode = calc_targets(entry_price, cand["open_price"])
 
-                pos_size = min(pos_per_stock, config.MAX_POSITION_SIZE)
-                # Check actual buying power before placing order
+                # Dynamic allocation: divide remaining buying power by remaining slots
+                remaining_slots = config.MAX_DAILY_TRADES - daily_trades - len(pending_buys)
+                if remaining_slots <= 0:
+                    break
                 try:
                     bp = float(trading_client.get_account().buying_power)
-                    if bp < pos_size:
-                        log(f"  {symbol}: buying power ${bp:.2f} < alloc ${pos_size:.2f}, skipping")
-                        entry_checked.add(symbol)
-                        continue
-                    pos_size = min(pos_size, bp * 0.95)
                 except Exception:
-                    pass
+                    bp = capital * 0.95
+                pos_size = bp / remaining_slots
+                pos_size = min(pos_size, config.MAX_POSITION_SIZE)
+                if bp < pos_size:
+                    log(f"  {symbol}: buying power ${bp:.2f} < alloc ${pos_size:.2f}, skipping")
+                    entry_checked.add(symbol)
+                    continue
                 shares = int(pos_size / entry_price)
                 if force_qty > 0:
                     shares = force_qty
@@ -2234,20 +2290,21 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 retrace_1 = getattr(config, "REENTRY_PROFIT_RETRACEMENT_1", 0.75)
                 target = round(entry_price + retrace_1 * (prev_high - entry_price), 2)
 
-                # 0.4.10: Half position size for re-entry
-                pos_size = min(pos_per_stock, config.MAX_POSITION_SIZE)
+                # 0.4.10: Dynamic re-entry allocation
                 reentry_pos_ratio = getattr(config, "REENTRY_POSITION_RATIO", 0.5)
-                reentry_size = pos_size * reentry_pos_ratio
-                # Check actual buying power before re-entry
                 try:
                     bp = float(trading_client.get_account().buying_power)
-                    if bp < reentry_size:
-                        log(f"  {symbol}: re-entry skipped, buying power ${bp:.2f} < alloc ${reentry_size:.2f}")
-                        reentry_checked.add(symbol)
-                        continue
-                    reentry_size = min(reentry_size, bp * 0.95)
                 except Exception:
-                    pass
+                    bp = capital * 0.95
+                # Re-entry gets half of what a first trade would get
+                remaining_slots = config.MAX_DAILY_TRADES - daily_trades - len(pending_buys)
+                first_trade_alloc = bp / max(remaining_slots, 1)
+                reentry_size = first_trade_alloc * reentry_pos_ratio
+                reentry_size = min(reentry_size, config.MAX_POSITION_SIZE)
+                if bp < reentry_size:
+                    log(f"  {symbol}: re-entry skipped, buying power ${bp:.2f} < alloc ${reentry_size:.2f}")
+                    reentry_checked.add(symbol)
+                    continue
                 shares = int(reentry_size / entry_price)
                 if force_qty > 0:
                     shares = 1  # Re-entry also 1 share in test mode
