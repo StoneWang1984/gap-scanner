@@ -229,7 +229,7 @@ def evaluate_trade_stone(
                 if not sold[ti]:
                     sold[ti] = True
                     partial_prices[ti] = plan.targets[ti]
-                    sell_n = int(plan.shares * plan.sell_ratios[ti])
+                    sell_n = max(1, int(plan.shares * plan.sell_ratios[ti]))
                     sell_n = min(sell_n, remaining_shares)
                     partial_shares[ti] = sell_n
                     remaining_shares -= sell_n
@@ -238,7 +238,7 @@ def evaluate_trade_stone(
                     if not sold[tj]:
                         sold[tj] = True
                         partial_prices[tj] = plan.targets[ti]
-                        sell_n = int(plan.shares * plan.sell_ratios[tj])
+                        sell_n = max(1, int(plan.shares * plan.sell_ratios[tj]))
                         sell_n = min(sell_n, remaining_shares)
                         partial_shares[tj] = sell_n
                         remaining_shares -= sell_n
