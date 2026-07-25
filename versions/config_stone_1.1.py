@@ -1,6 +1,6 @@
 """Config — Stone 1.1: full audit fix release.
 
-Changes over Stone 1.0:
+Changes from Stone 1.0 → 1.1:
 - P0-1: STOP_LOSS_MAX_PCT = 0.10 (was 0.12, align with backtest/CLAUDE.md)
 - P0-1: TRAILING_STOP_PCTS aligned with config.py (2.0%/2.5%/3.0%/3.5%/4.0%/5.0%)
 - P0-1: MIN_POSITION_SIZE = 250 (was 1, eliminates tiny positions)
@@ -110,6 +110,9 @@ MAX_POSITIONS_PER_DAY = 5  # max 5 stocks bought per day
 MAX_CANDIDATES = 10  # monitor up to 10 candidates, buy whichever confirms
 MAX_DAILY_TRADES = 5
 EQUITY_POSITION_RATIO = 0.80
+
+# Invariant checker — 实盘状态一致性验证
+INVARIANT_CHECK_INTERVAL = 4  # 每4轮轮询检查一次（避免API限频）
 MAX_POSITION_SIZE = 100000
 MIN_POSITION_SIZE = 250  # minimum $250 per position (aligned with backtest)
 FORCE_QTY = 0  # 0 = dynamic position sizing based on equity; >0 = fixed shares (test mode)

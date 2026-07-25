@@ -101,6 +101,59 @@ data_client = StockHistoricalDataClient(config.ALPACA_API_KEY, config.ALPACA_SEC
 _LOG_FILE = os.path.join(_ver_dir, "live_0417.log")
 _REPORT_DIR = os.path.join(_ver_dir, "daily_reports")
 
+# ── Alpaca拒绝检测与自动修复 ──────────────────────────────────
+# 常见拒绝原因及处理策略:
+#   "insufficient buying power" → 减仓再试
+#   "pattern day trader"        → 标记PDT, 停止当天新入场
+#   "stock is not tradable"     → 移除候选, 不重试
+#   "order quantity is too small" → 增加到最小1股
+#   "stop price too close"      → 增大缓冲距离
+#   "429 rate limit"            → 等待5秒重试
+
+_REJECTION_LOG = []  # 记录所有拒绝事件
+
+def analyze_alpaca_rejection(error_msg: str) -> dict:
+    """分析Alpaca拒绝原因，返回分类+修复建议"""
+    msg = str(error_msg).lower()
+    result = {"category": "unknown", "action": "skip", "retry": False, "detail": str(error_msg)}
+
+    if "insufficient buying power" in msg or "not enough buying power" in msg:
+        result = {"category": "buying_power", "action": "reduce_size", "retry": True,
+                  "detail": "资金不足，减小仓位重试"}
+    elif "pattern day trader" in msg or "pdt" in msg:
+        result = {"category": "pdt", "action": "stop_trading", "retry": False,
+                  "detail": "PDT规则限制，停止当天新入场"}
+    elif "not tradable" in msg or "not fractionable" in msg or "halted" in msg:
+        result = {"category": "not_tradable", "action": "remove_symbol", "retry": False,
+                  "detail": "股票不可交易，移除候选"}
+    elif "too small" in msg or "minimum quantity" in msg or "quantity must be at least" in msg:
+        result = {"category": "qty_small", "action": "increase_qty", "retry": True,
+                  "detail": "数量太小，增加到1股重试"}
+    elif "stop price too close" in msg or "stop_price must be" in msg:
+        result = {"category": "stop_distance", "action": "increase_buffer", "retry": True,
+                  "detail": "止损距离太近，增大缓冲"}
+    elif "429" in msg or "rate limit" in msg or "too many requests" in msg:
+        result = {"category": "rate_limit", "action": "wait_retry", "retry": True,
+                  "detail": "API限频，5秒后重试"}
+    elif "price" in msg and ("invalid" in msg or "outside" in msg):
+        result = {"category": "price_invalid", "action": "adjust_price", "retry": True,
+                  "detail": "价格无效，调整后重试"}
+    elif "market is closed" in msg:
+        result = {"category": "market_closed", "action": "skip", "retry": False,
+                  "detail": "市场已关闭"}
+    elif "connection" in msg or "timeout" in msg or "network" in msg:
+        result = {"category": "network", "action": "wait_retry", "retry": True,
+                  "detail": "网络问题，5秒后重试"}
+
+    _REJECTION_LOG.append({
+        "timestamp": dt.datetime.now().isoformat(),
+        "error": str(error_msg)[:200],
+        "category": result["category"],
+        "action": result["action"],
+    })
+    return result
+
+
 def log(msg):
     now = dt.datetime.now().strftime("%H:%M:%S")
     line = f"[{now}] {msg}"
@@ -281,7 +334,9 @@ def get_trailing_pct(pos) -> float:
 
 # ── State export ────────────────────────────────────────────────────
 def save_state(positions, candidates, daily_trades, daily_stopped,
-               entry_checked, day_highs, accumulator, events_log):
+               entry_checked, day_highs, accumulator, events_log,
+               invariant_violation=False):
+    all_syms = set([c["symbol"] for c in candidates] + [p.symbol for p in positions])
     all_syms = set([c["symbol"] for c in candidates] + [p.symbol for p in positions])
     state = {
         "updated": dt.datetime.now().isoformat(),
@@ -290,6 +345,7 @@ def save_state(positions, candidates, daily_trades, daily_stopped,
         "ws_connected": _stream_state._running if _stream_state else False,
         "daily_trades": daily_trades,
         "daily_stopped": daily_stopped,
+        "invariant_violation": invariant_violation,
         "candidates": [
             {"symbol": c["symbol"], "open_price": c["open_price"],
              "prev_close": c["prev_close"], "gap_pct": round(c["gap_pct"], 4)}
@@ -714,7 +770,15 @@ def refresh_candidates(candidates):
 # ── Order execution ────────────────────────────────────────────────
 
 def place_buy_market(symbol, shares):
-    """Place a market buy order — used after pullback confirmation for immediate entry."""
+    """Place a market buy order — used after pullback confirmation for immediate entry.
+    Returns (order, pdt_flag, actual_shares, reject_category):
+      order: Alpaca order object or None
+      pdt_flag: True if PDT rule triggered (caller should set local _pdt_detected)
+      actual_shares: the qty actually submitted (may differ if buying_power halved on retry)
+      reject_category: last rejection category if order failed (None if succeeded; "rate_limit"/"network" = transient)
+    """
+    pdt_flag = False
+    last_reject = None
     if DRY_RUN:
         oid = f"DRY-BM-{uuid4().hex[:8]}"
         price = _dry_run_get_price(symbol) or 0
@@ -724,20 +788,38 @@ def place_buy_market(symbol, shares):
                          status="filled", filled_qty=shares, filled_price=fill_price)
         dry_run_orders[oid] = mock
         log(f"[DRY] BUY MARKET {symbol} {shares} @ ~${fill_price:.2f} -> {oid}")
-        return mock
-    try:
-        order = trading_client.submit_order(MarketOrderRequest(
-            symbol=symbol, qty=shares, side=OrderSide.BUY,
-            time_in_force=TimeInForce.DAY,
-        ))
-        log(f"BUY MARKET {symbol} {shares} -> order {order.id}")
-        return order
-    except Exception as e:
-        log(f"BUY MARKET FAILED {symbol}: {e}")
-        return None
+        return mock, False, shares, None
+    for attempt in range(3):  # 最多3次尝试
+        try:
+            order = trading_client.submit_order(MarketOrderRequest(
+                symbol=symbol, qty=shares, side=OrderSide.BUY,
+                time_in_force=TimeInForce.DAY,
+            ))
+            log(f"BUY MARKET {symbol} {shares} -> order {order.id}")
+            return order, False, shares, None
+        except Exception as e:
+            analysis = analyze_alpaca_rejection(e)
+            last_reject = analysis["category"]
+            log(f"BUY MARKET REJECTED ({attempt+1}/3) {symbol}: {analysis['detail']}")
+            if analysis["category"] == "pdt":
+                pdt_flag = True
+                log(f"{RED}PDT规则触发！停止当天所有新入场{RESET}")
+                return None, True, shares, "pdt"
+            if analysis["category"] == "buying_power" and attempt < 2:
+                # 减仓50%再试
+                shares = max(1, shares // 2)
+                log(f"  减仓重试: {symbol} {shares}股")
+                continue
+            if analysis["category"] in ("rate_limit", "network") and attempt < 2:
+                time.sleep(5)
+                continue
+            if not analysis["retry"] or attempt >= 2:
+                return None, False, shares, last_reject
+    return None, False, shares, last_reject
 
 
 def place_sell_limit(symbol, shares, price):
+    """限价卖单 — 失败时微调价格重试"""
     if DRY_RUN:
         oid = f"DRY-S-{uuid4().hex[:8]}"
         mock = MockOrder(id=oid, symbol=symbol, qty=shares, side="sell",
@@ -745,19 +827,31 @@ def place_sell_limit(symbol, shares, price):
         dry_run_orders[oid] = mock
         log(f"[DRY] SELL LIMIT {symbol} {shares} @ ${price:.2f} -> {oid}")
         return mock
-    try:
-        order = trading_client.submit_order(LimitOrderRequest(
-            symbol=symbol, qty=shares, side=OrderSide.SELL,
-            time_in_force=TimeInForce.DAY, limit_price=round(price, 2),
-        ))
-        log(f"SELL LIMIT {symbol} {shares} @ ${price:.2f} -> order {order.id}")
-        return order
-    except Exception as e:
-        log(f"SELL LIMIT FAILED {symbol}: {e}")
-        return None
+    for attempt in range(2):
+        try:
+            order = trading_client.submit_order(LimitOrderRequest(
+                symbol=symbol, qty=shares, side=OrderSide.SELL,
+                time_in_force=TimeInForce.DAY, limit_price=round(price, 2),
+            ))
+            log(f"SELL LIMIT {symbol} {shares} @ ${price:.2f} -> order {order.id}")
+            return order
+        except Exception as e:
+            analysis = analyze_alpaca_rejection(e)
+            log(f"SELL LIMIT REJECTED ({attempt+1}/2) {symbol}: {analysis['detail']}")
+            if analysis["category"] == "price_invalid" and attempt < 1:
+                price = round(price * 0.99, 2)  # 降1%重试
+                log(f"  降价重试: limit=${price:.2f}")
+                continue
+            if analysis["category"] in ("rate_limit", "network") and attempt < 1:
+                time.sleep(5)
+                continue
+            if not analysis["retry"] or attempt >= 1:
+                return None
+    return None
 
 
 def place_sell_market(symbol, shares):
+    """Market sell — 用于阶梯卖出和强制平仓。失败时自动重试3次。"""
     if DRY_RUN:
         oid = f"DRY-SM-{uuid4().hex[:8]}"
         price = _dry_run_get_price(symbol) or 0
@@ -768,19 +862,31 @@ def place_sell_market(symbol, shares):
         dry_run_orders[oid] = mock
         log(f"[DRY] SELL MARKET {symbol} {shares} @ ~${fill_price:.2f} -> {oid}")
         return mock
-    try:
-        order = trading_client.submit_order(MarketOrderRequest(
-            symbol=symbol, qty=shares, side=OrderSide.SELL,
-            time_in_force=TimeInForce.DAY,
-        ))
-        log(f"SELL MARKET {symbol} {shares} -> order {order.id}")
-        return order
-    except Exception as e:
-        log(f"SELL MARKET FAILED {symbol}: {e}")
-        return None
+    for attempt in range(3):
+        try:
+            order = trading_client.submit_order(MarketOrderRequest(
+                symbol=symbol, qty=shares, side=OrderSide.SELL,
+                time_in_force=TimeInForce.DAY,
+            ))
+            log(f"SELL MARKET {symbol} {shares} -> order {order.id}")
+            return order
+        except Exception as e:
+            analysis = analyze_alpaca_rejection(e)
+            log(f"SELL MARKET REJECTED ({attempt+1}/3) {symbol}: {analysis['detail']}")
+            if analysis["category"] in ("rate_limit", "network") and attempt < 2:
+                time.sleep(5)
+                continue
+            if analysis["category"] == "qty_small" and attempt < 2:
+                shares = max(1, shares)
+                continue
+            if not analysis["retry"] or attempt >= 2:
+                log(f"{RED}SELL MARKET 最终失败: {symbol} — 仓位需人工干预!{RESET}")
+                return None
+    return None
 
 
 def place_stop_limit_sell(symbol, shares, stop_price, limit_price):
+    """止损限价单 — 失败时增大缓冲距离重试"""
     if DRY_RUN:
         oid = f"DRY-SL-{uuid4().hex[:8]}"
         mock = MockOrder(id=oid, symbol=symbol, qty=shares, side="sell",
@@ -788,21 +894,36 @@ def place_stop_limit_sell(symbol, shares, stop_price, limit_price):
         dry_run_orders[oid] = mock
         log(f"[DRY] STOP-LIMIT {symbol} {shares} stop=${stop_price:.2f} limit=${limit_price:.2f} -> {oid}")
         return mock
-    try:
-        order = trading_client.submit_order(StopLimitOrderRequest(
-            symbol=symbol, qty=shares, side=OrderSide.SELL,
-            time_in_force=TimeInForce.DAY,
-            stop_price=round(stop_price, 2),
-            limit_price=round(limit_price, 2),
-        ))
-        log(f"STOP-LIMIT {symbol} {shares} stop=${stop_price:.2f} limit=${limit_price:.2f} -> order {order.id}")
-        return order
-    except Exception as e:
-        log(f"STOP-LIMIT FAILED {symbol}: {e}")
-        return None
+    for attempt in range(3):
+        try:
+            order = trading_client.submit_order(StopLimitOrderRequest(
+                symbol=symbol, qty=shares, side=OrderSide.SELL,
+                time_in_force=TimeInForce.DAY,
+                stop_price=round(stop_price, 2),
+                limit_price=round(limit_price, 2),
+            ))
+            log(f"STOP-LIMIT {symbol} {shares} stop=${stop_price:.2f} limit=${limit_price:.2f} -> order {order.id}")
+            return order
+        except Exception as e:
+            analysis = analyze_alpaca_rejection(e)
+            log(f"STOP-LIMIT REJECTED ({attempt+1}/3) {symbol}: {analysis['detail']}")
+            if analysis["category"] == "stop_distance" and attempt < 2:
+                # 增大缓冲: stop多3%/5%(更远离入场价), limit相应调整
+                stop_price = round(stop_price * (1 - 0.03 * (attempt + 1)), 2)
+                limit_price = round(stop_price * 0.97 * (1 + 0.05 * (attempt + 1)), 2)
+                log(f"  增大缓冲重试: stop=${stop_price:.2f} limit=${limit_price:.2f}")
+                continue
+            if analysis["category"] in ("rate_limit", "network") and attempt < 2:
+                time.sleep(5)
+                continue
+            if not analysis["retry"] or attempt >= 2:
+                log(f"{RED}STOP-LIMIT 最终失败: {symbol} — 仓位无止损保护!{RESET}")
+                return None
+    return None
 
 
 def place_trailing_stop_sell(symbol, shares, trail_percent):
+    """Trailing stop — 失败时回退到stop-limit兜底保护"""
     if DRY_RUN:
         oid = f"DRY-TS-{uuid4().hex[:8]}"
         mock = MockOrder(id=oid, symbol=symbol, qty=shares, side="sell",
@@ -810,17 +931,39 @@ def place_trailing_stop_sell(symbol, shares, trail_percent):
         dry_run_orders[oid] = mock
         log(f"[DRY] TRAILING STOP {symbol} {shares} trail={trail_percent:.1f}% -> {oid}")
         return mock
-    try:
-        order = trading_client.submit_order(TrailingStopOrderRequest(
-            symbol=symbol, qty=shares, side=OrderSide.SELL,
-            time_in_force=TimeInForce.DAY,
-            trail_percent=round(trail_percent, 1),
-        ))
-        log(f"TRAILING STOP {symbol} {shares} trail={trail_percent:.1f}% -> order {order.id}")
-        return order
-    except Exception as e:
-        log(f"TRAILING STOP FAILED {symbol}: {e}")
-        return None
+    for attempt in range(2):
+        try:
+            order = trading_client.submit_order(TrailingStopOrderRequest(
+                symbol=symbol, qty=shares, side=OrderSide.SELL,
+                time_in_force=TimeInForce.DAY,
+                trail_percent=round(trail_percent, 1),
+            ))
+            log(f"TRAILING STOP {symbol} {shares} trail={trail_percent:.1f}% -> order {order.id}")
+            return order
+        except Exception as e:
+            analysis = analyze_alpaca_rejection(e)
+            log(f"TRAILING STOP REJECTED ({attempt+1}/2) {symbol}: {analysis['detail']}")
+            if analysis["category"] in ("rate_limit", "network") and attempt < 1:
+                time.sleep(5)
+                continue
+            # trailing stop失败 → 回退到stop-limit兜底
+            if attempt >= 1 or not analysis["retry"]:
+                # 用当前价格的trail_percent作为stop，3%缓冲作为limit
+                cur_price = 0
+                try:
+                    snap = data_client.get_stock_snapshot(StockSnapshotRequest(symbol_or_symbols=symbol, feed=DATA_FEED))
+                    cur_price = float(snap[symbol].latest_trade.price)
+                except Exception:
+                    pass
+                if cur_price > 0:
+                    fallback_stop = round(cur_price * (1 - trail_percent), 2)
+                    fallback_limit = round(fallback_stop * 0.97, 2)
+                    log(f"  回退兜底: stop-limit stop=${fallback_stop:.2f} limit=${fallback_limit:.2f}")
+                    return place_stop_limit_sell(symbol, shares, fallback_stop, fallback_limit)
+                else:
+                    log(f"{RED}TRAILING STOP失败且无法兜底: {symbol} — 仓位无保护!{RESET}")
+                    return None
+    return None
 
 
 def cancel_order(order_id):
@@ -1411,6 +1554,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
     positions: list[LivePosition] = []
     daily_trades = 0
     daily_stopped = False
+    _pdt_detected = False  # Pattern Day Trader 规则触发标志
     candidates = []
     entry_checked = set()
     entered_symbols = set()  # Symbols that were actually entered (for re-entry eligibility)
@@ -1657,12 +1801,159 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
         add_chart_event(pos.symbol, "sell", exit_price,
                         f"{exit_reason.replace('_', ' ').upper()} {sold_shares}sh")
 
+    # ── 不变量检查器 — 实盘状态一致性验证 ──────────────────────
+    def check_invariants():
+        """运行6条不变量检查 — 只检测+报警+记录修复指令，不直接修改状态。
+        修复指令存入 _invariant_fixes，下一轮循环开头才执行（在所有交易逻辑之前），
+        确保检测和修复不影响当前轮的交易操作。
+        """
+        errors = []
+        fixes = []  # 修复指令列表，下一轮执行
+        critical = False
+
+        # INV-1: 本地remaining_shares = Alpaca实际持仓股数
+        for pos in positions:
+            if pos.remaining_shares <= 0:
+                continue
+            try:
+                alpaca_pos = trading_client.get_open_position(pos.symbol)
+                alpaca_qty = int(float(alpaca_pos.qty))
+                if pos.remaining_shares != alpaca_qty:
+                    errors.append(f"INV-1 仓位不一致: {pos.symbol} 本地={pos.remaining_shares} Alpaca={alpaca_qty}")
+                    fixes.append(("sync_remaining", pos.symbol, alpaca_qty))
+                    critical = True
+            except Exception:
+                errors.append(f"INV-1 幽灵仓位: {pos.symbol} 本地={pos.remaining_shares} Alpaca无仓位")
+                fixes.append(("clear_ghost", pos.symbol))
+                critical = True
+
+        # INV-2: 每个有仓位的股票必须有≥1个卖单保护
+        for pos in positions:
+            if pos.remaining_shares <= 0:
+                continue
+            has_protection = pos.protective_order_id is not None
+            if not has_protection and not DRY_RUN:
+                try:
+                    open_orders = [o for o in trading_client.get_orders() if o.symbol == pos.symbol and o.side.value == "sell" and o.status.value in ("open", "new", "accepted", "pending_new")]
+                    if not open_orders:
+                        errors.append(f"INV-2 裸仓: {pos.symbol} 有{pos.remaining_shares}股但无卖单保护!")
+                        fixes.append(("add_stop", pos.symbol))
+                        critical = True
+                except Exception as e:
+                    errors.append(f"INV-2 裸仓(查询失败): {pos.symbol}, err={e}")
+                    critical = True
+
+        # INV-3: 已卖股数≤总股数
+        for pos in positions:
+            sold = pos.shares - pos.remaining_shares
+            if sold > pos.shares or pos.remaining_shares < 0:
+                errors.append(f"INV-3 超卖: {pos.symbol} 已卖{sold}股/总{pos.shares}股, remaining={pos.remaining_shares}")
+                fixes.append(("reset_remaining", pos.symbol))
+
+        # INV-4: PnL一致性
+        realized = sum(t["pnl"] for t in trades_detail)
+        unrealized = 0
+        for pos in positions:
+            if pos.remaining_shares > 0:
+                try:
+                    alpaca_pos = trading_client.get_open_position(pos.symbol)
+                    unrealized += float(alpaca_pos.unrealized_pl)
+                except Exception:
+                    pass
+        total_pnl = realized + unrealized
+        try:
+            current_equity = float(trading_client.get_account().equity)
+            equity_change = current_equity - equity_start
+            if abs(total_pnl - equity_change) > 5:
+                errors.append(f"INV-4 PnL偏差: 系统={total_pnl:.2f}, 账户变化={equity_change:.2f}, 差=${abs(total_pnl-equity_change):.2f}")
+        except Exception:
+            pass
+
+        # INV-5: tier进度一致性
+        for pos in positions:
+            if pos.sold_shares_list is None or pos.trade_type == "reentry":
+                continue
+            expected_sold = 0
+            for i in range(pos.next_tier_idx):
+                if i < len(pos.sold_shares_list):
+                    expected_sold += pos.sold_shares_list[i]
+            actual_sold = pos.shares - pos.remaining_shares
+            if expected_sold != actual_sold and pos.remaining_shares > 0:
+                errors.append(f"INV-5 tier不一致: {pos.symbol} 预期已卖={expected_sold}, 实际={actual_sold}, next_tier={pos.next_tier_idx}")
+
+        # INV-6: pending_buys和positions不重叠
+        pos_symbols = {p.symbol for p in positions if p.remaining_shares > 0}
+        buy_symbols = set(pending_buys.keys())
+        overlap = pos_symbols & buy_symbols
+        if overlap:
+            errors.append(f"INV-6 重复入场: {overlap} 同时在pending_buys和positions中")
+
+        return errors, fixes, critical
+
+    def apply_invariant_fixes(fixes):
+        """执行上一轮检测到的修复指令 — 在所有交易逻辑之前执行，确保不干扰交易"""
+        for fix in fixes:
+            action = fix[0]
+            symbol = fix[1]
+            pos = next((p for p in positions if p.symbol == symbol), None)
+            if pos is None:
+                continue  # 仓位可能已在上一轮退出
+
+            if action == "sync_remaining":
+                new_qty = fix[2]
+                log(f"  修复INV-1: {symbol} remaining {pos.remaining_shares}→{new_qty}")
+                old_remaining = pos.remaining_shares
+                pos.remaining_shares = new_qty
+                # 同步sold_shares_list和next_tier_idx以保持tier一致性
+                if pos.sold_shares_list and pos.trade_type != "reentry":
+                    actual_sold = pos.shares - new_qty
+                    # 从头累计sold_shares_list直到达到actual_sold
+                    cumulative = 0
+                    new_tier_idx = 0
+                    for i, s in enumerate(pos.sold_shares_list):
+                        cumulative += s
+                        if cumulative <= actual_sold:
+                            new_tier_idx = i + 1
+                        else:
+                            # 部分成交的tier: 按实际sold调整
+                            pos.sold_shares_list[i] = actual_sold - (cumulative - s)
+                            new_tier_idx = i + 1
+                            break
+                    pos.next_tier_idx = new_tier_idx
+                    # 清零之后未成交的tier
+                    for i in range(new_tier_idx, len(pos.sold_shares_list)):
+                        pos.sold_shares_list[i] = 0
+                    log(f"  同步tier: next_tier_idx→{new_tier_idx}, sold_shares_list={pos.sold_shares_list}")
+
+            elif action == "clear_ghost":
+                log(f"  修复INV-1: 清理幽灵仓位 {symbol}, remaining→0")
+                pos.remaining_shares = 0
+
+            elif action == "add_stop":
+                log(f"  修复INV-2: 补挂止损保护 {symbol}")
+                result = place_protective_stop(pos)
+                if result:
+                    log(f"  补挂止损成功: {symbol}")
+
+            elif action == "reset_remaining":
+                correct_remaining = max(0, pos.shares - min(pos.shares - pos.remaining_shares, pos.shares))
+                log(f"  修复INV-3: {symbol} remaining {pos.remaining_shares}→{correct_remaining}")
+                pos.remaining_shares = correct_remaining
+
+    _invariant_fixes = []  # 修复指令队列（跨轮传递）
+
     _entry_window_closed = False
+    _invariant_violation = False  # 暂停新入场标志
 
     while True:
         now_est = dt.datetime.now(tz=ZoneInfo("America/New_York"))
         now_time = now_est.time()
         poll_count += 1
+
+        # ── 执行上一轮记录的修复指令（在所有交易逻辑之前）──
+        if _invariant_fixes:
+            apply_invariant_fixes(_invariant_fixes)
+            _invariant_fixes = []  # 清空修复队列
 
         # ── Check pending buy fills ──
         for symbol in list(pending_buys.keys()):
@@ -1759,6 +2050,12 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     # P0-6/P0-7: For reentry_tier1, remaining_shares was never decremented
                     if sell_type == "reentry_tier1":
                         pos.reached_target1 = False
+                        pos.sold_partial1_shares = 0
+                        pos.breakeven_active = False
+                        # 恢复保护性止损（下单时已取消protective stop）
+                        if pos.remaining_shares > 0 and pos.protective_order_id is None:
+                            place_protective_stop(pos)
+                            log(f"  RE-ENTRY TIER-1 canceled: re-placed protective stop for {symbol}")
                         # remaining_shares was never decremented, so no restore needed
                     else:
                         pos.remaining_shares += sell_shares
@@ -1937,7 +2234,8 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
             _force_close_remaining(positions)
             positions = [p for p in positions if p.remaining_shares > 0]
             save_state(positions, candidates, daily_trades, daily_stopped,
-                       entry_checked, day_highs, accumulator, events_log)
+                       entry_checked, day_highs, accumulator, events_log,
+                       invariant_violation=_invariant_violation)
             save_chart_data(accumulator, positions, chart_events, str(now_est.date()))
             time.sleep(30)
             continue
@@ -2218,10 +2516,13 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                         continue
 
         # ── Check entries for candidates ──
-        if now_time >= cutoff_time and not _entry_window_closed:
+        if _invariant_violation:
+            # 不变量违规时只处理已有仓位，不开新仓
+            pass
+        elif now_time >= cutoff_time and not _entry_window_closed:
             _entry_window_closed = True
             log(f"Entry window closed ({cutoff_time}). No entries will be placed.")
-        if now_time < cutoff_time and daily_trades < config.MAX_DAILY_TRADES and not daily_stopped:
+        if now_time < cutoff_time and daily_trades < config.MAX_DAILY_TRADES and not daily_stopped and not _pdt_detected:
             force_qty = getattr(config, "FORCE_QTY", 0)
             for cand in candidates:
                 symbol = cand["symbol"]
@@ -2282,10 +2583,12 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     entry_checked.add(symbol)
                     continue
 
-                order = place_buy_market(symbol, shares)
+                order, pdt_hit, actual_shares, reject_cat = place_buy_market(symbol, shares)
+                if pdt_hit:
+                    _pdt_detected = True
                 if order:
                     pos_data = {
-                        "symbol": symbol, "entry_price": entry_price, "shares": shares,
+                        "symbol": symbol, "entry_price": entry_price, "shares": actual_shares,
                         "stop_price": stop, "open_price": cand["open_price"],
                         "entry_time": now_est, "atr": atr,
                         "targets": targets, "sell_ratios": sell_ratios,
@@ -2297,15 +2600,22 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     entry_checked.add(symbol)
                     entered_symbols.add(symbol)
                     log(f"BUY MARKET PENDING {symbol}: entry=${entry_price:.4f}, "
-                        f"stop=${stop:.4f}, targets={[round(t, 2) for t in targets]}, mode={target_mode}, shares={shares}")
+                        f"stop=${stop:.4f}, targets={[round(t, 2) for t in targets]}, mode={target_mode}, shares={actual_shares}")
                     events_log.append(f"{now_est.strftime('%H:%M:%S')} BUY MARKET {symbol} @ ${entry_price:.4f}")
                 else:
-                    log(f"BUY ORDER FAILED: {symbol} — skipping, no retry")
-                    entry_checked.add(symbol)
+                    # 瞬态错误(rate_limit/network)不永久排除，下一轮可重试
+                    if reject_cat in ("rate_limit", "network"):
+                        log(f"BUY ORDER FAILED (transient): {symbol} {reject_cat} — will retry next poll")
+                    else:
+                        log(f"BUY ORDER FAILED: {symbol} {reject_cat} — skipping, no retry")
+                        entry_checked.add(symbol)
 
         # ── Check re-entry ──
         # 0.4.13: Re-entry v2 with half position, ATR stop, tier targets, NO time stop
-        if now_time < reentry_cutoff_time and daily_trades < config.MAX_DAILY_TRADES and not daily_stopped:
+        if _invariant_violation:
+            # 不变量违规时不做re-entry
+            pass
+        elif now_time < reentry_cutoff_time and daily_trades < config.MAX_DAILY_TRADES and not daily_stopped and not _pdt_detected:
             exited_symbols = entered_symbols - {p.symbol for p in positions} - set(pending_buys.keys()) - stop_loss_symbols
             for symbol in exited_symbols:
                 if symbol in reentry_checked:
@@ -2392,11 +2702,13 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     reentry_checked.add(symbol)
                     continue
 
-                order = place_buy_market(symbol, shares)
+                order, pdt_hit, actual_shares, reject_cat = place_buy_market(symbol, shares)
+                if pdt_hit:
+                    _pdt_detected = True
                 if order:
                     # 1.0: Re-entry positions also use 6-tier target lists (empty targets for re-entry)
                     pos = LivePosition(
-                        symbol=symbol, entry_price=entry_price, shares=shares,
+                        symbol=symbol, entry_price=entry_price, shares=actual_shares,
                         stop_price=stop, open_price=cand["open_price"],
                         trade_type="reentry", prev_high=prev_high,
                         reentry_target=target, entry_time=now_est,
@@ -2426,9 +2738,29 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 p.protective_order_id = None
         positions = [p for p in positions if p.remaining_shares > 0]
 
+        # ── 不变量检查（每4轮轮询检查一次，避免API限频）──
+        # 只检测+记录修复指令，不直接修改状态（保证不影响交易）
+        if poll_count % 4 == 0 and not DRY_RUN:
+            inv_errors, inv_new_fixes, inv_critical = check_invariants()
+            if inv_errors:
+                log(f"{RED}⚠️ 不变量违规({len(inv_errors)}条)!{RESET}")
+                for err in inv_errors:
+                    log(f"  {RED}{err}{RESET}")
+                if inv_new_fixes:
+                    log(f"  修复指令已记录，下一轮执行({len(inv_new_fixes)}条)")
+                    _invariant_fixes.extend(inv_new_fixes)
+                if inv_critical:
+                    _invariant_violation = True
+                    log(f"{RED}严重违规 → 暂停新入场，仅处理已有仓位{RESET}")
+            elif _invariant_violation and not _invariant_fixes:
+                # 违规已解除且无待修复项
+                _invariant_violation = False
+                log(f"{GREEN}✓ 不变量全部通过，恢复入场{RESET}")
+
         # ── Save state ──
         save_state(positions, candidates, daily_trades, daily_stopped,
-                   entry_checked, day_highs, accumulator, events_log)
+                   entry_checked, day_highs, accumulator, events_log,
+                   invariant_violation=_invariant_violation)
         save_chart_data(accumulator, positions, chart_events, str(now_est.date()))
 
         # ── Status log ──
@@ -2474,7 +2806,8 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
 
     events_log.append(f"EOD equity=${equity:,.2f} trades={daily_trades}")
     save_state(positions, candidates, daily_trades, daily_stopped,
-               entry_checked, day_highs, accumulator, events_log)
+               entry_checked, day_highs, accumulator, events_log,
+               invariant_violation=_invariant_violation)
     save_chart_data(accumulator, positions, chart_events, str(dt.datetime.now(tz=ZoneInfo("America/New_York")).date()))
 
     # Stop WebSocket stream on exit
