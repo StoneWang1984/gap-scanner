@@ -1,5 +1,6 @@
 """Pre-market gap scanner using Alpaca historical data."""
 
+import re
 import pandas as pd
 from alpaca.data.historical.stock import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
@@ -102,9 +103,24 @@ def scan_gaps_for_symbols(
             # Apply filters
             if gap_pct < config.GAP_THRESHOLD:
                 continue
+            if gap_pct > getattr(config, "GAP_MAX", 1.0):
+                continue
             if prev_volume < config.MIN_VOLUME:
                 continue
+            dollar_volume = prev_close * prev_volume
+            if dollar_volume < getattr(config, "MIN_DOLLAR_VOLUME", 0):
+                continue
             if not (config.PRICE_MIN <= open_price <= config.PRICE_MAX):
+                continue
+            # Leveraged ETF filter
+            lev_suffixes = getattr(config, "LEVERAGED_ETF_SUFFIXES", ())
+            lev_prefixes = getattr(config, "LEVERAGED_ETF_PREFIXES", ())
+            _LEV_PATTERN = re.compile(r'(2X|3X|BULL|BEAR)$', re.IGNORECASE)
+            if _LEV_PATTERN.search(symbol):
+                continue
+            if any(symbol.startswith(p) for p in lev_prefixes):
+                continue
+            if any(symbol.endswith(s) for s in lev_suffixes):
                 continue
 
             results.append({

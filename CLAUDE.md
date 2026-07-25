@@ -1,4 +1,4 @@
-# Gap Scanner — Stone 1.0 量化交易系统
+# Gap Scanner — Stone 1.1 量化交易系统
 
 ## 项目概述
 
@@ -33,54 +33,69 @@
 ### Re-entry系统
 - 首笔退出后可二次入场（半仓）
 - 1档目标(75%回撤)，3% trailing stop
-- 最小回调3%，无时间限制
+- 最小回调4%，无时间限制
+- 止损退出后禁止re-entry（防止二次亏损）
+
+## Stone 1.1 修复清单
+
+| 编号 | 严重度 | 修复内容 |
+|------|--------|----------|
+| P0-1 | 严重 | 配置参数同步: STOP_LOSS_MAX_PCT=0.10, TRAILING_STOP_PCTS对齐, MIN_POSITION_SIZE=250 |
+| P0-2 | 严重 | 杠杆ETF后缀移除单字母L/U（不再误排除AAPL/GOOGL） |
+| P0-3 | 严重 | force_sell_position无仓位时返回0而非qty（避免双重记录） |
+| P0-4 | 严重 | protective fill后过滤已退出仓位（避免双重卖出竞态） |
+| P0-5 | 严重 | 阶梯卖出保护性止损空窗期修复（cancel_existing_orders参数） |
+| P0-6 | 严重 | re-entry tier-1 remaining_shares延迟到确认成交后才减少 |
+| P0-7 | 严重 | re-entry limit sell取消时恢复remaining_shares |
+| P0-8 | 严重 | 日亏损熔断器改为累计PnL(realized+unrealized) |
+| P1-9 | 重要 | 跳档处理同一轮处理所有触达tier |
+| P1-10 | 重要 | scanner加GAP_MAX+MIN_DOLLAR_VOLUME+ETF过滤 |
+| P1-11 | 重要 | ATR优先使用历史14日ATR |
+| P1-12 | 重要 | calc_stop_price边界改为可配置 |
+| P1-13 | 重要 | find_reentry_point加REENTRY_MIN_PULLBACK参数 |
+| P1-14 | 重要 | _make_result修复bar引用（date_str参数） |
+| P1-15 | 重要 | 拉回止损用20根1分钟滚动窗口 |
+| P1-16 | 重要 | re-entry bar_count用accumulator计数 |
+| P1-17 | 重要 | 止损退出后禁止re-entry |
+| P1-18 | 重要 | BarAccumulator不完整桶检查(count>=5) |
+| P1-19 | 重要 | WebSocket 60秒无数据自动重连 |
+| P1-20 | 重要 | BarAccumulator线程安全(threading.Lock) |
+| P2 | 次要 | 15项小修复（注释、显示、轮询间隔、回退值等） |
 
 ## 关键文件
 
 | 文件 | 作用 |
 |------|------|
-| `versions/live_trade_stone_1.0.py` | 实盘交易脚本（主程序） |
-| `versions/config_stone_1.0.py` | 配置文件（参数、API key） |
+| `versions/live_trade_stone_1.1.py` | 实盘交易脚本（主程序） |
+| `versions/config_stone_1.1.py` | 配置文件（参数、API key） |
 | `backtest.py` | 回测引擎 |
-| `strategy.py` | 策略评估函数（evaluate_trade_stone, calc_targets等） |
+| `strategy.py` | 策略评估函数 |
 | `scanner.py` | 股票扫描和筛选 |
-| `monte_carlo_test.py` | Monte Carlo随机价格模拟测试 |
-| `compare_bar_resolution.py` | 1分钟 vs 5分钟持仓管理对比 |
+| `versions/stock_simulator.py` | 5场景模拟器 |
 
 ## 配置要点
 
 - `DRY_RUN = False` — 实盘模式
-- `ALPACA_PAPER = False` — 真实账户（非模拟）
-- `FORCE_QTY = 8` — 测试模式固定8股
-- `FIRST_TRADE_TIME_LIMIT_BARS = 8` — 40分钟时间限制
-- `TARGET_LIMIT_BUFFER = 0.003` — 限价卖单buffer (0.3%)
-- `DATA_FEED = DataFeed.SIP` — SIP数据源（实盘）
+- `FORCE_QTY = 0` — 动态仓位计算
+- `STOP_LOSS_MAX_PCT = 0.10` — 最大亏损10%（与回测一致）
+- `TRAILING_STOP_PCTS = [0.02, 0.025, 0.03, 0.035, 0.04, 0.05]` — 与回测一致
+- `MIN_POSITION_SIZE = 250` — 最小仓位$250（与回测一致）
+- `REENTRY_MIN_PULLBACK = 0.04` — 最低4%回调（与回测一致）
+- `LEVERAGED_ETF_SUFFIXES = ("BULL", "BEAR")` — 不再误排除正常股票
+- `DATA_FEED = DataFeed.SIP` — SIP数据源
+- 轮询间隔: 5秒（避免API限频）
 
 ## 运行方式
 
 ```bash
 # 实盘运行
 /Users/stonewang2014/gap-scanner/.venv/bin/python3 -u \
-  /Users/stonewang2014/gap-scanner/versions/live_trade_stone_1.0.py
+  /Users/stonewang2014/gap-scanner/versions/live_trade_stone_1.1.py
 
 # 回测 (N天)
 /Users/stonewang2014/gap-scanner/.venv/bin/python3 -c \
   "from backtest import run_backtest; run_backtest(n_days=30)"
 
-# Monte Carlo模拟测试
-/Users/stonewang2014/gap-scanner/.venv/bin/python3 monte_carlo_test.py 5000
+# 5场景模拟器
+/Users/stonewang2014/gap-scanner/.venv/bin/python3 versions/stock_simulator.py
 ```
-
-## 已验证的关键结论
-
-1. **5分钟K线更适合持仓管理** — 30天对比：5分钟在75.8%的交易中表现更好，1分钟trailing stop触发太早截断利润
-2. **市价单比限价单更可靠** — 限价单在pullback点无法预测价格，成交率低
-3. **阶梯挂单零延迟成交** — 买入时立刻挂T1，价格到自动成交，无轮询延迟
-4. **Monte Carlo验证系统稳定** — 5000次随机模拟：93.9%胜率，PF=1.46，7个边缘测试全通过
-
-## 注意事项
-
-- 实盘脚本重启后需扫描Alpaca开放订单，重建pending阶梯卖单（recovery逻辑）
-- `LivePosition.next_tier_idx` 跟踪下一个要挂单的档位，是阶梯系统的核心状态
-- WebSocket断线后自动重连
-- 强制平仓流程：取消所有卖单 → close_position → market sell fallback

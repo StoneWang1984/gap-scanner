@@ -22,7 +22,7 @@ from strategy import (
 
 # ── Leveraged ETF filter ─────────────────────────────────────────────
 _LEV_PATTERN = re.compile(r'(2X|3X|BULL|BEAR)$', re.IGNORECASE)
-_LEV_SUFFIXES = ("U", "L", "S", "BULL", "BEAR")
+_LEV_SUFFIXES = ("BULL", "BEAR")  # single-letter suffixes removed (L/U/S matched AAPL/GOOGL/MS)
 _LEV_PREFIXES = (
     "TQQQ", "SQQQ", "UPRO", "SPXU", "TNA", "TZA",
     "MSTU", "MSTZ", "CONL", "NAIL", "WEBL", "FNGU",
@@ -37,7 +37,7 @@ _LEV_PREFIXES = (
 def is_leveraged_etf(symbol: str) -> bool:
     if _LEV_PATTERN.search(symbol):
         return True
-    if len(symbol) > 3 and symbol[-1] in _LEV_SUFFIXES:
+    if any(symbol.endswith(s) for s in _LEV_SUFFIXES):
         return True
     if any(symbol.startswith(p) for p in _LEV_PREFIXES):
         return True

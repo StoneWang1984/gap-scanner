@@ -1,4 +1,4 @@
-"""Stone 1.0 — Main config (synced with versions/config_stone_1.0.py)"""
+"""Stone 1.1 — Main config (synced with versions/config_stone_1.1.py)"""
 
 import os
 from pathlib import Path
@@ -26,8 +26,8 @@ MIN_DOLLAR_VOLUME = 100000
 PRICE_MIN = 1.0
 PRICE_MAX = 20.0
 
-# Leveraged ETF exclusion
-LEVERAGED_ETF_SUFFIXES = ("U", "L", "BULL", "BEAR")
+# Leveraged ETF exclusion — single-letter suffixes removed (L/U matched AAPL/GOOGL)
+LEVERAGED_ETF_SUFFIXES = ("BULL", "BEAR")
 LEVERAGED_ETF_PREFIXES = ()
 
 # Entry — confirmation logic
@@ -42,6 +42,10 @@ STOP_LOSS_PCT_FALLBACK = 0.20
 
 # 0.4.14: Stop loss max cap
 STOP_LOSS_MAX_PCT = 0.10
+
+# P1-12: Configurable ATR stop bounds (replaces hardcoded 0.70/0.95)
+STOP_LOSS_ATR_MIN_PCT = 0.70  # min stop = entry * (1 - this)
+STOP_LOSS_ATR_MAX_PCT = 0.95  # max stop = entry * (1 - this)
 
 # Profit targets — first trade (six tiers)
 PROFIT_RETRACEMENT_TIERS = [0.25, 0.50, 0.75, 1.00, 1.25, 1.50]
@@ -76,7 +80,7 @@ REENTRY_TRAILING_PCT_2 = 0.03           # 3% trailing after tier-1
 REENTRY_POSITION_RATIO = 0.5            # half position vs first trade
 REENTRY_CUTOFF_TIME = "12:30"
 REENTRY_MAX_BARS_BEFORE_TARGET = 0      # no time limit (0.4.13: removed)
-REENTRY_MIN_PULLBACK = 0.03             # 0.4.14: min 3% pullback from peak for re-entry
+REENTRY_MIN_PULLBACK = 0.04             # min 4% pullback from peak for re-entry
 PULLBACK_STOP_THRESHOLD = 0.15          # if pullback from peak > 15%, stop day
 
 # 0.4.14: Daily loss circuit breaker

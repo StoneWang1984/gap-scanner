@@ -1,4 +1,4 @@
-"""Gap pullback strategy — Stone 1.0: 6-tier first trade + re-entry."""
+"""Gap pullback strategy — Stone 1.1: 6-tier first trade + re-entry."""
 
 from dataclasses import dataclass
 import config
@@ -29,8 +29,8 @@ def calc_stop_price(pullback: float, atr: float, atr_mult: float = None) -> floa
         stop = pullback * (1 - config.STOP_LOSS_PCT_FALLBACK)
     else:
         atr_stop = pullback - atr_mult * atr
-        min_stop = pullback * 0.70
-        max_stop = pullback * 0.95
+        min_stop = pullback * getattr(config, "STOP_LOSS_ATR_MIN_PCT", 0.70)
+        max_stop = pullback * getattr(config, "STOP_LOSS_ATR_MAX_PCT", 0.95)
         stop = max(min_stop, min(max_stop, atr_stop))
     # 0.4.14: Cap stop loss at max percentage from entry
     max_pct = getattr(config, "STOP_LOSS_MAX_PCT", 0)
@@ -74,7 +74,7 @@ class TradePlan:
 def build_trade_plan(symbol: str, open_price: float, pullback: float, atr: float = 0.0,
                      position_size: float = None) -> TradePlan:
     if position_size is None:
-        position_size = config.MIN_POSITION_SIZE
+        position_size = calc_position_size(config.INITIAL_CAPITAL)
 
     retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.25, 0.50, 0.75, 1.00, 1.25, 1.50])
     caps = getattr(config, "TARGET_CAP_TIERS", [0.05, 0.10, 0.15, 0.20, 0.25, 0.35])
@@ -180,7 +180,7 @@ def evaluate_trade_stone(
     highest = plan.pullback
     time_limit_active = False
 
-    def _make_result(reason, exit_price, bi):
+    def _make_result(reason, exit_price, bi, date_str=None):
         pnl = 0.0
         partial_sells = []
         for i in range(n_tiers):
@@ -190,8 +190,9 @@ def evaluate_trade_stone(
         pnl_rest = (exit_price - plan.pullback) * remaining_shares
         pnl += pnl_rest
         pnl_pct = pnl / (plan.pullback * plan.shares) if plan.pullback > 0 else 0
+        _date = date_str or (str(bar.get("timestamp", pd.Timestamp.now()).date()) if bi >= 0 else "")
         return TradeResult(
-            symbol=plan.symbol, date=str(bar.get("timestamp", pd.Timestamp.now()).date()) if bi >= 0 else "",
+            symbol=plan.symbol, date=_date,
             entry_price=plan.pullback, exit_price=exit_price, shares=plan.shares,
             pnl=round(pnl, 2), pnl_pct=round(pnl_pct, 4), exit_reason=reason,
             open_price=plan.open_price, sell_target=plan.targets[-1],
@@ -216,7 +217,7 @@ def evaluate_trade_stone(
         if time_limit_bars > 0 and not reached[0] and bi >= time_limit_bars:
             time_limit_active = True
         if time_limit_active and bh >= plan.pullback:
-            exit_price = max(bh, plan.pullback)
+            exit_price = max(bar["close"], plan.pullback)
             return _make_result("time_limit_exit", exit_price, bi)
 
         # Check targets from highest to lowest (skip-gap handling)
@@ -269,13 +270,17 @@ def evaluate_trade_stone(
     return _make_result("force_close", exit_price, len(bars_after_entry) - 1)
 
 
-def find_reentry_point(bars: list[dict], open_price: float, initial_highest: float = 0.0):
+def find_reentry_point(bars: list[dict], open_price: float, initial_highest: float = 0.0,
+                       min_pullback_pct: float = None):
     """Find re-entry after first trade exits: peak then pullback with confirmation.
     Requires volume-price confirmation: confirmation bar must be bullish (close > open)
     and volume > average of recent bars.
     initial_highest: highest price from first trade, carried forward for peak detection.
+    min_pullback_pct: minimum pullback depth from peak (default: config.REENTRY_MIN_PULLBACK).
     Returns (entry_price, prev_high, entry_bar_idx, confirmed) or (0, 0, -1, False).
     """
+    if min_pullback_pct is None:
+        min_pullback_pct = getattr(config, "REENTRY_MIN_PULLBACK", 0.04)
     if len(bars) < 3:
         return 0, 0, -1, False
 
@@ -316,6 +321,10 @@ def find_reentry_point(bars: list[dict], open_price: float, initial_highest: flo
                 vol_ok = conf_vol > avg_vol * 1.2 if avg_vol > 0 else True  # 20% above average
 
                 if price_ok and vol_ok:
+                    # Check minimum pullback depth
+                    pullback_depth = (highest - bl) / highest
+                    if pullback_depth < min_pullback_pct:
+                        continue  # shallow pullback, skip
                     entry_price = bl
                     prev_high = highest
                     return entry_price, prev_high, i, True
@@ -361,13 +370,14 @@ def evaluate_reentry_trade(
     partial_sell_shares = 0
     remaining_shares = shares
 
-    def _make_result(reason, exit_price, bi):
+    def _make_result(reason, exit_price, bi, date_str=None):
         pnl_partial = (partial_sell_price - entry_price) * partial_sell_shares if sold_partial else 0
         pnl_rest = (exit_price - entry_price) * remaining_shares
         pnl = pnl_partial + pnl_rest
         pnl_pct = pnl / (entry_price * shares) if entry_price > 0 else 0
+        _date = date_str or (str(bar.get("timestamp", pd.Timestamp.now()).date()) if bi >= 0 and bars_after_entry else "")
         return TradeResult(
-            symbol=symbol, date=str(bar.get("timestamp", pd.Timestamp.now()).date()) if bi >= 0 else "",
+            symbol=symbol, date=_date,
             entry_price=entry_price, exit_price=exit_price, shares=shares,
             pnl=round(pnl, 2), pnl_pct=round(pnl_pct, 4), exit_reason=reason,
             open_price=open_price, sell_target=target_1, stop_price=stop_price,
