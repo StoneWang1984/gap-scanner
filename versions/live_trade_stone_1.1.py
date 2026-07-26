@@ -225,6 +225,8 @@ class LivePosition:
     target_mode: str = "retracement"
     # Ladder sell: index of next tier to place (0=T1, 1=T2, ...; = len(targets) after all sold)
     next_tier_idx: int = 0
+    # Naked position tracking: poll cycles without protective order (0 = protected)
+    naked_since_poll: int = 0
 
     def __post_init__(self):
         self.remaining_shares = self.shares
@@ -976,8 +978,16 @@ def cancel_order(order_id):
     try:
         trading_client.cancel_order_by_id(order_id)
         log(f"CANCELLED order {order_id}")
-    except Exception:
-        pass
+    except Exception as e:
+        # 验证取消是否成功（可能订单已成交/已取消）
+        try:
+            order_obj = trading_client.get_order_by_id(order_id)
+            if order_obj and order_obj.status not in ("canceled", "filled", "partially_filled", "rejected", "expired"):
+                log(f"{YELLOW}CANCEL FAILED: order {order_id} still status={order_obj.status} — {e}{RESET}")
+            else:
+                log(f"CANCEL order {order_id}: already {order_obj.status}")
+        except Exception:
+            log(f"{YELLOW}CANCEL FAILED for {order_id} and cannot verify status — {e}{RESET}")
 
 
 def cancel_all_orders():
@@ -1109,6 +1119,26 @@ def force_sell_position(symbol: str, qty: int, cancel_existing_orders=True) -> i
     except Exception as e:
         log(f"All sell methods failed for {symbol}: {e}")
 
+    # Method 4: Limit sell with deep discount (95% of current price) — last resort
+    try:
+        snap = get_snapshots([symbol]).get(symbol)
+        if snap and snap.latest_trade:
+            last_price = float(snap.latest_trade.price)
+            if last_price > 0 and sell_qty > 0:
+                deep_discount = round(last_price * 0.95, 2)
+                log(f"FORCE SELL (limit deep discount): {symbol} {sell_qty} @ ${deep_discount:.2f}")
+                order = place_sell_limit(symbol, sell_qty, deep_discount)
+                if order:
+                    filled = _wait_order_filled(order.id, timeout=30)
+                    if filled:
+                        log(f"FORCE SELL (deep discount limit): {symbol} {sell_qty} shares")
+                        return sell_qty
+    except Exception as e:
+        log(f"Deep discount limit sell also failed for {symbol}: {e}")
+
+    if sell_qty > 0:
+        log(f"{RED}CRITICAL: ALL 4 force_sell methods failed for {symbol} {sell_qty}sh — manual intervention required!{RESET}")
+
     return 0
 
 
@@ -1227,6 +1257,19 @@ def place_protective_stop(pos: LivePosition) -> str | None:
     return None
 
 
+def _verify_order_active(order_id: str) -> bool:
+    """检查订单是否仍然active（未取消、未成交）"""
+    if DRY_RUN:
+        return order_id in dry_run_orders
+    if not order_id:
+        return False
+    try:
+        order = trading_client.get_order_by_id(order_id)
+        return order and order.status in ("new", "accepted", "pending_new", "pending_replace", "pending_cancel")
+    except Exception:
+        return False
+
+
 def replace_with_trailing_stop(pos: LivePosition, trail_pct: float) -> str | None:
     """替换为trailing stop — 先挂新单再取消旧单，避免裸仓空窗期"""
     old_order_id = pos.protective_order_id
@@ -1246,8 +1289,13 @@ def replace_with_trailing_stop(pos: LivePosition, trail_pct: float) -> str | Non
         if old_order_id:
             cancel_order(old_order_id)
         return result
-    # fallback也失败 → 保留旧止损（防止裸仓），返回None
-    log(f"{RED}Both trailing and stop-limit failed for {pos.symbol} — keeping old protective order{RESET}")
+    # fallback也失败 → 检查旧止损是否仍然有效
+    if old_order_id and _verify_order_active(old_order_id):
+        log(f"{YELLOW}Both trailing and stop-limit failed for {pos.symbol} — verified old protective order still active{RESET}")
+        return None
+    # 旧止损已失效 → 裸仓！INV-2将在下轮检查中捕获
+    log(f"{RED}Both trailing and stop-limit failed AND old protective order invalid for {pos.symbol} — NAKED POSITION!{RESET}")
+    pos.protective_order_id = None
     return None
 
 
@@ -1273,8 +1321,13 @@ def replace_stop_for_remaining(pos: LivePosition) -> str | None:
                 if old_order_id and old_order_id != pos.protective_order_id:
                     cancel_order(old_order_id)
                 return result
-            # 新单失败 → 保留旧止损
-            log(f"{RED}Protective stop replacement failed for {pos.symbol} — keeping old order{RESET}")
+            # 新单失败 → 检查旧止损是否仍然有效
+            if old_order_id and _verify_order_active(old_order_id):
+                log(f"{YELLOW}Protective stop replacement failed for {pos.symbol} — verified old order still active{RESET}")
+                return None
+            # 旧止损已失效 → 裸仓
+            log(f"{RED}Protective stop replacement failed AND old order invalid for {pos.symbol} — NAKED POSITION!{RESET}")
+            pos.protective_order_id = None
             return None
     elif pos.reached_list and any(pos.reached_list):
         if pos.trade_type == "reentry":
@@ -1286,7 +1339,13 @@ def replace_stop_for_remaining(pos: LivePosition) -> str | None:
         if old_order_id and old_order_id != pos.protective_order_id:
             cancel_order(old_order_id)
         return result
-    log(f"{RED}Protective stop replacement failed for {pos.symbol} — keeping old order{RESET}")
+    # 新单失败 → 检查旧止损是否仍然有效
+    if old_order_id and _verify_order_active(old_order_id):
+        log(f"{YELLOW}Protective stop replacement failed for {pos.symbol} — verified old order still active{RESET}")
+        return None
+    # 旧止损已失效 → 裸仓
+    log(f"{RED}Protective stop replacement failed AND old order invalid for {pos.symbol} — NAKED POSITION!{RESET}")
+    pos.protective_order_id = None
     return None
 
 
@@ -1969,7 +2028,19 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     log(f"  补挂止损失败 ({_inv_retry+1}/3): {symbol}")
                     time.sleep(3)
                 if not result:
-                    log(f"{RED}  INV-2级联失败: {symbol} 补挂止损3次全败 — 需人工干预！{RESET}")
+                    # 补挂止损失败 → 升级到强制卖出（最后一道防线）
+                    log(f"{RED}  INV-2级联失败: {symbol} 补挂止损3次全败 — 升级到force_sell_position{RESET}")
+                    sold = force_sell_position(pos.symbol, pos.remaining_shares)
+                    if sold >= pos.remaining_shares:
+                        log(f"  INV-2 force_sell成功: {symbol} 完全清仓")
+                        pos.remaining_shares = 0
+                        if pos in positions:
+                            positions.remove(pos)
+                    elif sold > 0:
+                        pos.remaining_shares -= sold
+                        log(f"  INV-2 force_sell部分成功: {symbol} {sold}sh卖出, {pos.remaining_shares}sh剩余 — 需人工干预!")
+                    else:
+                        log(f"{RED}  INV-2终极失败: {symbol} force_sell也失败 — 需人工干预！{RESET}")
 
             elif action == "reset_remaining":
                 correct_remaining = max(0, pos.shares - min(pos.shares - pos.remaining_shares, pos.shares))
@@ -2097,10 +2168,18 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                         pos.reached_target1 = False
                         pos.sold_partial1_shares = 0
                         pos.breakeven_active = False
-                        # 恢复保护性止损（下单时已取消protective stop）
+                        # 恢复保护性止损 — 重试3次（防止裸仓）
                         if pos.remaining_shares > 0 and pos.protective_order_id is None:
-                            place_protective_stop(pos)
-                            log(f"  RE-ENTRY TIER-1 canceled: re-placed protective stop for {symbol}")
+                            result = None
+                            for _rt_retry in range(3):
+                                result = place_protective_stop(pos)
+                                if result:
+                                    log(f"  RE-ENTRY TIER-1 canceled: protective stop re-placed for {symbol} (attempt {_rt_retry+1})")
+                                    break
+                                log(f"  RE-ENTRY TIER-1 protective stop retry ({_rt_retry+1}/3) failed for {symbol}")
+                                time.sleep(2)
+                            if not result:
+                                log(f"{RED}  RE-ENTRY TIER-1 protective stop FAILED 3/3 for {symbol} — INV-2 will catch next loop{RESET}")
                         # remaining_shares was never decremented, so no restore needed
                     else:
                         pos.remaining_shares += sell_shares
@@ -2184,6 +2263,37 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                         trading_client.close_position(sym)
             except Exception as e:
                 log(f"Final close positions error: {e}")
+            # ── Final naked position sweep ──
+            # 不允许带着裸仓退出 — 逐个检查本地positions
+            for pos in positions[:]:
+                if pos.remaining_shares > 0:
+                    log(f"{RED}EOD NAKED POSITION: {pos.symbol} {pos.remaining_shares}sh remaining — attempting final force_sell{RESET}")
+                    # 尝试force_sell最多3次
+                    for _fc_retry in range(3):
+                        sold = force_sell_position(pos.symbol, pos.remaining_shares)
+                        if sold >= pos.remaining_shares:
+                            pos.remaining_shares = 0
+                            record_trade(pos, pos.entry_price, "eod_force_close")
+                            break
+                        elif sold > 0:
+                            pos.remaining_shares -= sold
+                        else:
+                            log(f"EOD force_sell retry ({_fc_retry+1}/3) failed for {pos.symbol}")
+                            time.sleep(5)
+                    if pos.remaining_shares > 0:
+                        # 所有尝试失败 — 验证Alpaca端是否仍有持仓
+                        try:
+                            ap = trading_client.get_open_position(pos.symbol)
+                            if int(float(ap.qty)) > 0:
+                                log(f"{RED}CRITICAL: {pos.symbol} STILL HAS {ap.qty} SHARES ON ALPACA AFTER ALL EOD ATTEMPTS — manual intervention required!{RESET}")
+                            else:
+                                pos.remaining_shares = 0
+                                log(f"EOD: {pos.symbol} Alpaca position already closed (local stale)")
+                        except Exception:
+                            pos.remaining_shares = 0
+                            log(f"EOD: {pos.symbol} no Alpaca position found (local stale)")
+            # 清理本地positions列表
+            positions = [p for p in positions if p.remaining_shares <= 0]
             # Stop WebSocket stream
             if _stream_state:
                 _stream_state.stop()
@@ -2222,6 +2332,29 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
             if snap and snap.daily_bar:
                 h = float(snap.daily_bar.high)
                 day_highs[symbol] = max(day_highs.get(symbol, 0), h)
+
+        # ── Naked position timeout ──
+        # 如果仓位连续3轮轮询都没有保护性止损，强制卖出（防止长时间裸仓）
+        NAKED_TIMEOUT_POLLS = 3
+        for pos in positions[:]:
+            if pos.remaining_shares <= 0:
+                continue
+            if pos.protective_order_id:
+                pos.naked_since_poll = 0  # 有保护性止损 → 重置计数器
+            else:
+                pos.naked_since_poll += 1
+                if pos.naked_since_poll >= NAKED_TIMEOUT_POLLS:
+                    log(f"{RED}NAKED TIMEOUT: {pos.symbol} unprotected for {pos.naked_since_poll} polls — force selling!{RESET}")
+                    sold = force_sell_position(pos.symbol, pos.remaining_shares)
+                    if sold >= pos.remaining_shares:
+                        pos.remaining_shares = 0
+                        record_trade(pos, pos.entry_price, "naked_timeout")
+                        positions.remove(pos)
+                    elif sold > 0:
+                        pos.remaining_shares -= sold
+                        log(f"NAKED TIMEOUT partial sell: {pos.symbol} {sold}sh, {pos.remaining_shares}sh remain")
+                    else:
+                        log(f"{RED}NAKED TIMEOUT force_sell FAILED: {pos.symbol} — will retry next poll{RESET}")
 
         # ── Pullback stop (15% from day high) -- per-stock, only HELD positions ──
         # Only sells the stock that triggered the stop, other positions continue
@@ -2346,15 +2479,13 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                                 positions.remove(pos)
                                 continue
                             elif sold > 0:
-                                # Now cancel protective stop and replace with trailing
-                                if pos.protective_order_id:
-                                    cancel_order(pos.protective_order_id)
-                                    pos.protective_order_id = None
+                                # 先挂新止损再取消旧止损（避免裸仓空窗期）
                                 pos.sold_shares_list[0] = sold
                                 pos.remaining_shares -= sold
                                 pos.reached_list[0] = True
                                 pos.next_tier_idx = 1
                                 need_replace_protective = True
+                                # 旧止损在replace_stop_for_remaining成功后取消
                                 log(f"T1 MARKET SELL: {pos.symbol} {sold}sh @ ~${cur_price:.4f}")
                                 events_log.append(f"{now_est.strftime('%H:%M:%S')} T1 MARKET SELL {pos.symbol} {sold}sh @ ~${cur_price:.4f}")
                                 add_chart_event(pos.symbol, "sell", cur_price, f"T1 {sold}sh")
@@ -2416,15 +2547,13 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                         positions.remove(pos)
                         break  # position fully closed, exit while loop
                     elif sold > 0:
-                        # Now cancel protective stop and replace
-                        if pos.protective_order_id:
-                            cancel_order(pos.protective_order_id)
-                            pos.protective_order_id = None
+                        # 先挂新止损再取消旧止损（避免裸仓空窗期）
                         pos.sold_shares_list[ti] = sold
                         pos.remaining_shares -= sold
                         pos.reached_list[ti] = True
                         pos.next_tier_idx = ti + 1
                         need_replace_protective = True
+                        # 旧止损在replace_stop_for_remaining成功后取消
                         log(f"T{ti+1} MARKET SELL: {pos.symbol} {sold}sh @ ~${cur_price:.4f}")
                         events_log.append(f"{now_est.strftime('%H:%M:%S')} T{ti+1} MARKET SELL {pos.symbol} {sold}sh @ ~${cur_price:.4f}")
                         add_chart_event(pos.symbol, "sell", cur_price, f"T{ti+1} {sold}sh")
