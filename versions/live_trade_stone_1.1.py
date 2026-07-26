@@ -1228,21 +1228,32 @@ def place_protective_stop(pos: LivePosition) -> str | None:
 
 
 def replace_with_trailing_stop(pos: LivePosition, trail_pct: float) -> str | None:
-    if pos.protective_order_id:
-        cancel_order(pos.protective_order_id)
-        pos.protective_order_id = None
+    """替换为trailing stop — 先挂新单再取消旧单，避免裸仓空窗期"""
+    old_order_id = pos.protective_order_id
+    # 先挂新trailing stop（不取消旧单）
     order = place_trailing_stop_sell(pos.symbol, pos.remaining_shares, trail_pct * 100)
     if order:
+        # 新单成功 → 取消旧单
+        if old_order_id:
+            cancel_order(old_order_id)
         pos.protective_order_id = str(order.id)
         return str(order.id)
+    # trailing stop失败 → fallback到stop-limit（同样先挂新再取消旧）
     log(f"Trailing stop failed for {pos.symbol}, falling back to stop-limit")
-    return place_protective_stop(pos)
+    result = place_protective_stop(pos)
+    if result:
+        # fallback成功 → 取消旧单
+        if old_order_id:
+            cancel_order(old_order_id)
+        return result
+    # fallback也失败 → 保留旧止损（防止裸仓），返回None
+    log(f"{RED}Both trailing and stop-limit failed for {pos.symbol} — keeping old protective order{RESET}")
+    return None
 
 
 def replace_stop_for_remaining(pos: LivePosition) -> str | None:
-    if pos.protective_order_id:
-        cancel_order(pos.protective_order_id)
-        pos.protective_order_id = None
+    """替换止损 — 先挂新单再取消旧单，避免裸仓空窗期"""
+    old_order_id = pos.protective_order_id
 
     if pos.remaining_shares <= 0:
         return None
@@ -1252,14 +1263,31 @@ def replace_stop_for_remaining(pos: LivePosition) -> str | None:
         if pos.next_tier_idx > 0:
             filled_tier = pos.next_tier_idx - 1
             trail_pct = pos.trail_pcts[min(filled_tier, len(pos.trail_pcts) - 1)]
-            return replace_with_trailing_stop(pos, trail_pct)
+            result = replace_with_trailing_stop(pos, trail_pct)
+            # replace_with_trailing_stop已内部处理先新再旧
+            return result
         else:
-            return place_protective_stop(pos)
+            # 先挂新stop-limit，成功再取消旧单
+            result = place_protective_stop(pos)
+            if result:
+                if old_order_id and old_order_id != pos.protective_order_id:
+                    cancel_order(old_order_id)
+                return result
+            # 新单失败 → 保留旧止损
+            log(f"{RED}Protective stop replacement failed for {pos.symbol} — keeping old order{RESET}")
+            return None
     elif pos.reached_list and any(pos.reached_list):
         if pos.trade_type == "reentry":
             return replace_with_trailing_stop(pos, config.REENTRY_TRAILING_PCT_2)
 
-    return place_protective_stop(pos)
+    # 默认: 先挂新stop-limit，成功再取消旧单
+    result = place_protective_stop(pos)
+    if result:
+        if old_order_id and old_order_id != pos.protective_order_id:
+            cancel_order(old_order_id)
+        return result
+    log(f"{RED}Protective stop replacement failed for {pos.symbol} — keeping old order{RESET}")
+    return None
 
 
 # ── Entry detection ────────────────────────────────────────────────
@@ -1931,9 +1959,17 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
 
             elif action == "add_stop":
                 log(f"  修复INV-2: 补挂止损保护 {symbol}")
-                result = place_protective_stop(pos)
-                if result:
-                    log(f"  补挂止损成功: {symbol}")
+                # 重试3次（级联失败防护）
+                result = None
+                for _inv_retry in range(3):
+                    result = place_protective_stop(pos)
+                    if result:
+                        log(f"  补挂止损成功: {symbol} (attempt {_inv_retry+1})")
+                        break
+                    log(f"  补挂止损失败 ({_inv_retry+1}/3): {symbol}")
+                    time.sleep(3)
+                if not result:
+                    log(f"{RED}  INV-2级联失败: {symbol} 补挂止损3次全败 — 需人工干预！{RESET}")
 
             elif action == "reset_remaining":
                 correct_remaining = max(0, pos.shares - min(pos.shares - pos.remaining_shares, pos.shares))
@@ -1990,11 +2026,20 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 # ── Approach 3: Protective stop covers ALL shares, T1 activated on price reach ──
                 # Stop covers 100% of position from the start. T1 limit sell is only placed
                 # when main loop detects price >= T1 target, ensuring no orphan fraction.
-                result = place_protective_stop(pos)
-                if result:
-                    log(f"PROTECTIVE STOP placed for all {pos.shares} shares: {pos.symbol} stop=${pos.stop_price:.4f}")
-                else:
-                    log(f"WARNING: Protective stop FAILED for {pos.symbol} — will retry next loop")
+                # ── Approach 3: Protective stop covers ALL shares, T1 activated on price reach ──
+                # Stop covers 100% of position from the start. T1 limit sell is only placed
+                # when main loop detects price >= T1 target, ensuring no orphan fraction.
+                # 重试3次: stop_distance拒绝时增大缓冲，确保不裸仓
+                result = None
+                for _ps_attempt in range(3):
+                    result = place_protective_stop(pos)
+                    if result:
+                        log(f"PROTECTIVE STOP placed for all {pos.shares} shares: {pos.symbol} stop=${pos.stop_price:.4f}")
+                        break
+                    log(f"PROTECTIVE STOP retry ({_ps_attempt+1}/3) for {pos.symbol}")
+                    time.sleep(2)
+                if not result:
+                    log(f"{RED}WARNING: Protective stop FAILED 3/3 for {pos.symbol} — INV-2 will catch next loop{RESET}")
                 events_log.append(f"{now_est.strftime('%H:%M:%S')} BUY FILLED {symbol} @ ${pos.entry_price:.4f}")
                 add_chart_event(symbol, "buy", pos.entry_price,
                                 f"BUY {pos.shares}sh" if pos.trade_type != "reentry" else f"RE-ENTRY BUY {pos.shares}sh")
