@@ -73,7 +73,7 @@ REENTRY_CUTOFF = getattr(config, "REENTRY_CUTOFF_TIME", "12:30")
 
 # ── 0.4.10: Leveraged ETF detection ─────────────────────────────────
 _LEV_PATTERN = re.compile(r'(2X|3X|BULL|BEAR)$', re.IGNORECASE)
-_LEV_SUFFIXES = ()
+_LEV_SUFFIXES = getattr(config, "LEVERAGED_ETF_SUFFIXES", ("BULL", "BEAR"))
 
 
 def is_leveraged_etf(symbol: str) -> bool:
@@ -325,7 +325,7 @@ def calc_targets(entry_price: float, open_price: float):
 
 def get_trailing_pct(pos) -> float:
     if pos.trade_type == "reentry":
-        return getattr(config, "REENTRY_TRAILING_PCT_2", 0.03)
+        return getattr(config, "REENTRY_TRAILING_PCT", 0.01)
     trail_pcts = getattr(config, "TRAILING_STOP_PCTS", [0.02, 0.025, 0.03, 0.035, 0.04, 0.05])
     if hasattr(pos, 'reached_list') and pos.reached_list:
         for ti in range(len(pos.reached_list) - 1, -1, -1):
@@ -338,7 +338,6 @@ def get_trailing_pct(pos) -> float:
 def save_state(positions, candidates, daily_trades, daily_stopped,
                entry_checked, day_highs, accumulator, events_log,
                invariant_violation=False):
-    all_syms = set([c["symbol"] for c in candidates] + [p.symbol for p in positions])
     all_syms = set([c["symbol"] for c in candidates] + [p.symbol for p in positions])
     state = {
         "updated": dt.datetime.now().isoformat(),
@@ -896,7 +895,7 @@ def place_stop_limit_sell(symbol, shares, stop_price, limit_price):
         dry_run_orders[oid] = mock
         log(f"[DRY] STOP-LIMIT {symbol} {shares} stop=${stop_price:.2f} limit=${limit_price:.2f} -> {oid}")
         return mock
-    for attempt in range(3):
+    for attempt in range(2):
         try:
             order = trading_client.submit_order(StopLimitOrderRequest(
                 symbol=symbol, qty=shares, side=OrderSide.SELL,
@@ -908,18 +907,17 @@ def place_stop_limit_sell(symbol, shares, stop_price, limit_price):
             return order
         except Exception as e:
             analysis = analyze_alpaca_rejection(e)
-            log(f"STOP-LIMIT REJECTED ({attempt+1}/3) {symbol}: {analysis['detail']}")
-            if analysis["category"] == "stop_distance" and attempt < 2:
-                # 增大缓冲: stop多3%/5%(更远离入场价), limit相应调整
-                stop_price = round(stop_price * (1 - 0.03 * (attempt + 1)), 2)
-                limit_price = round(stop_price * 0.97 * (1 + 0.05 * (attempt + 1)), 2)
-                log(f"  增大缓冲重试: stop=${stop_price:.2f} limit=${limit_price:.2f}")
+            log(f"STOP-LIMIT REJECTED ({attempt+1}/2) {symbol}: {analysis['detail']}")
+            if analysis["category"] == "stop_distance" and attempt < 1:
+                # 不降低stop_price（不超过10%亏损上限），只加宽stop→limit缓冲
+                buffer = STOP_LIMIT_BUFFER + 0.02
+                limit_price = round(stop_price * (1 - buffer), 2)
+                log(f"  加宽缓冲重试: stop=${stop_price:.2f} limit=${limit_price:.2f} buffer={buffer:.0%}")
                 continue
-            if analysis["category"] in ("rate_limit", "network") and attempt < 2:
+            if analysis["category"] in ("rate_limit", "network") and attempt < 1:
                 time.sleep(5)
                 continue
-            if not analysis["retry"] or attempt >= 2:
-                log(f"{RED}STOP-LIMIT 最终失败: {symbol} — 仓位无止损保护!{RESET}")
+            if not analysis["retry"] or attempt >= 1:
                 return None
     return None
 
@@ -1249,11 +1247,23 @@ def _force_close_remaining(positions: list[LivePosition]):
 # ── Protective order management ────────────────────────────────────
 
 def place_protective_stop(pos: LivePosition) -> str | None:
+    """Place protective stop-limit sell. Returns order_id if successful.
+    If stop placement fails, escalates to market sell and marks position for removal.
+    Caller must check pos.remaining_shares == 0 after call to handle emergency exit cleanup."""
     limit_price = round(pos.stop_price * (1 - STOP_LIMIT_BUFFER), 2)
     order = place_stop_limit_sell(pos.symbol, pos.remaining_shares, pos.stop_price, limit_price)
     if order:
         pos.protective_order_id = str(order.id)
         return str(order.id)
+    # 止损挂不上（stop_distance等原因）→ 市价卖出紧急退出，不允许裸仓
+    log(f"{RED}PROTECTIVE STOP FAILED for {pos.symbol} — escalating to market sell (no naked position){RESET}")
+    sold = force_sell_position(pos.symbol, pos.remaining_shares)
+    if sold >= pos.remaining_shares:
+        pos.remaining_shares = 0
+        # record_trade and positions.remove handled by caller (emergency_exit path)
+    elif sold > 0:
+        pos.remaining_shares -= sold
+        log(f"Emergency market sell partial: {pos.symbol} {sold} sold, {pos.remaining_shares} remain")
     return None
 
 
@@ -1271,7 +1281,9 @@ def _verify_order_active(order_id: str) -> bool:
 
 
 def replace_with_trailing_stop(pos: LivePosition, trail_pct: float) -> str | None:
-    """替换为trailing stop — 先挂新单再取消旧单，避免裸仓空窗期"""
+    """替换为trailing stop — 先挂新单再取消旧单，避免裸仓空窗期
+    Returns order_id if successful, None if failed.
+    If pos.remaining_shares == 0 after call, emergency exit occurred — caller must handle cleanup."""
     old_order_id = pos.protective_order_id
     # 先挂新trailing stop（不取消旧单）
     order = place_trailing_stop_sell(pos.symbol, pos.remaining_shares, trail_pct * 100)
@@ -1300,7 +1312,9 @@ def replace_with_trailing_stop(pos: LivePosition, trail_pct: float) -> str | Non
 
 
 def replace_stop_for_remaining(pos: LivePosition) -> str | None:
-    """替换止损 — 先挂新单再取消旧单，避免裸仓空窗期"""
+    """替换止损 — 先挂新单再取消旧单，避免裸仓空窗期
+    Returns order_id if successful, None if failed.
+    If pos.remaining_shares == 0 after call, emergency exit occurred — caller must handle cleanup."""
     old_order_id = pos.protective_order_id
 
     if pos.remaining_shares <= 0:
@@ -1331,7 +1345,7 @@ def replace_stop_for_remaining(pos: LivePosition) -> str | None:
             return None
     elif pos.reached_list and any(pos.reached_list):
         if pos.trade_type == "reentry":
-            return replace_with_trailing_stop(pos, config.REENTRY_TRAILING_PCT_2)
+            return replace_with_trailing_stop(pos, config.REENTRY_TRAILING_PCT)
 
     # 默认: 先挂新stop-limit，成功再取消旧单
     result = place_protective_stop(pos)
@@ -1351,7 +1365,7 @@ def replace_stop_for_remaining(pos: LivePosition) -> str | None:
 
 # ── Entry detection ────────────────────────────────────────────────
 def check_entry_1min(symbol, open_price, accumulator):
-    """1分钟K线折返点检测，5根1分钟bar确认底部（等价1根5分钟bar）。"""
+    """1分钟K线折返点检测 — 3根确认bar（low > bottom + close > bottom + 至少1根阳线）。"""
     bars = accumulator.get_1min_bars(symbol)
     if len(bars) < 2:
         return 0, False
@@ -1367,18 +1381,81 @@ def check_entry_1min(symbol, open_price, accumulator):
     if not config.ENTRY_CONFIRMATION:
         return pullback_price, True
     confirm_count = 0
+    bullish_count = 0
     for i in range(pullback_idx + 1, len(bars)):
-        bar_low = bars[i]["low"]
+        bar = bars[i]
+        bar_low = bar["low"]
+        bar_close = bar["close"]
+        bar_open = bar.get("open", bar.get("open_price", 0.0))
+        # New deeper bottom resets confirmation
         if bar_low < open_price and bar_low < pullback_price:
             pullback_idx = i
             pullback_price = bar_low
             confirm_count = 0
-        elif bar_low >= pullback_price:
-            confirm_count += 1
-            if confirm_count >= 5:
-                return pullback_price, True
+            bullish_count = 0
+            continue
+        # Skip bars still touching/exceeding bottom (low <= bottom or close <= bottom)
+        if bar_low <= pullback_price or bar_close <= pullback_price:
+            continue
+        # This bar is a valid confirmation: low > bottom AND close > bottom
+        confirm_count += 1
+        # Track bullish bars (close > open) — signals real reversal momentum
+        if bar_close > bar_open:
+            bullish_count += 1
+        if confirm_count >= 3 and bullish_count >= 1:
+            return pullback_price, True
     # Not enough confirmation bars yet — wait for more data
     return 0, False
+
+
+def check_reentry_1min(symbol, open_price, accumulator, min_pullback=0.04):
+    """1分钟K线re-entry检测 — recent peak后pullback+3根确认bar
+    Uses last 60 bars (1 hour window) for peak detection, not global peak."""
+    bars = accumulator.get_1min_bars(symbol)
+    if len(bars) < 5:
+        return 0, 0, False
+    # Use recent window (last 60 bars ≈ 1 hour) instead of global peak
+    recent = bars[-60:] if len(bars) >= 60 else bars
+    # Stock must have recovered at least 3% from open
+    peak = max(b["high"] for b in recent)
+    if peak < open_price * 1.03:
+        return 0, 0, False
+    # Find peak bar index within the recent window
+    peak_idx = max(range(len(recent)), key=lambda i: recent[i]["high"])
+    # Pullback threshold: peak * (1 - min_pullback)
+    pb_threshold = peak * (1 - min_pullback)
+    # Find pullback start (first bar below threshold AFTER peak)
+    pullback_idx = -1
+    pullback_price = 0.0
+    for i in range(peak_idx + 1, len(recent)):
+        if recent[i]["low"] < pb_threshold:
+            pullback_idx = i
+            pullback_price = recent[i]["low"]
+            break
+    if pullback_idx < 0:
+        return 0, 0, False
+    # Confirm bottom (3 bars: low > bottom + close > bottom + 1 bullish)
+    confirm_count = 0
+    bullish_count = 0
+    for i in range(pullback_idx + 1, len(recent)):
+        bar = recent[i]
+        bar_low = bar["low"]
+        bar_close = bar["close"]
+        bar_open = bar.get("open", bar.get("open_price", 0.0))
+        if bar_low < pb_threshold and bar_low < pullback_price:
+            pullback_idx = i
+            pullback_price = bar_low
+            confirm_count = 0
+            bullish_count = 0
+            continue
+        if bar_low <= pullback_price or bar_close <= pullback_price:
+            continue
+        confirm_count += 1
+        if bar_close > bar_open:
+            bullish_count += 1
+        if confirm_count >= 3 and bullish_count >= 1:
+            return pullback_price, peak, True
+    return 0, 0, False
 
 
 def check_entry(symbol, open_price, accumulator):
@@ -1669,6 +1746,27 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
             "label": label,
         })
 
+    def _check_circuit_breaker(snaps) -> bool:
+        """Check daily loss circuit breaker. Returns True if triggered."""
+        max_daily_loss_pct = getattr(config, "MAX_DAILY_LOSS_PCT", 0)
+        if max_daily_loss_pct <= 0:
+            return False
+        realized_pnl = sum(t["pnl"] for t in trades_detail)
+        unrealized_pnl = 0
+        for pos2 in positions:
+            if pos2.remaining_shares > 0:
+                snap2 = snaps.get(pos2.symbol)
+                if snap2 and snap2.latest_trade:
+                    cur2 = float(snap2.latest_trade.price)
+                    unrealized_pnl += (cur2 - pos2.entry_price) * pos2.remaining_shares
+        total_pnl = realized_pnl + unrealized_pnl
+        if total_pnl <= -(capital * max_daily_loss_pct):
+            log(f"{RED}CIRCUIT BREAKER: total PnL ${total_pnl:.2f} (realized ${realized_pnl:.2f} + unrealized ${unrealized_pnl:.2f}) exceeds -{max_daily_loss_pct*100:.0f}% of ${capital:.2f}{RESET}")
+            events_log.append(f"{now_est.strftime('%H:%M:%S')} CIRCUIT BREAKER total PnL ${total_pnl:.2f}")
+            entry_checked.update(set(c["symbol"] for c in candidates))
+            return True
+        return False
+
     # ── Pre-market scan (9:20 preview, NOT used for trading) ──
     log("Pre-market scanning for gap stocks (preliminary)...")
     preliminary = scan_gaps()
@@ -1887,6 +1985,15 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
         })
         add_chart_event(pos.symbol, "sell", exit_price,
                         f"{exit_reason.replace('_', ' ').upper()} {sold_shares}sh")
+
+    def _check_emergency_exit(pos):
+        """If pos.remaining_shares == 0 (emergency market sell from protective stop failure),
+        record the trade and remove from positions list."""
+        if pos.remaining_shares <= 0 and pos in positions:
+            record_trade(pos, pos.stop_price, "emergency_exit")
+            positions.remove(pos)
+            return True
+        return False
 
     # ── 不变量检查器 — 实盘状态一致性验证 ──────────────────────
     def check_invariants():
@@ -2110,7 +2217,12 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     log(f"PROTECTIVE STOP retry ({_ps_attempt+1}/3) for {pos.symbol}")
                     time.sleep(2)
                 if not result:
-                    log(f"{RED}WARNING: Protective stop FAILED 3/3 for {pos.symbol} — INV-2 will catch next loop{RESET}")
+                    # Emergency market sell may have already closed the position
+                    if pos.remaining_shares <= 0:
+                        record_trade(pos, pos.stop_price, "emergency_exit")
+                        log(f"EMERGENCY EXIT: {pos.symbol} — protective stop failed, market sold all shares")
+                    else:
+                        log(f"{RED}WARNING: Protective stop FAILED 3/3 for {pos.symbol} — INV-2 will catch next loop{RESET}")
                 events_log.append(f"{now_est.strftime('%H:%M:%S')} BUY FILLED {symbol} @ ${pos.entry_price:.4f}")
                 add_chart_event(symbol, "buy", pos.entry_price,
                                 f"BUY {pos.shares}sh" if pos.trade_type != "reentry" else f"RE-ENTRY BUY {pos.shares}sh")
@@ -2179,7 +2291,11 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                                 log(f"  RE-ENTRY TIER-1 protective stop retry ({_rt_retry+1}/3) failed for {symbol}")
                                 time.sleep(2)
                             if not result:
-                                log(f"{RED}  RE-ENTRY TIER-1 protective stop FAILED 3/3 for {symbol} — INV-2 will catch next loop{RESET}")
+                                if pos.remaining_shares <= 0:
+                                    # Emergency market sell closed the position
+                                    record_trade(pos, pos.stop_price, "emergency_exit")
+                                else:
+                                    log(f"{RED}  RE-ENTRY TIER-1 protective stop FAILED 3/3 for {symbol} — INV-2 will catch next loop{RESET}")
                         # remaining_shares was never decremented, so no restore needed
                     else:
                         pos.remaining_shares += sell_shares
@@ -2189,7 +2305,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                             pos.sold_partial1_shares = 0
                 del pending_sells[order_id]
 
-        # ── Check protective order fills ──
+        # ── Check protective order fills + stop triggered but not filled ──
         for pos in positions[:]:
             if pos.remaining_shares <= 0:
                 continue
@@ -2208,6 +2324,33 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 record_trade(pos, pos.stop_price, "protective_stop", sold_shares=sold_amount)
                 positions.remove(pos)
                 continue
+            # ── Stop triggered but limit not filled: price below stop → immediate market sell ──
+            # When cur_price <= stop_price, the stop should have triggered.
+            # If the stop-limit order's limit price is above cur_price, it won't fill.
+            # Don't wait for 5 seconds — market sell immediately.
+            snap = snaps.get(pos.symbol)
+            if snap and snap.latest_trade:
+                cur_price = float(snap.latest_trade.price)
+                if cur_price <= pos.stop_price:
+                    log(f"{RED}STOP TRIGGERED BUT NOT FILLED: {pos.symbol} stop=${pos.stop_price:.4f} cur=${cur_price:.4f} — immediate market sell{RESET}")
+                    events_log.append(f"{now_est.strftime('%H:%M:%S')} STOP_TRIGGERED_NOT_FILLED {pos.symbol} @ ${pos.stop_price:.4f}")
+                    stop_loss_symbols.add(pos.symbol)
+                    if pos.protective_order_id:
+                        cancel_order(pos.protective_order_id)
+                        pos.protective_order_id = None
+                    sold = force_sell_position(pos.symbol, pos.remaining_shares)
+                    if sold >= pos.remaining_shares:
+                        pos.remaining_shares = 0
+                        record_trade(pos, pos.stop_price, "stop_triggered_market_sell")
+                        positions.remove(pos)
+                    elif sold > 0:
+                        pos.remaining_shares -= sold
+                        log(f"STOP MARKET SELL PARTIAL: {pos.symbol} {sold} sold, {pos.remaining_shares} remain — re-placing stop")
+                        replace_stop_for_remaining(pos)
+                    else:
+                        log(f"{RED}STOP MARKET SELL FAILED: {pos.symbol} — re-placing protective stop{RESET}")
+                        replace_stop_for_remaining(pos)
+                    continue
 
         # Filter out closed positions to prevent double-sell race condition
         positions = [p for p in positions if p.remaining_shares > 0]
@@ -2368,24 +2511,35 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
             snap = snaps.get(symbol)
             if not snap:
                 continue
-            # Use rolling 1-min bars for pullback detection, fallback to daily bar
+            # Use pos.highest for dh (already tracked during holding period, no timezone issue)
+            # For dl, use recent 1-min bars (entry-time filtered to exclude pre-entry gap bars)
+            dh = pos.highest if pos.highest > 0 else day_highs.get(symbol, 0)
             recent_1min = accumulator.get_1min_bars(pos.symbol)
+            dl = 0.0
             if len(recent_1min) >= 5:
-                window = recent_1min[-20:] if len(recent_1min) >= 20 else recent_1min
-                dh = max(b["high"] for b in window)
-                dl = min(b["low"] for b in window)
+                # Filter bars after entry time to exclude pre-entry gap bars
+                if pos.entry_time:
+                    # Convert entry_time to comparable format
+                    entry_ts = pos.entry_time
+                    post_entry = [b for b in recent_1min if b.get("timestamp", b.get("t", 0)) >= entry_ts]
+                    window = post_entry[-20:] if len(post_entry) >= 20 else post_entry
+                else:
+                    window = recent_1min[-20:] if len(recent_1min) >= 20 else recent_1min
+                if len(window) >= 2:
+                    dl = min(b["low"] for b in window)
             else:
                 # fallback to daily bar if insufficient 1-min data
-                if not snap.daily_bar:
-                    continue
-                dh = day_highs.get(symbol, 0)
-                dl = float(snap.daily_bar.low)
-            if dh > 0 and (dh - dl) / dh > config.PULLBACK_STOP_THRESHOLD:
+                if snap.daily_bar:
+                    dl = float(snap.daily_bar.low)
+            if dh > 0 and dl > 0 and dh > dl and (dh - dl) / dh > config.PULLBACK_STOP_THRESHOLD:
                 log(f"PULLBACK STOP: {symbol} dropped {(dh - dl) / dh:.1%} from high ${dh:.4f}")
                 events_log.append(f"{now_est.strftime('%H:%M:%S')} PULLBACK STOP {symbol} -{(dh - dl) / dh:.1%}")
-                # Cancel protective stop first to avoid double-sell
-                if pos.protective_order_id:
-                    cancel_order(pos.protective_order_id)
+                # Cancel protective stop first to avoid double-sell — verify cancel succeeded
+                old_order_id = pos.protective_order_id
+                if old_order_id:
+                    cancel_order(old_order_id)
+                    if _verify_order_active(old_order_id):
+                        log(f"{YELLOW}PULLBACK STOP: cancel protective stop {old_order_id} FAILED — order still active, may double-sell{RESET}")
                     pos.protective_order_id = None
                 sold_shares = pos.remaining_shares
                 sold = force_sell_position(symbol, pos.remaining_shares)
@@ -2395,6 +2549,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     pos.remaining_shares = 0
                     pos.protective_order_id = None
                     entry_checked.add(symbol)
+                    stop_loss_symbols.add(symbol)  # Prevent re-entry after 15% crash
                     record_trade(pos, dl, "pullback_stop", sold_shares=actual_sold)
                 elif sold > 0:
                     pos.remaining_shares -= sold
@@ -2404,7 +2559,13 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     log(f"PULLBACK STOP FORCE SELL FAILED: {symbol}, re-placing protective stop")
                     replace_stop_for_remaining(pos)
 
-        # Clean up zero-share positions
+        # Clean up zero-share positions — record emergency exits that weren't logged
+        for pos in positions[:]:
+            if pos.remaining_shares <= 0 and pos.trade_type not in ("", None):
+                # Check if this position was already recorded (avoid duplicate)
+                already_recorded = any(t["symbol"] == pos.symbol and t["exit_reason"] == "emergency_exit" for t in trades_detail[-5:])
+                if not already_recorded:
+                    record_trade(pos, pos.stop_price, "emergency_exit")
         positions = [p for p in positions if p.remaining_shares > 0]
 
         # ── Daily loss circuit breaker (separate from pullback stop) ──
@@ -2601,77 +2762,24 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                             replace_stop_for_remaining(pos)
                         continue
 
-            # ── Re-entry v2 profit targets ──
+            # ── Re-entry: single tier — trailing stop 1% after target reached ──
             elif pos.trade_type == "reentry":
-                need_replace_protective = False
-                pos.reentry_bar_count = accumulator.bar_count(pos.symbol)
-                trail_pct_2 = getattr(config, "REENTRY_TRAILING_PCT_2", 0.03)
+                trail_pct = getattr(config, "REENTRY_TRAILING_PCT", 0.01)
 
-                # Tier-1: sell 1/2 at target_1
-                # P0-6/P0-7: Don't decrement remaining_shares until order is confirmed filled
+                # When price reaches target → switch protective stop to trailing 1%
                 if not pos.reached_target1 and pos.highest >= pos.reentry_target:
                     pos.reached_target1 = True
-                    sell_ratio_1 = getattr(config, "REENTRY_SELL_RATIO_1", 0.5)
-                    n = int(pos.remaining_shares * sell_ratio_1)
-                    if n > 0:
-                        sell_price = round(pos.reentry_target * (1 - TARGET_LIMIT_BUFFER), 2)
-                        log(f"RE-ENTRY TIER-1: {pos.symbol} selling {n} @ ${sell_price:.4f}")
-                        events_log.append(f"{now_est.strftime('%H:%M:%S')} RE-ENTRY TIER-1 {pos.symbol} sell {n} @ ${sell_price:.4f}")
-                        add_chart_event(pos.symbol, "sell", sell_price, f"TIER-1 {n}sh")
-                        if pos.protective_order_id:
-                            cancel_order(pos.protective_order_id)
-                            pos.protective_order_id = None
-                        order = place_sell_limit(pos.symbol, n, sell_price)
-                        if order:
-                            # Add to pending_sells — don't decrement remaining_shares until confirmed fill
-                            pending_sells[str(order.id)] = {
-                                "symbol": pos.symbol, "shares": n, "tier_idx": None,
-                                "type": "reentry_tier1", "price": sell_price, "order_id": str(order.id),
-                            }
-                            pos.reached_target1 = True
-                            # DON'T decrement remaining_shares or set sold_partial1_shares here
-                            # Those happen in the pending sell fill handler
-                            need_replace_protective = True
-                        else:
-                            # Sell failed — don't activate breakeven or decrement shares
-                            pos.reached_target1 = False
-                            # Re-place protective stop immediately (was cancelled above)
-                            if pos.remaining_shares > 0:
-                                place_protective_stop(pos)
-                                log(f"RE-ENTRY TIER-1 sell failed, protective stop re-placed for {pos.symbol}")
+                    result = replace_with_trailing_stop(pos, trail_pct)
+                    log(f"RE-ENTRY TARGET: {pos.symbol} @ ${pos.highest:.4f} → {trail_pct:.0%} trailing stop")
+                    events_log.append(f"{now_est.strftime('%H:%M:%S')} RE-ENTRY TARGET {pos.symbol} → {trail_pct:.0%} trail")
+                    add_chart_event(pos.symbol, "sell", pos.highest, f"TARGET→{trail_pct:.0%}trail")
 
-                # Breakeven stop after tier-1
-                if pos.breakeven_active and cur_price <= pos.entry_price and pos.remaining_shares > 0:
-                    log(f"RE-ENTRY BREAKEVEN: {pos.symbol} @ ${pos.entry_price:.4f}")
-                    events_log.append(f"{now_est.strftime('%H:%M:%S')} RE-ENTRY BREAKEVEN {pos.symbol}")
-                    if pos.protective_order_id:
-                        cancel_order(pos.protective_order_id)
-                        pos.protective_order_id = None
-                    sold = force_sell_position(pos.symbol, pos.remaining_shares)
-                    if sold >= pos.remaining_shares:
-                        pos.remaining_shares = 0
-                        record_trade(pos, pos.entry_price, "reentry_breakeven")
-                        positions.remove(pos)
-                    elif sold > 0:
-                        pos.remaining_shares -= sold
-                        replace_stop_for_remaining(pos)
-                    else:
-                        log(f"RE-ENTRY BREAKEVEN FORCE SELL FAILED: {pos.symbol}, re-placing protective stop")
-                        replace_stop_for_remaining(pos)
-                    continue
-
-                if need_replace_protective and pos.remaining_shares > 0:
-                    if pos.reached_target1:
-                        replace_with_trailing_stop(pos, trail_pct_2)
-                    else:
-                        place_protective_stop(pos)
-
-                # Trailing stop after tier-1
+                # Trailing stop 1% check (polled fallback)
                 if pos.reached_target1 and pos.remaining_shares > 0:
-                    tsp = round(pos.highest * (1 - trail_pct_2), 2)
+                    tsp = round(pos.highest * (1 - trail_pct), 2)
                     tsp = max(tsp, pos.entry_price)
                     if cur_price <= tsp:
-                        log(f"RE-ENTRY TRAILING (polled): {pos.symbol} @ ${tsp:.4f} (high=${pos.highest:.4f})")
+                        log(f"RE-ENTRY TRAILING({trail_pct:.0%}): {pos.symbol} @ ${tsp:.4f} (high=${pos.highest:.4f})")
                         events_log.append(f"{now_est.strftime('%H:%M:%S')} RE-ENTRY TRAILING {pos.symbol} @ ${tsp:.4f}")
                         if pos.protective_order_id:
                             cancel_order(pos.protective_order_id)
@@ -2685,7 +2793,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                             pos.remaining_shares -= sold
                             replace_stop_for_remaining(pos)
                         else:
-                            log(f"RE-ENTRY TRAILING FORCE SELL FAILED: {pos.symbol}, re-placing protective stop")
+                            log(f"RE-ENTRY TRAILING FAILED: {pos.symbol}, re-placing protective stop")
                             replace_stop_for_remaining(pos)
                         continue
 
@@ -2696,6 +2804,10 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
         elif now_time >= cutoff_time and not _entry_window_closed:
             _entry_window_closed = True
             log(f"Entry window closed ({cutoff_time}). No entries will be placed.")
+        if now_time < cutoff_time and daily_trades < config.MAX_DAILY_TRADES and not daily_stopped and not _pdt_detected:
+            # Daily loss circuit breaker — check before any new entry
+            if _check_circuit_breaker(snaps):
+                daily_stopped = True
         if now_time < cutoff_time and daily_trades < config.MAX_DAILY_TRADES and not daily_stopped and not _pdt_detected:
             force_qty = getattr(config, "FORCE_QTY", 0)
             for cand in candidates:
@@ -2713,6 +2825,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
 
                 entry_price, confirmed = check_entry_1min(symbol, cand["open_price"], accumulator)
                 if not confirmed or entry_price <= 0:
+                    log(f"  {symbol}: no entry confirmation yet (1min bars={len(accumulator.get_1min_bars(symbol))})")
                     continue
 
                 # 0.4.11: Skip if entry price >= open price (no chasing above open)
@@ -2785,9 +2898,8 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                         entry_checked.add(symbol)
 
         # ── Check re-entry ──
-        # 0.4.13: Re-entry v2 with half position, ATR stop, tier targets, NO time stop
+        # Simplified: 1-min bar entry + single trailing stop 1% after target
         if _invariant_violation:
-            # 不变量违规时不做re-entry
             pass
         elif now_time < reentry_cutoff_time and daily_trades < config.MAX_DAILY_TRADES and not daily_stopped and not _pdt_detected:
             exited_symbols = entered_symbols - {p.symbol for p in positions} - set(pending_buys.keys()) - stop_loss_symbols
@@ -2796,51 +2908,33 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     continue
                 cand = next((c for c in candidates if c['symbol'] == symbol), None)
                 if not cand:
+                    log(f"  RE-ENTRY SKIP {symbol}: not in candidates list")
                     continue
 
-                bars_5m = accumulator.get_5min_bars(symbol)
-                if len(bars_5m) < 3:
-                    continue
-
-                entry_price, prev_high, _, confirmed = find_reentry_point(bars_5m, cand["open_price"])
+                # 1-min bar entry detection (same logic as first trade)
+                reentry_min_pb = getattr(config, "REENTRY_MIN_PULLBACK", 0.04)
+                entry_price, prev_high, confirmed = check_reentry_1min(symbol, cand["open_price"], accumulator, min_pullback=reentry_min_pb)
                 if not confirmed or entry_price <= 0:
+                    log(f"  {symbol}: no re-entry confirmation yet (1min bars={len(accumulator.get_1min_bars(symbol))})")
                     continue
 
-                # 0.4.14: Minimum pullback from peak for re-entry
-                reentry_min_pb = getattr(config, "REENTRY_MIN_PULLBACK", 0)
-                if reentry_min_pb > 0 and prev_high > 0:
-                    pb_pct = (prev_high - entry_price) / prev_high
-                    if pb_pct < reentry_min_pb:
-                        log(f"RE-ENTRY SKIP {symbol}: pullback {pb_pct:.1%} < min {reentry_min_pb:.0%}")
-                        reentry_checked.add(symbol)
-                        continue
+                # Daily loss circuit breaker — check before re-entry
+                if _check_circuit_breaker(snaps):
+                    daily_stopped = True
+                    break
 
-                # 0.4.14: Daily loss circuit breaker — use total PnL (realized + unrealized)
-                max_daily_loss_pct = getattr(config, "MAX_DAILY_LOSS_PCT", 0)
-                if max_daily_loss_pct > 0:
-                    realized_pnl = sum(t["pnl"] for t in trades_detail)
-                    # Include unrealized losses on open positions
-                    unrealized_pnl = 0
-                    for pos2 in positions:
-                        if pos2.remaining_shares > 0:
-                            unrealized_pnl += (cur_price - pos2.entry_price) * pos2.remaining_shares
-                    total_pnl = realized_pnl + unrealized_pnl
-                    if total_pnl <= -(capital * max_daily_loss_pct):
-                        log(f"CIRCUIT BREAKER: total PnL ${total_pnl:.2f} (realized ${realized_pnl:.2f} + unrealized ${unrealized_pnl:.2f}) exceeds -{max_daily_loss_pct*100:.0f}% of ${capital:.2f}")
-                        entry_checked.update(set(c["symbol"] for c in candidates))
-                        daily_stopped = True
-                        break
-
-                # 0.4.10: ATR-based stop for re-entry (P1-11: prefer historical ATR)
+                # ATR-based stop for re-entry
                 atr = get_prev_day_atr(symbol)
                 if atr <= 0:
-                    atr = calc_atr(bars_5m, period=14)
-                    log(f"  {symbol}: re-entry historical ATR unavailable, using intra-day ATR={atr:.4f}")
+                    # Fallback: use 1-min bars for intra-day ATR
+                    bars_1m = accumulator.get_1min_bars(symbol)
+                    atr = calc_atr(bars_1m, period=14) if len(bars_1m) >= 14 else 0
+                    log(f"  {symbol}: re-entry ATR from 1min bars={atr:.4f}")
                 else:
                     log(f"  {symbol}: re-entry using historical ATR={atr:.4f}")
                 if atr > 0:
                     stop = round(entry_price - 1.5 * atr, 2)
-                    stop = max(stop, round(entry_price * 0.96, 2))
+                    stop = max(stop, round(entry_price * (1 - config.REENTRY_STOP_PCT_FALLBACK), 2))
                 else:
                     stop = round(entry_price * (1 - config.REENTRY_STOP_PCT), 2)
 
@@ -2892,7 +2986,11 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                         target_mode="reentry",
                     )
                     positions.append(pos)
-                    place_protective_stop(pos)
+                    prot_result = place_protective_stop(pos)
+                    if pos.remaining_shares <= 0:
+                        # Emergency market sell closed the position
+                        record_trade(pos, pos.stop_price, "emergency_exit")
+                        positions.remove(pos)
                     entered_symbols.add(symbol)  # Track for re-entry eligibility
                     reentry_checked.add(symbol)
                     log(f"RE-ENTERED {symbol}: entry=${entry_price:.4f}, "

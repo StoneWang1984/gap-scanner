@@ -84,16 +84,18 @@ TRAILING_STOP_PCT_75 = 0.03
 TRAILING_STOP_PCT_1125 = 0.04
 TRAILING_STOP_PCT_150 = 0.05
 
-# ── Re-entry trade — retracement + trailing, no time limit ───
+# ── Re-entry trade — simplified: 1-min entry + trailing 1% ───
 REENTRY_POSITION_RATIO = 0.5            # half position vs first trade
 REENTRY_STOP_PCT = 0.05                 # ATR不可用时的止损回退百分比
 REENTRY_STOP_ATR_MULT = 1.5             # ATR-based stop multiplier
-REENTRY_STOP_PCT_FALLBACK = 0.04        # fallback when ATR unavailable
-REENTRY_PROFIT_RETRACEMENT_1 = 0.75     # v2 tier-1: sell 1/2 at 75% retracement
-REENTRY_SELL_RATIO_1 = 0.5             # v2 tier-1: sell 1/2 of position
-REENTRY_TRAILING_PCT_2 = 0.03           # v2 tier-2: 3% trailing after tier-1
+REENTRY_STOP_PCT_FALLBACK = 0.04        # ATR止损保底4%
+REENTRY_PROFIT_RETRACEMENT_1 = 0.75     # target = entry + 75% × (peak - entry)
+REENTRY_TRAILING_PCT = 0.01             # 1% trailing stop after target reached
 REENTRY_CUTOFF_TIME = "12:30"           # no re-entries after 12:30 PM EST
-REENTRY_MAX_BARS_BEFORE_TARGET = 0      # no time stop (removed)
+# DEPRECATED: old 2-tier system params (no longer used)
+REENTRY_SELL_RATIO_1 = 0.5             # [DEPRECATED] no partial sells anymore
+REENTRY_TRAILING_PCT_2 = 0.03           # [DEPRECATED] replaced by REENTRY_TRAILING_PCT=0.01
+REENTRY_MAX_BARS_BEFORE_TARGET = 0      # [DEPRECATED] no time stop
 
 # Minimum pullback from peak before re-entry
 # Prevents re-entering during shallow pullbacks / choppy consolidation

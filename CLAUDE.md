@@ -7,7 +7,7 @@
 ## 核心架构
 
 ### 入场系统
-- **1分钟K线检测折返点** (`check_entry_1min`) — 价格跌破open_price后，5根1分钟bar确认底部
+- **1分钟K线检测折返点** (`check_entry_1min`) — 价格跌破open_price后，3根1分钟bar确认底部（low > bottom + close > bottom + 至少1根阳线）
 - **市价单入场** (`place_buy_market`) — 确认后立即市价买入，确保成交
 - 入场窗口：9:31-10:00 EST，最多5支股票/天
 
