@@ -1,0 +1,21 @@
+stonewang_daytrade_1.0
+
+Released: 2026-07-28
+Based on: Stone 1.1 (live_trade_stone_1.1.py + config_stone_1.1.py)
+
+This is the first stable release of the stonewang daytrade system.
+Files are frozen snapshots — no modifications from the running version.
+
+Core files:
+- live_trade.py   (from live_trade_stone_1.1.py) — 实盘交易主程序
+- config.py       (from config_stone_1.1.py) — 配置文件
+- backtest.py     — 回测引擎
+- strategy.py     — 策略评估
+- scanner.py      — 股票扫描筛选
+- config_base.py  (from config.py) — 回测配置
+- stock_simulator.py — 5场景模拟器
+- rejection_simulator.py — 拒绝模拟器
+- CLAUDE.md       — 项目文档
+
+First live trading day: 2026-07-27
+Result: +$25.86 (9 trades, 8 wins actual)
