@@ -3468,6 +3468,8 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 daily_stopped = True
         if now_time < cutoff_time and (config.MAX_DAILY_TRADES == 0 or daily_trades < config.MAX_DAILY_TRADES) and not daily_stopped and not _pdt_detected:
             force_qty = getattr(config, "FORCE_QTY", 0)
+            # Track total allocated this cycle — deduct from pool after each buy
+            allocated_this_cycle = 0
             for cand in candidates:
                 # Simultaneous positions cap — stop entering new positions
                 if config.MAX_POSITIONS_PER_DAY > 0 and len(positions) + len(pending_buys) >= config.MAX_POSITIONS_PER_DAY:
@@ -3511,7 +3513,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 # 1.0: 6-tier targets via calc_targets
                 targets, sell_ratios, trail_pcts, target_mode = calc_targets(entry_price, cand["open_price"])
 
-                # Dynamic allocation: divide remaining buying power by remaining slots
+                # Fair allocation: deduct allocated amount from pool, divide evenly among remaining
                 # When MAX_DAILY_TRADES=0 (unlimited), use remaining candidates as slot count
                 if config.MAX_DAILY_TRADES > 0:
                     remaining_slots = config.MAX_DAILY_TRADES - daily_trades - len(pending_buys)
@@ -3523,7 +3525,11 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     bp = float(trading_client.get_account().buying_power)
                 except Exception:
                     bp = capital * 0.95
-                pos_size = bp / remaining_slots
+                bp_available = bp - allocated_this_cycle
+                if bp_available <= 0:
+                    log(f"  No buying power left (${bp_available:.2f}), stopping entries")
+                    break
+                pos_size = bp_available / remaining_slots
                 pos_size = min(pos_size, config.MAX_POSITION_SIZE)
                 if bp < pos_size:
                     log(f"  {symbol}: buying power ${bp:.2f} < alloc ${pos_size:.2f}, skipping")
@@ -3533,6 +3539,12 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 if force_qty > 0:
                     shares = force_qty
                 if shares <= 0:
+                    entry_checked.add(symbol)
+                    continue
+                # MIN_POSITION_SIZE check — skip if position too small
+                min_pos = getattr(config, "MIN_POSITION_SIZE", 0)
+                if min_pos > 0 and shares * entry_price < min_pos:
+                    log(f"  {symbol}: position ${shares * entry_price:.2f} < MIN_POSITION_SIZE ${min_pos}, skipping")
                     entry_checked.add(symbol)
                     continue
 
@@ -3569,6 +3581,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     pending_buys[symbol] = (str(order.id), pos_data)
                     entry_checked.add(symbol)
                     entered_symbols.add(symbol)
+                    allocated_this_cycle += actual_shares * entry_price
                     log(f"BUY MARKET PENDING {symbol}: entry=${entry_price:.4f}, "
                         f"stop=${stop:.4f}, targets={[round(t, 2) for t in targets]}, mode={target_mode}, shares={actual_shares}")
                     events_log.append(f"{now_est.strftime('%H:%M:%S')} BUY MARKET {symbol} @ ${entry_price:.4f}")
@@ -3635,22 +3648,23 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 retrace_1 = getattr(config, "REENTRY_PROFIT_RETRACEMENT_1", 0.75)
                 target = round(entry_price + retrace_1 * (prev_high - entry_price), 2)
 
-                # 0.4.10: Dynamic re-entry allocation
+                # 0.4.10: Dynamic re-entry allocation — deduct already allocated
                 reentry_pos_ratio = getattr(config, "REENTRY_POSITION_RATIO", 0.5)
                 try:
                     bp = float(trading_client.get_account().buying_power)
                 except Exception:
                     bp = capital * 0.95
+                bp_available = bp - allocated_this_cycle
                 # Re-entry gets half of what a first trade would get
                 # When MAX_DAILY_TRADES=0 (unlimited), use remaining candidates as slot count
                 if config.MAX_DAILY_TRADES > 0:
                     remaining_slots = config.MAX_DAILY_TRADES - daily_trades - len(pending_buys)
                 else:
                     remaining_slots = len(candidates) - len(entry_checked) - len(pending_buys)
-                first_trade_alloc = bp / max(remaining_slots, 1)
+                first_trade_alloc = bp_available / max(remaining_slots, 1)
                 reentry_size = first_trade_alloc * reentry_pos_ratio
                 reentry_size = min(reentry_size, config.MAX_POSITION_SIZE)
-                if bp < reentry_size:
+                if bp_available < reentry_size:
                     log(f"  {symbol}: re-entry skipped, buying power ${bp:.2f} < alloc ${reentry_size:.2f}")
                     reentry_checked.add(symbol)
                     continue
@@ -3658,6 +3672,12 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 if force_qty > 0:
                     shares = max(1, force_qty // 2)
                 if shares <= 0:
+                    reentry_checked.add(symbol)
+                    continue
+                # MIN_POSITION_SIZE check for re-entry
+                min_pos = getattr(config, "MIN_POSITION_SIZE", 0)
+                if min_pos > 0 and shares * entry_price < min_pos:
+                    log(f"  {symbol}: re-entry position ${shares * entry_price:.2f} < MIN_POSITION_SIZE ${min_pos}, skipping")
                     reentry_checked.add(symbol)
                     continue
 
@@ -3701,6 +3721,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                         positions.remove(pos)
                     entered_symbols.add(symbol)  # Track for re-entry eligibility
                     reentry_checked.add(symbol)
+                    allocated_this_cycle += actual_shares * entry_price
                     log(f"RE-ENTERED {symbol}: entry=${entry_price:.4f}, "
                         f"stop=${stop:.4f}, target=${target:.4f}, prev_high=${prev_high:.4f}, shares={shares}, atr=${atr:.4f}")
                     events_log.append(f"{now_est.strftime('%H:%M:%S')} RE-ENTERED {symbol} @ ${entry_price:.4f} (v2)")

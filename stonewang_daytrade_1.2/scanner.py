@@ -112,15 +112,21 @@ def scan_gaps_for_symbols(
                 continue
             if not (config.PRICE_MIN <= open_price <= config.PRICE_MAX):
                 continue
-            # Leveraged ETF filter
-            lev_suffixes = getattr(config, "LEVERAGED_ETF_SUFFIXES", ())
-            lev_prefixes = getattr(config, "LEVERAGED_ETF_PREFIXES", ())
+            # Leveraged ETF filter — same logic as live_trade.py
+            lev_suffixes = getattr(config, "LEVERAGED_ETF_SUFFIXES", ("BULL", "BEAR"))
+            lev_prefixes = ("TQQQ", "SQQQ", "UPRO", "SPXU", "TNA", "TZA",
+                            "MSTU", "MSTZ", "CONL", "NAIL", "WEBL", "FNGU",
+                            "FNGD", "SOXL", "SOXS", "TECL", "TECS", "UDOW",
+                            "SDOW", "UMDD", "SMDD", "TQQ", "SQQ", "YINN",
+                            "YANG", "CURE", "LABD", "LABU", "DRN", "DRV",
+                            "DGP", "DGZ", "BOIL", "KOLD", "NUGT", "DUST",
+                            "JNUG", "JDST", "GLL", "UGL")
             _LEV_PATTERN = re.compile(r'(2X|3X|BULL|BEAR)$', re.IGNORECASE)
             if _LEV_PATTERN.search(symbol):
                 continue
             if any(symbol.startswith(p) for p in lev_prefixes):
                 continue
-            if any(symbol.endswith(s) for s in lev_suffixes):
+            if lev_suffixes and len(symbol) > 3 and symbol[-1] in lev_suffixes:
                 continue
 
             results.append({

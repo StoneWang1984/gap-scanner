@@ -354,7 +354,7 @@ def evaluate_reentry_trade(
     if reentry_profit_retracement_1 is None:
         reentry_profit_retracement_1 = getattr(config, "REENTRY_PROFIT_RETRACEMENT_1", 0.75)
     if reentry_trailing_pct_2 is None:
-        reentry_trailing_pct_2 = getattr(config, "REENTRY_TRAILING_PCT_2", 0.03)
+        reentry_trailing_pct_2 = getattr(config, "REENTRY_TRAILING_PCT", 0.01)
     if reentry_sell_ratio_1 is None:
         reentry_sell_ratio_1 = getattr(config, "REENTRY_SELL_RATIO_1", 0.5)
 

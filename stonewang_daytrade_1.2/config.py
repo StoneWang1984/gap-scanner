@@ -10,7 +10,7 @@ Changes from stonewang_daytrade_1.0 → 1.1:
 Changes from Stone 1.0 → 1.1:
 - P0-1: STOP_LOSS_MAX_PCT = 0.10 (was 0.12, align with backtest/CLAUDE.md)
 - P0-1: TRAILING_STOP_PCTS aligned with config.py (2.0%/2.5%/3.0%/3.5%/4.0%/5.0%)
-- P0-1: MIN_POSITION_SIZE = 250 (was 1, eliminates tiny positions)
+- P0-1: MIN_POSITION_SIZE = 85 (was 1, $85 minimum per position)
 - P0-2: LEVERAGED_ETF_SUFFIXES removed single-letter L/U (only BULL/BEAR remain)
 - P1-12: STOP_LOSS_ATR_MIN_PCT/ATR_MAX_PCT added (configurable stop bounds)
 - P2: REENTRY_STOP_PCT comment corrected

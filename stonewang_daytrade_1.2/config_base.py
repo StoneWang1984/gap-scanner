@@ -76,7 +76,8 @@ REENTRY_STOP_ATR_MULT = 1.5             # ATR-based stop multiplier
 REENTRY_STOP_PCT_FALLBACK = 0.04        # fallback when ATR unavailable
 REENTRY_PROFIT_RETRACEMENT_1 = 0.75     # tier-1: sell 50% at 75% retracement
 REENTRY_SELL_RATIO_1 = 0.5             # sell 50% at tier-1
-REENTRY_TRAILING_PCT_2 = 0.03           # 3% trailing after tier-1
+REENTRY_TRAILING_PCT = 0.01              # 1% trailing stop after target reached
+REENTRY_TRAILING_PCT_2 = 0.03           # [DEPRECATED] replaced by REENTRY_TRAILING_PCT=0.01
 REENTRY_POSITION_RATIO = 0.5            # half position vs first trade
 REENTRY_CUTOFF_TIME = "12:30"
 REENTRY_MAX_BARS_BEFORE_TARGET = 0      # no time limit (0.4.13: removed)
@@ -94,6 +95,26 @@ MAX_POSITION_SIZE = 100            # max $100 per position
 MIN_POSITION_SIZE = 85
 INITIAL_CAPITAL = 500
 FORCE_CLOSE_TIME = "15:50"
+
+# ── Live trading parameters ──────────────────────────────────────────────
+DRY_RUN = False               # True = simulate orders, no real trades
+FORCE_QTY = 0                 # 0 = dynamic position sizing; >0 = fixed shares (test mode)
+MAX_CANDIDATES = 20            # monitor up to 20 candidates
+INVARIANT_CHECK_INTERVAL = 4  # every 4 polls check invariants
+
+# ── Slippage model ──────────────────────────────────────────────────────
+SLIPPAGE_ENTRY_PCT = 0.005
+SLIPPAGE_STOP_PCT = 0.02
+SLIPPAGE_TRAILING_PCT = 0.01
+SLIPPAGE_TARGET_PCT = 0.003
+SLIPPAGE_FORCE_CLOSE_PCT = 0.01
+SLIPPAGE_REENTRY_STOP_PCT = 0.025
+
+# ── Live trading order parameters ──────────────────────────────────────
+ENTRY_LIMIT_BUFFER = 0.005
+MAX_ENTRY_SLIPPAGE = 0.10     # reject buy if ask > entry_price × (1 + this); 0 = no check
+STOP_LIMIT_BUFFER = 0.03
+FORCE_CLOSE_LIMIT_TIMEOUT = 120
 
 # ── 1.2: OCO ladder sell parameters ──────────────────────────────────────
 OCO_ENABLED = True           # True = OCO for T2+ (v1.2), False = polling fallback (v1.1)

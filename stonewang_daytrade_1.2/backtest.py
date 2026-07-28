@@ -114,7 +114,7 @@ def bulk_scan_gaps(
                     gap_pct = (open_price / prev_close) - 1.0
                     if gap_pct < config.GAP_THRESHOLD:
                         continue
-                    if gap_pct > getattr(config, "GAP_MAX", 100.0):
+                    if gap_pct > getattr(config, "GAP_MAX", 1.0):
                         continue
                     if volume < config.MIN_VOLUME:
                         continue
@@ -174,7 +174,7 @@ def get_1min_bars(client, symbol, date) -> pd.DataFrame:
 
 
 def find_entry_with_confirmation_1min(bars_1m, open_price):
-    """1分钟K线折返点检测，5根1分钟bar确认底部。"""
+    """1分钟K线折返点检测 — 3根确认bar + 至少1根阳线（与实盘check_entry_1min一致）。"""
     if bars_1m.empty or len(bars_1m) < 2:
         return 0, -1, False
     pullback_idx = -1
@@ -189,17 +189,25 @@ def find_entry_with_confirmation_1min(bars_1m, open_price):
     if not config.ENTRY_CONFIRMATION:
         return pullback_price, pullback_idx, True
     confirm_count = 0
+    bullish_count = 0
     for i in range(pullback_idx + 1, len(bars_1m)):
         bar_low = bars_1m.iloc[i]["low"]
+        bar_close = bars_1m.iloc[i]["close"]
+        bar_open = bars_1m.iloc[i]["open"]
         if bar_low < open_price and bar_low < pullback_price:
             pullback_idx = i
             pullback_price = bar_low
             confirm_count = 0
-        elif bar_low >= pullback_price:
-            confirm_count += 1
-            if confirm_count >= 5:
-                return pullback_price, pullback_idx, True
-    return pullback_price, pullback_idx, True
+            bullish_count = 0
+            continue
+        if bar_low <= pullback_price or bar_close <= pullback_price:
+            continue
+        confirm_count += 1
+        if bar_close > bar_open:
+            bullish_count += 1
+        if confirm_count >= 3 and bullish_count >= 1:
+            return pullback_price, pullback_idx, True
+    return 0, -1, False
 
 
 def locate_5min_bar_index(bars_5m, entry_timestamp):
@@ -341,7 +349,7 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
     cap_desc = "/".join(f"{int(c*100)}%" for c in caps)
     print(f"First trade: {tier_desc} | Caps: {cap_desc} | Trail: {'/'.join(f'{t:.1%}' for t in trail_pcts)}")
     reentry_ret1 = getattr(config, "REENTRY_PROFIT_RETRACEMENT_1", 0.75)
-    reentry_trail = getattr(config, "REENTRY_TRAILING_PCT_2", 0.03)
+    reentry_trail = getattr(config, "REENTRY_TRAILING_PCT", 0.01)
     reentry_max_bars = getattr(config, "REENTRY_MAX_BARS_BEFORE_TARGET", 0)
     tl_str = f"{reentry_max_bars} bars" if reentry_max_bars > 0 else "none"
     print(f"Re-entry: {reentry_ret1:.0%} retracement/50% + {reentry_trail:.0%} trail | "
@@ -617,7 +625,7 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
                     force_close_price=reentry_force_close,
                     stop_price=reentry_stop,
                     reentry_profit_retracement_1=reentry_retracement_1,
-                    reentry_trailing_pct_2=getattr(config, "REENTRY_TRAILING_PCT_2", 0.03),
+                    reentry_trailing_pct_2=getattr(config, "REENTRY_TRAILING_PCT", 0.01),
                     reentry_sell_ratio_1=getattr(config, "REENTRY_SELL_RATIO_1", 0.5),
                 )
                 reentry_result.date = str(date_key)
