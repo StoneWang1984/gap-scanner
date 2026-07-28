@@ -118,8 +118,8 @@ EQUITY_POSITION_RATIO = 0.80
 
 # Invariant checker — 实盘状态一致性验证
 INVARIANT_CHECK_INTERVAL = 4  # 每4轮轮询检查一次（避免API限频）
-MAX_POSITION_SIZE = 200  # max $200 per position (cash account, no margin)
-MIN_POSITION_SIZE = 1    # minimum $1 per position
+MAX_POSITION_SIZE = 100  # max $100 per position
+MIN_POSITION_SIZE = 85   # minimum $85 per position
 FORCE_QTY = 0  # 0 = dynamic position sizing based on equity; >0 = fixed shares (test mode)
 INITIAL_CAPITAL = 500
 FORCE_CLOSE_TIME = "15:50"

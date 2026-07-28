@@ -90,8 +90,8 @@ MAX_DAILY_LOSS_PCT = 0.05               # 0.4.14: 5% daily loss circuit breaker
 MAX_POSITIONS_PER_DAY = 5            # max 5 positions held simultaneously
 MAX_DAILY_TRADES = 0                # 0 = no limit, as many trades as buying power allows
 EQUITY_POSITION_RATIO = 0.80
-MAX_POSITION_SIZE = 200            # max $200 per position (cash account, no margin)
-MIN_POSITION_SIZE = 1
+MAX_POSITION_SIZE = 100            # max $100 per position
+MIN_POSITION_SIZE = 85
 INITIAL_CAPITAL = 500
 FORCE_CLOSE_TIME = "15:50"
 
