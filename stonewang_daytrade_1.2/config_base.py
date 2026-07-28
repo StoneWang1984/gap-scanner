@@ -87,7 +87,7 @@ PULLBACK_STOP_THRESHOLD = 0.15          # if pullback from peak > 15%, stop day
 MAX_DAILY_LOSS_PCT = 0.05               # 0.4.14: 5% daily loss circuit breaker
 
 # Position management
-MAX_POSITIONS_PER_DAY = 0           # 0 = no limit, buy all qualifying stocks
+MAX_POSITIONS_PER_DAY = 5            # max 5 positions held simultaneously
 MAX_DAILY_TRADES = 0                # 0 = no limit, as many trades as buying power allows
 EQUITY_POSITION_RATIO = 0.80
 MAX_POSITION_SIZE = 200            # max $200 per position (cash account, no margin)

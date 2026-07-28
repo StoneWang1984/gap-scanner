@@ -2953,6 +2953,10 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
         if now_time < cutoff_time and (config.MAX_DAILY_TRADES == 0 or daily_trades < config.MAX_DAILY_TRADES) and not daily_stopped and not _pdt_detected:
             force_qty = getattr(config, "FORCE_QTY", 0)
             for cand in candidates:
+                # Simultaneous positions cap — stop entering new positions
+                if config.MAX_POSITIONS_PER_DAY > 0 and len(positions) + len(pending_buys) >= config.MAX_POSITIONS_PER_DAY:
+                    log(f"Position cap: {len(positions) + len(pending_buys)}/{config.MAX_POSITIONS_PER_DAY} — no more entries")
+                    break
                 symbol = cand["symbol"]
                 if symbol in entry_checked or symbol in pending_buys:
                     continue
@@ -3067,6 +3071,10 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
         elif now_time < reentry_cutoff_time and (config.MAX_DAILY_TRADES == 0 or daily_trades < config.MAX_DAILY_TRADES) and not daily_stopped and not _pdt_detected:
             exited_symbols = entered_symbols - {p.symbol for p in positions} - set(pending_buys.keys()) - stop_loss_symbols
             for symbol in exited_symbols:
+                # Simultaneous positions cap — stop entering new positions
+                if config.MAX_POSITIONS_PER_DAY > 0 and len(positions) + len(pending_buys) >= config.MAX_POSITIONS_PER_DAY:
+                    log(f"Position cap: {len(positions) + len(pending_buys)}/{config.MAX_POSITIONS_PER_DAY} — no more re-entries")
+                    break
                 if symbol in reentry_checked:
                     continue
                 cand = next((c for c in candidates if c['symbol'] == symbol), None)

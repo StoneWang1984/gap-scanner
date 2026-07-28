@@ -115,7 +115,7 @@ PULLBACK_STOP_THRESHOLD = 0.15
 MAX_DAILY_LOSS_PCT = 0.05
 
 # Position management
-MAX_POSITIONS_PER_DAY = 0  # 0 = no limit, buy all qualifying stocks
+MAX_POSITIONS_PER_DAY = 5  # max 5 positions held simultaneously
 MAX_CANDIDATES = 20        # monitor up to 20 candidates, buy whichever confirms
 MAX_DAILY_TRADES = 0       # 0 = no limit, as many trades as buying power allows
 EQUITY_POSITION_RATIO = 0.80
