@@ -1,0 +1,23 @@
+stonewang_daytrade_1.1
+
+Released: 2026-07-28
+Based on: stonewang_daytrade_1.0
+
+Fixes over 1.0:
+- Ladder sell lock-up bug: protective stop locks shares → partial sell rejected →
+  Method 3 sells entire position. Fix: cancel protective stop BEFORE tier sell,
+  then re-place trailing stop for remaining. ~1-2s naked window.
+- force_sell_position Method 3: sells qty (not total_qty) for partial sells.
+- force_sell_position Method 3: cancels symbol-specific orders (not all account orders).
+- RED/GREEN/YELLOW/RESET color constants defined (3 NameError fixes from 7/27 log).
+
+Core files:
+- live_trade.py   — 实盘交易主程序 (ladder sell lock-up fix)
+- config.py       — 配置文件 (no changes from 1.0)
+- backtest.py     — 回测引擎
+- strategy.py     — 策略评估
+- scanner.py      — 股票扫描筛选
+- config_base.py  — 回测配置
+- stock_simulator.py — 5场景模拟器
+- rejection_simulator.py — 拒绝模拟器
+- CLAUDE.md       — 项目文档

@@ -1,0 +1,38 @@
+stonewang_daytrade_1.2
+
+Released: 2026-07-28
+Based on: stonewang_daytrade_1.1
+
+Major change: OCO pre-placed orders for T2-T6 ladder sells.
+- After T1 fills → T2 OCO (limit=T2 target, stop=T1 fill×0.98) + trailing stop for remaining
+- OCO limit fills → advance tier, place next OCO + new trailing
+- OCO stop fills → don't advance, trailing protects remaining
+- Eliminates 5-second polling delay between tiers
+- Alpaca OCO locks shares once per pair (no double-lock issue)
+- OCO_ENABLED flag: True = v1.2 OCO mode, False = v1.1 polling fallback
+- OCO stop base = actual fill price (per user specification)
+- OCO stop buffer = trail_pct (progressive: 2%/2.5%/3%/3.5%/4%/5%, aligned with trailing stop)
+- If fill price unavailable (recovery): use target price as approximation
+
+Chain robustness fixes (7/28):
+- P0: force_sell_position intent parameter — partial ladder sells NEVER use close_position
+  (fixes 7/27 bug where close_position accidentally liquidated 5 stocks instead of tier sells)
+- P1: _wait_cancel_confirmed() at 6 critical cancel→action nodes
+  (prevents race conditions when Alpaca hasn't processed cancel before subsequent action)
+- P2: Batch order status cache (_order_cache) — 1 get_orders call replaces N get_order_by_id
+  (reduces API calls from ~15/cycle to ~3-5/cycle, enabling 3s polling interval)
+- P3: Polling interval reduced from 5s to 3s (configurable POLL_INTERVAL in config.py)
+
+Unlimited trading (7/28):
+- MAX_DAILY_TRADES=0, MAX_POSITIONS_PER_DAY=0, MAX_CANDIDATES=20
+- Position allocation uses buying_power / remaining_candidates (not fixed slots)
+- Entry/re-entry window checks: MAX_DAILY_TRADES==0 means unlimited
+- MAX_POSITION_SIZE=200 (per-position cap), MIN_POSITION_SIZE=100
+- No margin leverage: cash account (Alpaca multiplier=1)
+
+Fixes inherited from 1.1:
+- Ladder sell lock-up bug fix
+- force_sell_position Method 3 partial sell fix
+- RED/GREEN/YELLOW/RESET color constants defined
+- Trailing stop PnL recording uses actual fill price (not pos.stop_price)
+- All partial sells recorded in trade details (not just final exit)
