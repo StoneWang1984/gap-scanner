@@ -384,7 +384,7 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
         max_daily_loss = equity * getattr(config, "MAX_DAILY_LOSS_PCT", 0.05)
 
         for _, row in candidates.iterrows():
-            if daily_trades >= config.MAX_DAILY_TRADES or daily_stopped:
+            if (config.MAX_DAILY_TRADES > 0 and daily_trades >= config.MAX_DAILY_TRADES) or daily_stopped:
                 break
 
             # Daily loss circuit breaker
@@ -545,7 +545,7 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
                 continue
 
             reentry_round = 1
-            while daily_trades < config.MAX_DAILY_TRADES and not daily_stopped:
+            while (config.MAX_DAILY_TRADES == 0 or daily_trades < config.MAX_DAILY_TRADES) and not daily_stopped:
                 if not bars_after_exit or len(bars_after_exit) < 3:
                     break
 
