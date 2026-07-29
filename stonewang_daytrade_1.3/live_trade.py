@@ -2225,6 +2225,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
       try:
         alpaca_positions = trading_client.get_all_positions()
         alpaca_orders = trading_client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN))
+        log(f"RECOVERY: Alpaca has {len(alpaca_positions)} positions, {len(alpaca_orders)} open orders, locally tracking {len(positions)}")
         for ap in alpaca_positions:
             sym = ap.symbol
             qty = int(float(ap.qty))
@@ -2796,10 +2797,25 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 # trailing stop whose fill price is much higher than the initial stop_price
                 actual_fill_price = get_order_filled_price(pos.protective_order_id) if pos.protective_order_id else 0.0
                 exit_price = actual_fill_price if actual_fill_price > 0 else pos.stop_price
-                sold_amount = pos.remaining_shares
-                pos.remaining_shares = 0
+                # Get actual filled qty — trailing stop may only cover (remaining - OCO_locked)
+                # leaving OCO-locked shares orphaned on Alpaca
+                actual_filled = get_order_filled_qty(pos.protective_order_id) if pos.protective_order_id else 0
+                if actual_filled <= 0:
+                    actual_filled = pos.remaining_shares  # fallback
+                sold_amount = actual_filled
+                pos.remaining_shares -= actual_filled
                 pos.protective_order_id = None
                 record_trade(pos, exit_price, "protective_stop", sold_shares=sold_amount)
+                # If OCO-locked shares remain (released by cancel_all_oco above), sell them
+                if pos.remaining_shares > 0:
+                    log(f"OCO-ORPHAN: {pos.symbol} {pos.remaining_shares} shares remaining after trailing stop fill ({actual_filled} of {actual_filled + pos.remaining_shares}) — selling")
+                    orphan_sold = force_sell_position(pos.symbol, pos.remaining_shares)
+                    if orphan_sold > 0:
+                        record_trade(pos, exit_price, "oco_orphan_sell", sold_shares=orphan_sold)
+                        pos.remaining_shares -= orphan_sold
+                    if pos.remaining_shares > 0:
+                        log(f"{RED}OCO-ORPHAN: {pos.symbol} still has {pos.remaining_shares} unsold shares!{RESET}")
+                pos.remaining_shares = 0
                 positions.remove(pos)
                 continue
             # ── Stop triggered but limit not filled: price below stop → immediate market sell ──
@@ -3773,6 +3789,24 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                    entry_checked, day_highs, accumulator, events_log,
                    invariant_violation=_invariant_violation)
         save_chart_data(accumulator, positions, chart_events, str(now_est.date()))
+
+        # ── Alpaca position sync: detect orphan positions not tracked locally ──
+        if poll_count % 20 == 0 and not DRY_RUN:
+          try:
+            alpaca_pos = trading_client.get_all_positions()
+            tracked_syms = {p.symbol for p in positions}
+            for ap in alpaca_pos:
+                sym = ap.symbol
+                qty = int(float(ap.qty))
+                if sym not in tracked_syms:
+                    log(f"{RED}ORPHAN-DETECT: Alpaca has {sym} {qty}sh not tracked locally — selling immediately{RESET}")
+                    sold = force_sell_position(sym, qty)
+                    if sold > 0:
+                        log(f"ORPHAN-DETECT: Sold {sold} shares of {sym}")
+                    else:
+                        log(f"{RED}ORPHAN-DETECT: Failed to sell {sym}!{RESET}")
+          except Exception as e:
+              log(f"ORPHAN-DETECT error: {e}")
 
         # ── Status log ──
         if poll_count % 4 == 0 and positions:
