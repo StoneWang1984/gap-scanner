@@ -2677,6 +2677,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 log(f"BUY FILLED: {symbol} order {order_id} ({filled_qty}sh) @ ${pos_data['entry_price']:.4f}")
                 pos = LivePosition(**pos_data)
                 positions.append(pos)
+                entered_symbols.add(symbol)  # v1.3: add after fill confirmed (not before)
                 # ── Approach 3: Protective stop covers ALL shares, T1 activated on price reach ──
                 # Stop covers 100% of position from the start. T1 limit sell is only placed
                 # when main loop detects price >= T1 target, ensuring no orphan fraction.
@@ -3581,8 +3582,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 if force_qty > 0:
                     shares = force_qty
                 if shares <= 0:
-                    entry_checked.add(symbol)
-                    continue
+                    continue  # v1.3: don't permanently skip — allocation may change with freed slots
                 # MIN_POSITION_SIZE check — skip if position too small
                 min_pos = getattr(config, "MIN_POSITION_SIZE", 0)
                 if min_pos > 0 and shares * entry_price < min_pos:
@@ -3621,7 +3621,6 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     }
                     pending_buys[symbol] = (str(order.id), pos_data)
                     entry_checked.add(symbol)
-                    entered_symbols.add(symbol)
                     allocated_this_cycle += actual_shares * entry_price
                     log(f"BUY MARKET PENDING {symbol}: entry=${entry_price:.4f}, "
                         f"stop=${stop:.4f}, targets={[round(t, 2) for t in targets]}, mode={target_mode}, shares={actual_shares}")
@@ -3706,21 +3705,18 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 reentry_size = first_trade_alloc * reentry_pos_ratio
                 reentry_size = min(reentry_size, config.MAX_POSITION_SIZE)
                 if bp_available < reentry_size:
-                    log(f"  {symbol}: re-entry skipped, buying power ${bp:.2f} < alloc ${reentry_size:.2f}")
-                    reentry_checked.add(symbol)
-                    continue
+                    log(f"  {symbol}: re-entry skipped, buying power ${bp:.2f} < alloc ${reentry_size:.2f}, will retry when capital freed")
+                    continue  # v1.3: don't permanently skip — bp may increase when positions exit
                 shares = int(reentry_size / entry_price)
                 if force_qty > 0:
                     shares = max(1, force_qty // 2)
                 if shares <= 0:
-                    reentry_checked.add(symbol)
-                    continue
+                    continue  # v1.3: don't permanently skip
                 # MIN_POSITION_SIZE check for re-entry (lower threshold since re-entry uses half position)
                 min_pos = getattr(config, "REENTRY_MIN_POSITION_SIZE", 0) or getattr(config, "MIN_POSITION_SIZE", 0)
                 if min_pos > 0 and shares * entry_price < min_pos:
-                    log(f"  {symbol}: re-entry position ${shares * entry_price:.2f} < MIN_POSITION_SIZE ${min_pos}, skipping")
-                    reentry_checked.add(symbol)
-                    continue
+                    log(f"  {symbol}: re-entry position ${shares * entry_price:.2f} < MIN_POSITION_SIZE ${min_pos}, will retry when more slots free")
+                    continue  # v1.3: don't permanently skip — allocation may change with freed slots
 
                 # Check real-time ask price vs entry price — reject excessive slippage
                 if not DRY_RUN and MAX_ENTRY_SLIPPAGE > 0:
@@ -3763,6 +3759,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                             for o in old_orders:
                                 if o.side == OrderSide.SELL:
                                     cancel_order(str(o.id))
+                                    _wait_cancel_confirmed(str(o.id), timeout=2.0)
                                     log(f"  RE-ENTRY: cancelled old sell order {o.id} for {symbol} (unlocking shares)")
                         except Exception:
                             pass
