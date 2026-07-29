@@ -1,0 +1,30 @@
+stonewang_daytrade_1.3.0
+
+Released: 2026-07-29
+Based on: stonewang_daytrade_1.2.0
+
+1.3.0 changes (7/29) — Capital recycling (资金多轮滚动):
+
+改动1: entry_checked不再永久排除未确认的候选股
+- Buying power insufficient → continue (不add entry_checked)
+- Position too small → continue (不add entry_checked)
+- 释放的资金可重新分配给之前被跳过的候选股
+
+改动2: Re-entry资金优化
+- REENTRY_POSITION_RATIO: 0.5 → 1.0 (full slot for re-entry)
+- Re-entry now uses full position size instead of half
+- Maximizes capital efficiency when positions exit and free capital is redeployed
+
+改动3: 中午re-scan
+- RESCAN_TIMES = ["10:30", "11:30"] (可配置)
+- 10:30和11:30重新扫描新的gap候选股
+- 新候选股加入监控列表，补充1分钟K线数据
+- 不重复添加已存在的候选股/已入场/已检查的股票
+
+All v1.2.0 features inherited:
+- Backtest slippage models (entry/exit/re-entry/re-entry exit)
+- 100% capital deployment (EQUITY_POSITION_RATIO=1.0)
+- Slot-based allocation (remaining_slots = MAX_POSITIONS_PER_DAY - active_positions)
+- MIN_POSITION_SIZE=$40, REENTRY_MIN_POSITION_SIZE=$20
+- OCO ladder sell system
+- Chain robustness fixes (P0-P3)
