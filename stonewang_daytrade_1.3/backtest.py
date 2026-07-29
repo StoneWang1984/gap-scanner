@@ -1,4 +1,4 @@
-"""Backtesting engine — Stone 1.1: 6-tier targets + re-entry + safety features + equity compounding."""
+"""Backtesting engine — Stone 1.1: 8-tier targets + re-entry + safety features + equity compounding."""
 
 import json
 import os
@@ -341,10 +341,10 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
     print(f"[Stone 1.1] Backtesting {len(trading_days)} trading days: {trading_days[0].date()} to {trading_days[-1].date()}")
     print(f"Capital: ${config.INITIAL_CAPITAL:,.0f} | Deploy: {config.EQUITY_POSITION_RATIO:.0%} | "
           f"Per-stock cap: ${config.MAX_POSITION_SIZE:,.0f} | Max daily trades: {config.MAX_DAILY_TRADES}")
-    retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.25, 0.50, 0.75, 1.00, 1.25, 1.50])
-    sell_ratios = getattr(config, "PARTIAL_SELL_RATIOS", [1/8]*6)
-    caps = getattr(config, "TARGET_CAP_TIERS", [0.05, 0.10, 0.15, 0.20, 0.25, 0.35])
-    trail_pcts = getattr(config, "TRAILING_STOP_PCTS", [0.02, 0.025, 0.03, 0.035, 0.04, 0.05])
+    retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.10, 0.20, 0.35, 0.50, 0.75, 1.00, 1.25, 1.50])
+    sell_ratios = getattr(config, "PARTIAL_SELL_RATIOS", [1/8]*8)
+    caps = getattr(config, "TARGET_CAP_TIERS", [0.01, 0.025, 0.05, 0.10, 0.15, 0.20, 0.25, 0.35])
+    trail_pcts = getattr(config, "TRAILING_STOP_PCTS", [0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.05])
     tier_desc = " + ".join(f"{int(r*100)}%/1÷{int(round(1/s))}" for r, s in zip(retracements, sell_ratios))
     cap_desc = "/".join(f"{int(c*100)}%" for c in caps)
     print(f"First trade: {tier_desc} | Caps: {cap_desc} | Trail: {'/'.join(f'{t:.1%}' for t in trail_pcts)}")
@@ -473,7 +473,7 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
             if stop_max_pct > 0:
                 min_stop = round(entry_price_actual * (1 - stop_max_pct), 2)
                 stop_price = max(stop_price, min_stop)
-            # Build trade plan using 6-tier system (with slippage-adjusted entry)
+            # Build trade plan using 8-tier system (with slippage-adjusted entry)
             plan = build_trade_plan(symbol, open_price, entry_price_actual, atr,
                                      position_size=min(pos_per_stock, config.MAX_POSITION_SIZE))
 
@@ -501,7 +501,7 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
 
             type_tag = f"[1st/{plan.target_mode}]"
             extra = ""
-            retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.25, 0.50, 0.75, 1.00, 1.25, 1.50])
+            retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.10, 0.20, 0.35, 0.50, 0.75, 1.00, 1.25, 1.50])
             if result.partial_sells:
                 for ti, (p, s) in enumerate(result.partial_sells):
                     if s > 0:
@@ -526,7 +526,7 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
                            "price": round(entry_price_actual, 4), "label": f"BUY {shares}sh"})
             # Target sells — find actual bar times
             next_search = entry_bar_idx + 1
-            retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.25, 0.50, 0.75, 1.00, 1.25, 1.50])
+            retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.10, 0.20, 0.35, 0.50, 0.75, 1.00, 1.25, 1.50])
             if result.partial_sells:
                 for ti, (p, s) in enumerate(result.partial_sells):
                     if s > 0:
@@ -547,7 +547,7 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
                     events.append({"ts": _bar_ts_str(all_bars_5m, exit_bar_in_all), "type": "sell",
                                    "price": round(result.exit_price, 4), "label": f"{exit_label} {remaining_shares}sh"})
 
-            retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.25, 0.50, 0.75, 1.00, 1.25, 1.50])
+            retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.10, 0.20, 0.35, 0.50, 0.75, 1.00, 1.25, 1.50])
             targets_dict = {f"{int(r*100)}%": round(t, 4) for r, t in zip(retracements, plan.targets)}
             chart_entries[sym_key] = {
                 "date": str(date_key), "bars_5m": chart_bars, "bars_1m": [],

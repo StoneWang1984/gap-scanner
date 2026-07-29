@@ -6,7 +6,7 @@ Runs each scenario through evaluate_trade_stone / evaluate_reentry_trade
 and reports results.
 
 Scenarios:
-1. Perfect Ladder: T1-T6 gradual triggers + trailing stop exit
+1. Perfect Ladder: T1-T8 gradual triggers + trailing stop exit
 2. Skip-Gap Jump: Price jumps past multiple tiers simultaneously
 3. Stop Loss: Entry then continuous decline to stop
 4. Time Limit: 40-min flat then breakeven exit

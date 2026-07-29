@@ -1,4 +1,4 @@
-"""Gap pullback strategy — Stone 1.1: 6-tier first trade + re-entry."""
+"""Gap pullback strategy — Stone 1.1: 8-tier first trade + re-entry."""
 
 from dataclasses import dataclass
 import config
@@ -49,9 +49,9 @@ class TradePlan:
     symbol: str
     open_price: float
     pullback: float
-    targets: list       # list of target prices (6 tiers)
-    sell_ratios: list   # list of sell ratios per tier (6 tiers)
-    trail_pcts: list    # list of trailing stop pcts per tier (6 tiers)
+    targets: list       # list of target prices (8 tiers)
+    sell_ratios: list   # list of sell ratios per tier (8 tiers)
+    trail_pcts: list    # list of trailing stop pcts per tier (8 tiers)
     stop_price: float
     shares: int = 0
     atr: float = 0.0
@@ -71,15 +71,42 @@ class TradePlan:
         return self.targets[5] if len(self.targets) > 5 else 0.0
 
 
+def _calc_targets_internal(entry_price: float, open_price: float):
+    """Calculate 8-tier targets, sell_ratios, trail_pcts, target_mode."""
+    retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.10, 0.20, 0.35, 0.50, 0.75, 1.00, 1.25, 1.50])
+    caps = getattr(config, "TARGET_CAP_TIERS", [0.01, 0.025, 0.05, 0.10, 0.15, 0.20, 0.25, 0.35])
+    sell_ratios = getattr(config, "PARTIAL_SELL_RATIOS", [1/8]*8)
+    trail_pcts = getattr(config, "TRAILING_STOP_PCTS", [0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.05])
+
+    targets = []
+    any_capped = False
+    min_retrace_pct = getattr(config, "MIN_RETRACE_PCT", 0.03)
+    use_capped = entry_price >= open_price or (open_price - entry_price) / entry_price < min_retrace_pct
+    if use_capped:
+        for i in range(len(caps)):
+            targets.append(round(entry_price * (1 + caps[i]), 2))
+        target_mode = "capped"
+    else:
+        for i in range(len(retracements)):
+            ret_price = calc_price_at_retracement(entry_price, open_price, retracements[i])
+            cap_price = round(entry_price * (1 + caps[i]), 2)
+            t = min(ret_price, cap_price)
+            if t < ret_price:
+                any_capped = True
+            targets.append(t)
+        target_mode = "capped" if any_capped else "retracement"
+    return targets, sell_ratios, trail_pcts, target_mode
+
+
 def build_trade_plan(symbol: str, open_price: float, pullback: float, atr: float = 0.0,
                      position_size: float = None) -> TradePlan:
     if position_size is None:
         position_size = calc_position_size(config.INITIAL_CAPITAL)
 
-    retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.25, 0.50, 0.75, 1.00, 1.25, 1.50])
-    caps = getattr(config, "TARGET_CAP_TIERS", [0.05, 0.10, 0.15, 0.20, 0.25, 0.35])
-    sell_ratios = getattr(config, "PARTIAL_SELL_RATIOS", [1/8]*6)
-    trail_pcts = getattr(config, "TRAILING_STOP_PCTS", [0.02, 0.025, 0.03, 0.035, 0.04, 0.05])
+    retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.10, 0.20, 0.35, 0.50, 0.75, 1.00, 1.25, 1.50])
+    caps = getattr(config, "TARGET_CAP_TIERS", [0.01, 0.025, 0.05, 0.10, 0.15, 0.20, 0.25, 0.35])
+    sell_ratios = getattr(config, "PARTIAL_SELL_RATIOS", [1/8]*8)
+    trail_pcts = getattr(config, "TRAILING_STOP_PCTS", [0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.05])
 
     targets = []
     any_capped = False
@@ -271,7 +298,7 @@ def evaluate_trade_stone(
             tsp = round(highest * (1 - pct), 2)
             tsp = max(tsp, plan.pullback)
             if bl <= tsp:
-                retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.25, 0.50, 0.75, 1.00, 1.25, 1.50])
+                retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.10, 0.20, 0.35, 0.50, 0.75, 1.00, 1.25, 1.50])
                 suffix = f"_{int(retracements[highest_tier] * 100)}"
                 tsp_adj = round(tsp * (1 - slippage_trailing), 2) if slippage_trailing > 0 else tsp
                 return _make_result(f"trailing_stop{suffix}", tsp_adj, bi)
@@ -363,42 +390,49 @@ def evaluate_reentry_trade(
     reentry_trailing_pct: float | None = None,
     reentry_sell_ratio_1: float | None = None,
 ) -> TradeResult:
-    """Re-entry trade: 1% trailing stop after retracement target reached (v1.2).
+    """Re-entry trade: same 8-tier ladder as first trade (v1.4).
 
-    No partial sells — target reached activates trailing stop on entire position.
-    reentry_profit_retracement_1: retracement target (default config.REENTRY_PROFIT_RETRACEMENT_1 or 0.75)
-    reentry_trailing_pct: trailing stop % after target (default config.REENTRY_TRAILING_PCT or 0.01)
-    reentry_sell_ratio_1: [DEPRECATED] kept for signature compat, ignored
+    Uses prev_high as the "open_price" equivalent for calc_targets,
+    so the gap = prev_high - entry_price determines target levels.
     """
-    if reentry_profit_retracement_1 is None:
-        reentry_profit_retracement_1 = getattr(config, "REENTRY_PROFIT_RETRACEMENT_1", 0.75)
-    if reentry_trailing_pct is None:
-        reentry_trailing_pct = getattr(config, "REENTRY_TRAILING_PCT", 0.01)
+    # Build 8-tier targets using prev_high as open_price
+    targets, sell_ratios, trail_pcts, target_mode = _calc_targets_internal(entry_price, prev_high)
 
-    # Re-entry exit slippage model (backtest: execution price worse than trigger)
+    # Re-entry stop loss
     slippage_reentry_stop = getattr(config, "SLIPPAGE_REENTRY_STOP_PCT", 0)
+    slippage_target = getattr(config, "SLIPPAGE_TARGET_PCT", 0)
     slippage_trailing = getattr(config, "SLIPPAGE_TRAILING_PCT", 0)
     slippage_force_close = getattr(config, "SLIPPAGE_FORCE_CLOSE_PCT", 0)
 
     if stop_price is None:
         stop_price = round(entry_price * (1 - config.REENTRY_STOP_PCT), 2)
 
-    target_1 = round(entry_price + reentry_profit_retracement_1 * (prev_high - entry_price), 2)
-
-    highest = entry_price
-    reached_tier1 = False
+    n_tiers = len(targets)
+    reached = [False] * n_tiers
+    sold = [False] * n_tiers
+    partial_prices = [0.0] * n_tiers
+    partial_shares = [0] * n_tiers
     remaining_shares = shares
+    highest = entry_price
 
     def _make_result(reason, exit_price, bi, date_str=None):
-        pnl = (exit_price - entry_price) * remaining_shares
+        pnl = 0.0
+        partial_sells = []
+        for i in range(n_tiers):
+            if sold[i]:
+                pnl += (partial_prices[i] - entry_price) * partial_shares[i]
+            partial_sells.append((partial_prices[i], partial_shares[i]))
+        pnl_rest = (exit_price - entry_price) * remaining_shares
+        pnl += pnl_rest
         pnl_pct = pnl / (entry_price * shares) if entry_price > 0 else 0
-        _date = date_str or (str(bar.get("timestamp", pd.Timestamp.now()).date()) if bi >= 0 and bars_after_entry else "")
+        _date = date_str or (str(bar.get("timestamp", pd.Timestamp.now()).date()) if bi >= 0 else "")
         return TradeResult(
             symbol=symbol, date=_date,
             entry_price=entry_price, exit_price=exit_price, shares=shares,
             pnl=round(pnl, 2), pnl_pct=round(pnl_pct, 4), exit_reason=reason,
-            open_price=open_price, sell_target=target_1, stop_price=stop_price,
-            partial_sells=[],
+            open_price=open_price, sell_target=targets[-1] if targets else 0,
+            stop_price=stop_price,
+            partial_sells=partial_sells,
             trailing_high=highest, trailing_exit_price=exit_price,
             exit_bar_idx=bi, position_size=entry_price * shares,
             trade_type="reentry",
@@ -416,24 +450,49 @@ def evaluate_reentry_trade(
             adj = round(stop_price * (1 - slippage_reentry_stop), 2) if slippage_reentry_stop > 0 else stop_price
             return _make_result("reentry_stop", adj, bi)
 
-        # Target reached: activate trailing stop (no partial sell)
-        if not reached_tier1 and bh >= target_1:
-            reached_tier1 = True
+        # Check targets from highest to lowest (skip-gap handling)
+        for ti in range(n_tiers - 1, -1, -1):
+            if not reached[ti] and bh >= targets[ti]:
+                for tj in range(ti + 1):
+                    reached[tj] = True
+                if not sold[ti]:
+                    sold[ti] = True
+                    partial_prices[ti] = round(targets[ti] * (1 - slippage_target), 2) if slippage_target > 0 else targets[ti]
+                    sell_n = max(1, int(shares * sell_ratios[ti]))
+                    sell_n = min(sell_n, remaining_shares)
+                    partial_shares[ti] = sell_n
+                    remaining_shares -= sell_n
+                for tj in range(ti):
+                    if not sold[tj]:
+                        sold[tj] = True
+                        partial_prices[tj] = round(targets[ti] * (1 - slippage_target), 2) if slippage_target > 0 else targets[ti]
+                        sell_n = max(1, int(shares * sell_ratios[tj]))
+                        sell_n = min(sell_n, remaining_shares)
+                        partial_shares[tj] = sell_n
+                        remaining_shares -= sell_n
 
-        # Trailing stop after target reached
-        if reached_tier1 and remaining_shares > 0:
-            tsp = round(highest * (1 - reentry_trailing_pct), 2)
+        # Trailing stop after first target reached
+        if reached[0]:
+            highest_tier = 0
+            for ti in range(n_tiers - 1, -1, -1):
+                if reached[ti]:
+                    highest_tier = ti
+                    break
+            pct = trail_pcts[highest_tier]
+            tsp = round(highest * (1 - pct), 2)
             tsp = max(tsp, entry_price)
             if bl <= tsp:
+                retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.10, 0.20, 0.35, 0.50, 0.75, 1.00, 1.25, 1.50])
+                suffix = f"_{int(retracements[highest_tier] * 100)}"
                 tsp_adj = round(tsp * (1 - slippage_trailing), 2) if slippage_trailing > 0 else tsp
-                return _make_result("reentry_trailing", tsp_adj, bi)
+                return _make_result(f"reentry_trailing{suffix}", tsp_adj, bi)
 
     # Force close
     if force_close_price is not None:
         exit_price = force_close_price
     else:
         exit_price = bars_after_entry[-1]["close"] if bars_after_entry else entry_price
-    if not reached_tier1:
+    if not any(reached):
         exit_price = entry_price
     if slippage_force_close > 0:
         exit_price = round(exit_price * (1 - slippage_force_close), 2)

@@ -48,14 +48,14 @@ STOP_LOSS_MAX_PCT = 0.10
 STOP_LOSS_ATR_MIN_PCT = 0.70  # min stop = entry * (1 - this) → max 30% loss from ATR
 STOP_LOSS_ATR_MAX_PCT = 0.95  # max stop = entry * (1 - this) → min 5% loss from ATR
 
-# Profit targets — first trade (six tiers)
-PROFIT_RETRACEMENT_TIERS = [0.25, 0.50, 0.75, 1.00, 1.25, 1.50]
+# Profit targets — first trade (eight tiers)
+PROFIT_RETRACEMENT_TIERS = [0.10, 0.20, 0.35, 0.50, 0.75, 1.00, 1.25, 1.50]
 MIN_RETRACE_PCT = 0.03    # minimum 3% gap for retracement mode; below this, force capped mode
-TARGET_CAP_TIERS =         [0.05, 0.10, 0.15, 0.20, 0.25, 0.35]
-PARTIAL_SELL_RATIOS =      [1/8,  1/8,  1/8,  1/8,  1/8,  1/8]   # 6×1/8 = 75%
-TRAILING_STOP_PCTS =       [0.02, 0.025, 0.03, 0.035, 0.04, 0.05]
+TARGET_CAP_TIERS =         [0.01, 0.025, 0.05, 0.10, 0.15, 0.20, 0.25, 0.35]
+PARTIAL_SELL_RATIOS =      [1/8,  1/8,  1/8,  1/8,  1/8,  1/8,  1/8,  1/8]   # 8×1/8 = 100%
+TRAILING_STOP_PCTS =       [0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.05]
 
-# DEPRECATED — Legacy aliases for old 3-tier system. New code uses 6-tier params above.
+# DEPRECATED — Legacy aliases for old 3-tier system. New code uses 8-tier params above.
 PROFIT_RETRACEMENT_75 = 0.75
 PROFIT_RETRACEMENT_1125 = 1.125
 PROFIT_RETRACEMENT_150 = 1.50

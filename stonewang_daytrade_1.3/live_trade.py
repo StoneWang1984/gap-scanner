@@ -31,7 +31,7 @@ Changes over stonewang_daytrade_1.0 (inherited from 1.1):
   on critical failure messages (3 errors in 7/27 live log).
 
 Changes over 0.4.15:
-- 6-tier profit targets with list-based fields (replaces 3-tier target_75/1125/150)
+- 8-tier profit targets with list-based fields (replaces 3-tier target_75/1125/150)
 - calc_targets() function for dynamic N-tier target computation
 - get_trailing_pct() for generic N-tier trailing stop lookup
 - WebSocket real-time streaming with StreamState and _Bar/_on_bar/_on_trade handlers
@@ -257,7 +257,7 @@ class LivePosition:
     # 0.4.11: Time limit exit
     bar_count: int = 0
     time_limit_active: bool = False
-    # 1.0: 6-tier list-based fields
+    # 1.0: 8-tier list-based fields
     targets: list = field(default_factory=list)
     sell_ratios: list = field(default_factory=list)
     trail_pcts: list = field(default_factory=list)
@@ -346,12 +346,12 @@ def _dry_run_get_price(symbol):
         return None
 
 
-# ── 6-tier target calculation ──────────────────────────────────────
+# ── 8-tier target calculation ──────────────────────────────────────
 def calc_targets(entry_price: float, open_price: float):
-    retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.25, 0.50, 0.75, 1.00, 1.25, 1.50])
-    caps = getattr(config, "TARGET_CAP_TIERS", [0.05, 0.10, 0.15, 0.20, 0.25, 0.35])
-    sell_ratios = getattr(config, "PARTIAL_SELL_RATIOS", [1/8]*6)
-    trail_pcts = getattr(config, "TRAILING_STOP_PCTS", [0.02, 0.025, 0.03, 0.035, 0.04, 0.05])
+    retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.10, 0.20, 0.35, 0.50, 0.75, 1.00, 1.25, 1.50])
+    caps = getattr(config, "TARGET_CAP_TIERS", [0.01, 0.025, 0.05, 0.10, 0.15, 0.20, 0.25, 0.35])
+    sell_ratios = getattr(config, "PARTIAL_SELL_RATIOS", [1/8]*8)
+    trail_pcts = getattr(config, "TRAILING_STOP_PCTS", [0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.05])
     targets = []
     any_capped = False
     # When entry >= open OR gap too small for retracement targets, use capped mode.
@@ -377,9 +377,7 @@ def calc_targets(entry_price: float, open_price: float):
 
 
 def get_trailing_pct(pos) -> float:
-    if pos.trade_type == "reentry":
-        return getattr(config, "REENTRY_TRAILING_PCT", 0.01)
-    trail_pcts = getattr(config, "TRAILING_STOP_PCTS", [0.02, 0.025, 0.03, 0.035, 0.04, 0.05])
+    trail_pcts = getattr(config, "TRAILING_STOP_PCTS", [0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.05])
     if hasattr(pos, 'reached_list') and pos.reached_list:
         for ti in range(len(pos.reached_list) - 1, -1, -1):
             if pos.reached_list[ti]:
@@ -497,7 +495,7 @@ def save_chart_data(accumulator, positions, chart_events, date_str):
                 sym_entry["entry_price"] = round(pos.entry_price, 4)
                 sym_entry["stop_price"] = round(pos.stop_price, 4)
                 # 1.0: Chart targets use dict comprehension from retracement tiers
-                retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.25, 0.50, 0.75, 1.00, 1.25, 1.50])
+                retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.10, 0.20, 0.35, 0.50, 0.75, 1.00, 1.25, 1.50])
                 chart_targets = {f"{int(r*100)}%": round(t, 4) for r, t in zip(retracements, pos.targets)}
                 sym_entry["targets"] = chart_targets
                 if pos.trade_type in ("reentry",) and pos.reentry_target > 0:
@@ -1725,9 +1723,6 @@ def replace_stop_for_remaining(pos: LivePosition) -> str | None:
             log(f"{RED}Protective stop replacement failed AND old order invalid for {pos.symbol} — NAKED POSITION!{RESET}")
             pos.protective_order_id = None
             return None
-    elif pos.reached_list and any(pos.reached_list):
-        if pos.trade_type == "reentry":
-            return replace_with_trailing_stop(pos, config.REENTRY_TRAILING_PCT)
 
     # 默认: 先挂新stop-limit，成功再取消旧单
     result = place_protective_stop(pos)
@@ -1982,7 +1977,7 @@ def run_live():
     log(f"Target buffer: -{TARGET_LIMIT_BUFFER:.1%} | Force-close timeout: {FORCE_CLOSE_LIMIT_TIMEOUT}s")
     log(f"Re-entry cutoff: {REENTRY_CUTOFF} EST | Leveraged ETF filter: ON")
     log(f"Scan: 9:20 preliminary, 9:31 official (aligned with backtest)")
-    log(f"6-tier targets with list-based fields | calc_targets() | get_trailing_pct()")
+    log(f"8-tier targets with list-based fields | calc_targets() | get_trailing_pct()")
     log(f"WebSocket: {'ON' if getattr(config, 'USE_WEBSOCKET', False) else 'OFF'} | "
         f"Data feed: {'SIP' if DATA_FEED == DataFeed.SIP else 'IEX'}")
     log(f"1.1: All 1.0 features + P0-P2 fixes (circuit breaker, skip-gap, protective stop gap, thread safety, WebSocket reconnect)")
@@ -2287,7 +2282,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                             stop_price = float(ao.stop_price)
                         log(f"RECOVER: Found protective order {ao.id} stop=${stop_price:.4f}")
 
-            # 1.0: Calculate 6-tier targets for recovered position
+            # 1.0: Calculate 8-tier targets for recovered position
             targets, sell_ratios, trail_pcts, target_mode = calc_targets(avg_entry, open_price)
 
             # Reconstruct sold_shares_list from today's Alpaca order history
@@ -2497,7 +2492,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
 
         # INV-5: tier进度一致性
         for pos in positions:
-            if pos.sold_shares_list is None or pos.trade_type == "reentry":
+            if pos.sold_shares_list is None:
                 continue
             expected_sold = 0
             for i in range(pos.next_tier_idx):
@@ -2994,8 +2989,8 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
         for pos in positions[:]:
             if pos.remaining_shares <= 0:
                 continue
-            if pos.trade_type in ("recovered", "reentry"):
-                continue  # Skip pullback stop for recovered/reentry positions
+            if pos.trade_type in ("recovered",):
+                continue  # Skip pullback stop for recovered positions
             symbol = pos.symbol
             snap = snaps.get(symbol)
             if not snap:
@@ -3440,7 +3435,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                         if pos.reached_list:
                             for tidx in range(len(pos.reached_list) - 1, -1, -1):
                                 if pos.reached_list[tidx]:
-                                    retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.25, 0.50, 0.75, 1.00, 1.25, 1.50])
+                                    retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.10, 0.20, 0.35, 0.50, 0.75, 1.00, 1.25, 1.50])
                                     tier_label = f"{int(retracements[tidx]*100)}%" if tidx < len(retracements) else f"T{tidx+1}"
                                     break
                         log(f"TRAILING STOP({tier_label}) (polled): {pos.symbol} @ ${tsp:.4f} (high=${pos.highest:.4f})")
@@ -3461,41 +3456,6 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                             replace_stop_for_remaining(pos)
                         else:
                             log(f"TRAILING STOP FORCE SELL FAILED: {pos.symbol}, re-placing protective stop")
-                            replace_stop_for_remaining(pos)
-                        continue
-
-            # ── Re-entry: single tier — trailing stop 1% after target reached ──
-            elif pos.trade_type == "reentry":
-                trail_pct = getattr(config, "REENTRY_TRAILING_PCT", 0.01)
-
-                # When price reaches target → switch protective stop to trailing 1%
-                if not pos.reached_target1 and pos.highest >= pos.reentry_target:
-                    pos.reached_target1 = True
-                    result = replace_with_trailing_stop(pos, trail_pct)
-                    log(f"RE-ENTRY TARGET: {pos.symbol} @ ${pos.highest:.4f} → {trail_pct:.0%} trailing stop")
-                    events_log.append(f"{now_est.strftime('%H:%M:%S')} RE-ENTRY TARGET {pos.symbol} → {trail_pct:.0%} trail")
-                    add_chart_event(pos.symbol, "sell", pos.highest, f"TARGET→{trail_pct:.0%}trail")
-
-                # Trailing stop 1% check (polled fallback)
-                if pos.reached_target1 and pos.remaining_shares > 0:
-                    tsp = round(pos.highest * (1 - trail_pct), 2)
-                    tsp = max(tsp, pos.entry_price)
-                    if cur_price <= tsp:
-                        log(f"RE-ENTRY TRAILING({trail_pct:.0%}): {pos.symbol} @ ${tsp:.4f} (high=${pos.highest:.4f})")
-                        events_log.append(f"{now_est.strftime('%H:%M:%S')} RE-ENTRY TRAILING {pos.symbol} @ ${tsp:.4f}")
-                        if pos.protective_order_id:
-                            cancel_order(pos.protective_order_id)
-                            pos.protective_order_id = None
-                        sold = force_sell_position(pos.symbol, pos.remaining_shares)
-                        if sold >= pos.remaining_shares:
-                            pos.remaining_shares = 0
-                            record_trade(pos, tsp, "reentry_trailing")
-                            positions.remove(pos)
-                        elif sold > 0:
-                            pos.remaining_shares -= sold
-                            replace_stop_for_remaining(pos)
-                        else:
-                            log(f"RE-ENTRY TRAILING FAILED: {pos.symbol}, re-placing protective stop")
                             replace_stop_for_remaining(pos)
                         continue
 
@@ -3554,7 +3514,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
 
                 stop = calc_stop_price(entry_price, atr)
 
-                # 1.0: 6-tier targets via calc_targets
+                # 1.0: 8-tier targets via calc_targets
                 targets, sell_ratios, trail_pcts, target_mode = calc_targets(entry_price, cand["open_price"])
 
                 # Slot-based allocation: divide buying power by MAX_POSITIONS_PER_DAY slots
@@ -3739,16 +3699,17 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 if pdt_hit:
                     _pdt_detected = True
                 if order:
-                    # 1.0: Re-entry positions also use 6-tier target lists (empty targets for re-entry)
+                    # v1.4: Re-entry uses same 8-tier ladder as first trade
+                    # open_price = prev_high (gap = prev_high - entry_price)
+                    targets, sell_ratios, trail_pcts, target_mode = calc_targets(entry_price, prev_high)
                     pos = LivePosition(
                         symbol=symbol, entry_price=entry_price, shares=actual_shares,
                         stop_price=stop, open_price=cand["open_price"],
                         trade_type="reentry", prev_high=prev_high,
                         reentry_target=target, entry_time=now_est,
                         atr=atr,
-                        targets=[], sell_ratios=[], trail_pcts=[],
-                        reached_list=[], sold_shares_list=[],
-                        target_mode="reentry",
+                        targets=targets, sell_ratios=sell_ratios, trail_pcts=trail_pcts,
+                        target_mode=target_mode,
                     )
                     positions.append(pos)
                     # Cancel any lingering sell orders for this symbol before placing protective stop

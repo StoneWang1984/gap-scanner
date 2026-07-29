@@ -12,6 +12,11 @@
 | 1.3-2 | 配置 | REENTRY_POSITION_RATIO: 0.5→1.0, re-entry使用full slot而非half slot, 最大化资金效率 |
 | 1.3-3 | 架构 | 中午re-scan: 10:30/11:30重新扫描新gap候选股, 加入监控列表, 补充1分钟K线数据 |
 | 1.3-4 | 配置 | RESCAN_TIMES=["10:30","11:30"] 可配置re-scan时间 |
+| 1.3-5 | 架构 | 6档→8档止盈: 新增T1(1%上限/1%trailing)和T2(2.5%上限/1.5%trailing), 捕获早期小涨幅 |
+| 1.3-6 | 架构 | 8×1/8=100%全部通过阶梯卖出(原6×1/8=75%+25%trailing) |
+| 1.3-7 | 架构 | T8(最高档)成交后卖出最后1/8, 无trailing stop |
+| 1.3-8 | 架构 | T3回撤从25%改为35% |
+| 1.3-9 | 架构 | Re-entry使用8档阶梯系统(与首笔交易共用calc_targets) |
 
 ## 1.2 变更清单（相对于 1.1）
 
@@ -20,7 +25,7 @@
 | 1.2-1 | 架构 | OCO预挂单阶梯卖出系统: T1成交后同时挂T2 OCO(上限=T2目标价, 下限=T1成交价×0.98) + trailing stop保护剩余。OCO limit成交→进下一档+挂新OCO+新trailing。OCO stop成交→不进下一档, trailing继续保护 |
 | 1.2-2 | 架构 | 消除5秒轮询延迟: OCO订单在Alpaca端实时触发, 不再需要每5秒检查价格是否触达目标 |
 | 1.2-3 | 配置 | OCO_ENABLED=True 启用OCO模式, False回退到v1.1 polling模式 |
-| 1.2-4 | 配置 | OCO_STOP_BUFFER_PCT=0.02(参考值), 实际buffer=trail_pct递增(2%/2.5%/3%/3.5%/4%/5%) |
+| 1.2-4 | 配置 | OCO_STOP_BUFFER_PCT=0.02(参考值), 实际buffer=trail_pct递增(1%/1.5%/2%/2.5%/3%/3.5%/4%/5%) |
 | 1.2-5 | 数据 | tier_fill_prices字段: 存储每档实际成交价, 用于OCO stop计算 |
 | 1.2-6 | 数据 | oco_order_ids字段: 跟踪预挂OCO订单状态 |
 | 1.2-7 | 函数 | place_oco_sell, check_oco_fill, place_oco_for_next_tier, cancel_all_oco_for_position |
@@ -74,11 +79,11 @@
 - Alpaca OCO锁仓只锁一次（OCO pair锁qty而非2×qty）
 - Skip-gap处理: OCO limit成交后检查cur_price是否超过后续多档→中间档用市价卖出→放最后一档OCO+trailing
 
-### 6档目标系统
-- 档位: 25% / 50% / 75% / 100% / 125% / 150% 回撤位
-- 上限: 5% / 10% / 15% / 20% / 25% / 35% 涨幅封顶
-- 每档卖出: 1/8仓位 (6×1/8=75%卖出，25%靠trailing stop)
-- Trailing stop: 2.0% / 2.5% / 3.0% / 3.5% / 4.0% / 5.0%
+### 8档目标系统
+- 档位: 10% / 20% / 25% / 50% / 75% / 100% / 125% / 150% 回撤位
+- 上限: 1% / 2.5% / 5% / 10% / 15% / 20% / 25% / 35% 涨幅封顶
+- 每档卖出: 1/8仓位 (8×1/8=100%全部通过阶梯卖出)
+- Trailing stop: 1.0% / 1.5% / 2.0% / 2.5% / 3.0% / 3.5% / 4.0% / 5.0% (T8后无trailing)
 
 ### 仓位管理
 - 持仓过程用5分钟K线（30天对比回测验证：5分钟优于1分钟）
@@ -128,7 +133,7 @@
 - `MAX_DAILY_TRADES = 0` — 无交易数量限制（buying power自动分配仓位大小）
 - `MAX_CANDIDATES = 20` — 监控最多20支候选股
 - `STOP_LOSS_MAX_PCT = 0.10` — 最大亏损10%（与回测一致）
-- `TRAILING_STOP_PCTS = [0.02, 0.025, 0.03, 0.035, 0.04, 0.05]` — 与回测一致
+- `TRAILING_STOP_PCTS = [0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.05]` — 8档, 与回测一致
 - `MAX_POSITION_SIZE = 200` — 每仓上限$200（cash账户，不使用margin杠杆）
 - `MIN_POSITION_SIZE = 1` — 最低仓位$1
 - `REENTRY_MIN_PULLBACK = 0.04` — 最低4%回调（与回测一致）
