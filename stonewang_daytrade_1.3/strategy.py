@@ -74,7 +74,7 @@ class TradePlan:
 def _calc_targets_internal(entry_price: float, open_price: float):
     """Calculate 8-tier targets, sell_ratios, trail_pcts, target_mode."""
     retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.10, 0.20, 0.35, 0.50, 0.75, 1.00, 1.25, 1.50])
-    caps = getattr(config, "TARGET_CAP_TIERS", [0.01, 0.025, 0.05, 0.10, 0.15, 0.20, 0.25, 0.35])
+    caps = getattr(config, "TARGET_CAP_TIERS", [0.01, 0.02, 0.035, 0.05, 0.08, 0.10, 0.13, 0.18])
     sell_ratios = getattr(config, "PARTIAL_SELL_RATIOS", [1/8]*8)
     trail_pcts = getattr(config, "TRAILING_STOP_PCTS", [0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.05])
 
@@ -104,7 +104,7 @@ def build_trade_plan(symbol: str, open_price: float, pullback: float, atr: float
         position_size = calc_position_size(config.INITIAL_CAPITAL)
 
     retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.10, 0.20, 0.35, 0.50, 0.75, 1.00, 1.25, 1.50])
-    caps = getattr(config, "TARGET_CAP_TIERS", [0.01, 0.025, 0.05, 0.10, 0.15, 0.20, 0.25, 0.35])
+    caps = getattr(config, "TARGET_CAP_TIERS", [0.01, 0.02, 0.035, 0.05, 0.08, 0.10, 0.13, 0.18])
     sell_ratios = getattr(config, "PARTIAL_SELL_RATIOS", [1/8]*8)
     trail_pcts = getattr(config, "TRAILING_STOP_PCTS", [0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.05])
 

@@ -343,7 +343,7 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
           f"Per-stock cap: ${config.MAX_POSITION_SIZE:,.0f} | Max daily trades: {config.MAX_DAILY_TRADES}")
     retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.10, 0.20, 0.35, 0.50, 0.75, 1.00, 1.25, 1.50])
     sell_ratios = getattr(config, "PARTIAL_SELL_RATIOS", [1/8]*8)
-    caps = getattr(config, "TARGET_CAP_TIERS", [0.01, 0.025, 0.05, 0.10, 0.15, 0.20, 0.25, 0.35])
+    caps = getattr(config, "TARGET_CAP_TIERS", [0.01, 0.02, 0.035, 0.05, 0.08, 0.10, 0.13, 0.18])
     trail_pcts = getattr(config, "TRAILING_STOP_PCTS", [0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.05])
     tier_desc = " + ".join(f"{int(r*100)}%/1÷{int(round(1/s))}" for r, s in zip(retracements, sell_ratios))
     cap_desc = "/".join(f"{int(c*100)}%" for c in caps)

@@ -1,6 +1,23 @@
-stonewang_daytrade_1.3.0
+stonewang_daytrade_1.3.1
 
-Released: 2026-07-29
+Released: 2026-07-30
+
+1.3.1 changes (7/30) — OCO fill detection fix + stop_price correction:
+
+改动1: OCO fill detection修复
+- _order_cache添加order_class和legs字段，精确判断OCO哪条腿成交
+- MockOrder添加leg_type字段，DRY_RUN模拟OCO成交不再用价格启发式
+- check_oco_fill用legs属性替代fill_price>=target*0.95的近似判断
+
+改动2: OCO stop成交后放置新OCO
+- OCO stop leg成交后，与limit leg成交相同，放置下一档OCO+trailing
+- 原逻辑: stop成交后不放新OCO，依赖trailing stop保护
+- 新逻辑: stop成交后立即放下一档OCO，价格恢复时自动追进
+
+改动3: OCO stop_price使用实际成交价
+- place_oco_for_next_tier: stop_price从targets[tier_idx-1]改为tier_fill_prices[tier_idx-1]
+- OCO止损触发价=上一档实际成交价(而非理论目标价)
+- 优先级: prev_fill_price > tier_fill_prices > targets(回退)
 
 1.3.0 changes (7/29) — 8-tier profit targets (8档止盈):
 

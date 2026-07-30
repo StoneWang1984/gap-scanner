@@ -321,6 +321,7 @@ class MockOrder:
     filled_qty: int = 0
     filled_price: float = 0.0
     oco_stop_limit_price: float | None = None  # 1.2: OCO stop leg limit price
+    leg_type: str | None = None  # "limit" or "stop" — set when OCO fills in DRY_RUN
 
 dry_run_orders: dict[str, MockOrder] = {}
 _dry_run_day_highs: dict[str, float] = {}  # set from day_highs in run_trading_day
@@ -349,7 +350,7 @@ def _dry_run_get_price(symbol):
 # ── 8-tier target calculation ──────────────────────────────────────
 def calc_targets(entry_price: float, open_price: float):
     retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.10, 0.20, 0.35, 0.50, 0.75, 1.00, 1.25, 1.50])
-    caps = getattr(config, "TARGET_CAP_TIERS", [0.01, 0.025, 0.05, 0.10, 0.15, 0.20, 0.25, 0.35])
+    caps = getattr(config, "TARGET_CAP_TIERS", [0.01, 0.02, 0.035, 0.05, 0.08, 0.10, 0.13, 0.18])
     sell_ratios = getattr(config, "PARTIAL_SELL_RATIOS", [1/8]*8)
     trail_pcts = getattr(config, "TRAILING_STOP_PCTS", [0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.05])
     targets = []
@@ -841,10 +842,11 @@ def refresh_candidates(candidates):
 
 def place_buy_market(symbol, shares):
     """Place a market buy order — used after pullback confirmation for immediate entry.
+    Waits for Alpaca fill confirmation before returning.
     Returns (order, pdt_flag, actual_shares, reject_category):
       order: Alpaca order object or None
       pdt_flag: True if PDT rule triggered (caller should set local _pdt_detected)
-      actual_shares: the qty actually submitted (may differ if buying_power halved on retry)
+      actual_shares: the qty actually filled (may differ from requested on partial fill)
       reject_category: last rejection category if order failed (None if succeeded; "rate_limit"/"network" = transient)
     """
     pdt_flag = False
@@ -866,7 +868,20 @@ def place_buy_market(symbol, shares):
                 time_in_force=TimeInForce.DAY,
             ))
             log(f"BUY MARKET {symbol} {shares} -> order {order.id}")
-            return order, False, shares, None
+            # 等待Alpaca确认成交
+            filled = _wait_order_filled(str(order.id), timeout=15)
+            if filled:
+                filled_qty = get_order_filled_qty(str(order.id))
+                actual_fill_price = get_order_filled_price(str(order.id))
+                if filled_qty > 0:
+                    actual_shares = filled_qty
+                else:
+                    actual_shares = shares
+                log(f"BUY MARKET CONFIRMED: {symbol} {actual_shares}sh @ ${actual_fill_price:.4f}")
+                return order, False, actual_shares, None
+            else:
+                log(f"{YELLOW}BUY MARKET TIMEOUT: {symbol} order {order.id} not filled in 15s — returning order for pending check{RESET}")
+                return order, False, shares, None
         except Exception as e:
             analysis = analyze_alpaca_rejection(e)
             last_reject = analysis["category"]
@@ -876,9 +891,32 @@ def place_buy_market(symbol, shares):
                 log(f"{RED}PDT规则触发！停止当天所有新入场{RESET}")
                 return None, True, shares, "pdt"
             if analysis["category"] == "buying_power" and attempt < 2:
-                # 减仓50%再试
-                shares = max(1, shares // 2)
-                log(f"  减仓重试: {symbol} {shares}股")
+                # 根据实际可用资金精确计算可买股数，而非盲目减半
+                try:
+                    bp = float(trading_client.get_account().buying_power)
+                    # 获取当前ask价作为参考
+                    cur_price = 0
+                    try:
+                        snap = data_client.get_stock_snapshot(StockSnapshotRequest(symbol_or_symbols=symbol, feed=DATA_FEED))
+                        cur_price = float(snap[symbol].latest_quote.ask_price) if snap and symbol in snap else 0
+                    except Exception:
+                        pass
+                    if cur_price <= 0:
+                        cur_price = _dry_run_get_price(symbol) or 0
+                    if cur_price > 0:
+                        new_shares = int(bp / cur_price)  # 向下取整
+                        new_shares = max(1, new_shares)
+                        if new_shares < shares:
+                            log(f"  资金不足: {symbol} bp=${bp:.2f} ask=${cur_price:.4f} → 最多买{new_shares}股 (原{shares}股)")
+                            shares = new_shares
+                        else:
+                            log(f"  资金重新计算: {symbol} bp=${bp:.2f} 可买{new_shares}股 ≥ 原定{shares}股")
+                    else:
+                        shares = max(1, shares // 2)
+                        log(f"  资金不足且无法获取价格: {symbol} 减半至{shares}股")
+                except Exception:
+                    shares = max(1, shares // 2)
+                    log(f"  资金不足且查询失败: {symbol} 减半至{shares}股")
                 continue
             if analysis["category"] in ("rate_limit", "network") and attempt < 2:
                 time.sleep(5)
@@ -1084,6 +1122,17 @@ def _wait_cancel_confirmed(order_id, timeout=2.0, poll_interval=0.3):
                     "symbol": o.symbol,
                     "qty": float(o.qty) if o.qty else 0,
                     "order_type": o.order_type.value if hasattr(o.order_type, 'value') else str(o.order_type),
+                    "order_class": o.order_class.value if hasattr(o.order_class, 'value') else str(o.order_class) if o.order_class else None,
+                    "legs": [
+                        {
+                            "status": leg.status.value if hasattr(leg.status, 'value') else str(leg.status),
+                            "filled_avg_price": float(leg.filled_avg_price) if leg.filled_avg_price else 0.0,
+                            "order_type": leg.order_type.value if hasattr(leg.order_type, 'value') else str(leg.order_type),
+                            "qty": float(leg.qty) if leg.qty else 0,
+                            "filled_qty": int(float(leg.filled_qty)) if leg.filled_qty else 0,
+                        }
+                        for leg in (o.legs or [])
+                    ] if o.legs else [],
                 }
             # Check again with refreshed cache
             cached = _order_cache.get(order_id)
@@ -1100,7 +1149,28 @@ def _wait_cancel_confirmed(order_id, timeout=2.0, poll_interval=0.3):
     return False
 
 
-def cancel_all_orders():
+def _wait_oco_confirmed(order_id, timeout=5.0, poll_interval=0.5):
+    """等待Alpaca确认OCO订单已接受（status=new/held）。
+    Returns True if order is confirmed accepted.
+    Returns False if timeout or order is rejected/canceled."""
+    if DRY_RUN:
+        return order_id in dry_run_orders
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            order_obj = trading_client.get_order_by_id(order_id)
+            status = order_obj.status.value if hasattr(order_obj.status, 'value') else str(order_obj.status)
+            if status in ("new", "held", "partially_filled", "filled"):
+                return True
+            if status in ("rejected", "canceled", "expired"):
+                log(f"OCO order {order_id} rejected/canceled: {status}")
+                return False
+            # pending_new, accepted, etc. — still processing, wait
+        except Exception as e:
+            log(f"_wait_oco_confirmed error for {order_id}: {e}")
+        time.sleep(poll_interval)
+    log(f"{YELLOW}OCO CONFIRM TIMEOUT: {order_id} not confirmed after {timeout}s{RESET}")
+    return False
     if DRY_RUN:
         dry_run_orders.clear()
         return
@@ -1128,6 +1198,7 @@ def close_all_positions():
 def place_oco_sell(symbol, shares, target_price, stop_price, stop_limit_price):
     """Place an OCO sell order (limit leg = target_price, stop leg = stop_price/stop_limit_price).
     Uses LimitOrderRequest with order_class=OrderClass.OCO.
+    Waits for Alpaca to confirm the order is accepted (status=new/held) before returning.
     Returns order object or None on failure. 2 retries with buffer increase on stop_distance rejection."""
     if DRY_RUN:
         oid = f"DRY-OCO-{uuid4().hex[:8]}"
@@ -1150,8 +1221,22 @@ def place_oco_sell(symbol, shares, target_price, stop_price, stop_limit_price):
                 stop_loss=StopLossRequest(stop_price=round(stop_price, 2),
                                           limit_price=round(stop_limit_price, 2)),
             ))
-            log(f"OCO SELL {symbol} {shares} limit=${target_price:.2f} stop=${stop_price:.2f} stop_limit=${stop_limit_price:.2f} -> order {order.id}")
-            return order
+            # Wait for Alpaca to confirm the order is accepted
+            confirmed = _wait_oco_confirmed(str(order.id), timeout=5.0)
+            if confirmed:
+                log(f"OCO SELL {symbol} {shares} limit=${target_price:.2f} stop=${stop_price:.2f} stop_limit=${stop_limit_price:.2f} -> order {order.id} CONFIRMED")
+                return order
+            else:
+                log(f"{YELLOW}OCO SELL {symbol} order {order.id} not confirmed after 5s — treating as failed{RESET}")
+                # Try to cancel the unconfirmed order to free shares
+                try:
+                    trading_client.cancel_order_by_id(order.id)
+                except Exception:
+                    pass
+                # Fall through to retry or return None
+                if attempt < 2:
+                    continue
+                return None
         except Exception as e:
             analysis = analyze_alpaca_rejection(e)
             log(f"OCO SELL REJECTED ({attempt+1}/3) {symbol}: {analysis['detail']}")
@@ -1159,7 +1244,7 @@ def place_oco_sell(symbol, shares, target_price, stop_price, stop_limit_price):
                 # Increase stop buffer — widen stop_price away from current price
                 buffer_increase = 0.01 * (attempt + 1)
                 stop_price = round(stop_price * (1 - buffer_increase), 2)
-                stop_limit_price = round(stop_price * (1 - STOP_LIMIT_BUFFER), 2)
+                stop_limit_price = round(stop_price * 0.99, 2)
                 log(f"  OCO stop buffer increase: stop=${stop_price:.2f} stop_limit=${stop_limit_price:.2f}")
                 continue
             if analysis["category"] in ("rate_limit", "network") and attempt < 2:
@@ -1174,8 +1259,8 @@ def place_oco_sell(symbol, shares, target_price, stop_price, stop_limit_price):
 def check_oco_fill(oco_entry):
     """Check if an OCO order has filled. Returns (filled, leg_type, fill_price).
     leg_type: "limit" (profit fill), "stop" (loss protection fill), "canceled" (order expired/canceled).
-    For live: get_order_by_id, check OrderStatus.FILLED.
-    For DRY_RUN: simulate fill based on current price vs limit_price/stop_price."""
+    Live: uses _order_cache + order legs to determine which leg filled (not price heuristic).
+    DRY_RUN: simulate fill based on current price vs limit_price/stop_price."""
     order_id = oco_entry["order_id"]
     target_price = oco_entry["target_price"]
     stop_price = oco_entry["stop_price"]
@@ -1183,12 +1268,14 @@ def check_oco_fill(oco_entry):
     if DRY_RUN:
         mock = dry_run_orders.get(order_id)
         if not mock:
-            # Order was removed — treat as canceled
             return True, "canceled", 0.0
         if mock.status == "filled":
-            # Already filled — determine leg type from stored fill price
             fill_price = mock.filled_price
-            if fill_price >= target_price * 0.95:
+            # Use stored leg_type (set during simulation) instead of price heuristic
+            if mock.leg_type:
+                return True, mock.leg_type, fill_price
+            # Fallback if leg_type not set (shouldn't happen)
+            if fill_price >= target_price:
                 return True, "limit", fill_price
             else:
                 return True, "stop", fill_price
@@ -1202,6 +1289,7 @@ def check_oco_fill(oco_entry):
             mock.status = "filled"
             mock.filled_qty = mock.qty
             mock.filled_price = fill_price
+            mock.leg_type = "limit"
             log(f"[DRY] OCO LIMIT FILLED: {mock.symbol} {mock.qty} @ ${fill_price:.2f}")
             return True, "limit", fill_price
         # Check stop leg: price <= stop_price
@@ -1210,33 +1298,55 @@ def check_oco_fill(oco_entry):
             mock.status = "filled"
             mock.filled_qty = mock.qty
             mock.filled_price = fill_price
+            mock.leg_type = "stop"
             log(f"[DRY] OCO STOP FILLED: {mock.symbol} {mock.qty} @ ${fill_price:.2f}")
             return True, "stop", fill_price
         return False, None, 0.0
 
-    # Live mode
-    try:
-        order_obj = trading_client.get_order_by_id(order_id)
-        if order_obj.status == OrderStatus.FILLED:
-            fill_price = float(order_obj.filled_avg_price) if order_obj.filled_avg_price else 0.0
-            if fill_price >= target_price * 0.95:
+    # Live mode — use _order_cache (no individual API call)
+    cached = _order_cache.get(order_id)
+    if not cached:
+        return False, None, 0.0
+
+    status = cached["status"]
+
+    if status == "filled":
+        # Use legs to determine which leg filled (accurate, not price heuristic)
+        legs = cached.get("legs", [])
+        if legs:
+            for leg in legs:
+                if leg["status"] == "filled" and leg["filled_avg_price"] > 0:
+                    leg_type = leg["order_type"]
+                    fill_price = leg["filled_avg_price"]
+                    if leg_type in ("limit",):
+                        return True, "limit", fill_price
+                    elif leg_type in ("stop", "stop_limit"):
+                        return True, "stop", fill_price
+            # No filled leg found — parent is filled but no leg detail, use price fallback
+            fill_price = cached["filled_avg_price"]
+            if fill_price >= target_price:
                 return True, "limit", fill_price
             else:
                 return True, "stop", fill_price
-        if order_obj.status in (OrderStatus.CANCELED, OrderStatus.EXPIRED, OrderStatus.REJECTED):
-            return True, "canceled", 0.0
-        # Still open/pending — not filled yet
-        return False, None, 0.0
-    except Exception as e:
-        log(f"check_oco_fill error for {order_id}: {e}")
-        return False, None, 0.0
+        else:
+            # No legs info — use price comparison (tighter than old 0.95 threshold)
+            fill_price = cached["filled_avg_price"]
+            if fill_price >= target_price:
+                return True, "limit", fill_price
+            else:
+                return True, "stop", fill_price
+
+    if status in ("canceled", "expired", "rejected"):
+        return True, "canceled", 0.0
+
+    return False, None, 0.0
 
 
 def place_oco_for_next_tier(pos, tier_idx, prev_fill_price=None):
     """Place an OCO sell for the next tier (T2+).
-    OCO stop price = previous tier's actual fill price * (1 - trail_pct for that tier).
-    For T2: stop = T1_actual_fill_price * (1 - trail_pcts[0]).
-    For T3+: stop = prev_tier_fill_price * (1 - trail_pcts[tier_idx-1]).
+    OCO limit_price = next tier target (止盈 — price rises to target → sell at profit).
+    OCO stop_price = previous tier's actual fill price (止损触发 — price drops back to confirmed level → trigger stop).
+    OCO stop_limit_price = stop_price × 0.99 (止损限价 — minimum acceptable price after stop triggers).
     Also cancels the current trailing stop, places a new one for remaining minus OCO qty,
     and records the OCO entry in pos.oco_order_ids.
     Returns oco_entry dict or None."""
@@ -1252,26 +1362,18 @@ def place_oco_for_next_tier(pos, tier_idx, prev_fill_price=None):
     if tier_shares <= 0:
         return None
 
-    # Calculate OCO stop price from previous tier's fill price
-    # OCO stop buffer uses trail_pct (progressive: 2%/2.5%/3%/3.5%/4%/5%)
-    # This aligns OCO stop with trailing stop at each tier, giving higher tiers
-    # more room for normal price fluctuations.
-    trail_pct_idx = tier_idx - 1
-    trail_pct = pos.trail_pcts[min(trail_pct_idx, len(pos.trail_pcts) - 1)]
-    oco_stop_buffer = trail_pct
-
+    # OCO stop_price = previous tier's actual fill price (confirmed level, acts as floor)
+    # OCO stop_limit_price = stop_price × 0.99 (1% below the confirmed level)
+    # Rationale: the fill price is the actual confirmed level — if price drops back,
+    # the reversal is real and we should exit the tier shares quickly.
+    # Prefer prev_fill_price (explicit arg), then tier_fill_prices (stored), then targets (fallback).
     if prev_fill_price and prev_fill_price > 0:
-        stop_price = round(prev_fill_price * (1 - oco_stop_buffer), 2)
+        stop_price = prev_fill_price
+    elif tier_idx > 0 and len(pos.tier_fill_prices) >= tier_idx and pos.tier_fill_prices[tier_idx - 1] > 0:
+        stop_price = pos.tier_fill_prices[tier_idx - 1]
     else:
-        # Fallback: use target price as approximation (limit fills at or above target)
-        # This mainly applies to Recovery scenario where fill history is unavailable.
-        # target ≈ fill + small slippage, so target-based stop is slightly wider but still reasonable.
-        prev_target = pos.targets[tier_idx - 1] if tier_idx > 0 else pos.entry_price
-        stop_price = round(prev_target * (1 - oco_stop_buffer), 2)
-        log(f"{YELLOW}OCO: No actual fill price for T{tier_idx+1}, using target=${prev_target:.2f} approximation (recovery scenario) stop=${stop_price:.2f}{RESET}")
-
-    # Stop limit price with buffer
-    stop_limit_price = round(stop_price * (1 - STOP_LIMIT_BUFFER), 2)
+        stop_price = pos.targets[tier_idx - 1] if tier_idx > 0 else pos.entry_price
+    stop_limit_price = round(stop_price * 0.99, 2)
 
     # Ensure stop_price > 0 (safety)
     stop_price = max(stop_price, 0.01)
@@ -1314,7 +1416,13 @@ def place_oco_for_next_tier(pos, tier_idx, prev_fill_price=None):
             pos.protective_order_id = str(trail_order.id)
             log(f"OCO T{tier_idx+1}: trailing stop placed for {trail_remaining}sh at {current_trail_pct:.1%} -> {trail_order.id}")
         else:
-            log(f"{YELLOW}OCO T{tier_idx+1}: trailing stop FAILED for {pos.symbol} {trail_remaining}sh — OCO still active{RESET}")
+            # Trailing stop failed — fallback to stop-limit to protect remaining shares
+            log(f"{YELLOW}OCO T{tier_idx+1}: trailing stop FAILED for {pos.symbol} {trail_remaining}sh — trying stop-limit fallback{RESET}")
+            stop_result = place_protective_stop(pos)
+            if stop_result:
+                log(f"OCO T{tier_idx+1}: stop-limit fallback placed for {pos.symbol}")
+            else:
+                log(f"{RED}OCO T{tier_idx+1}: BOTH trailing and stop-limit FAILED for {pos.symbol} — {trail_remaining}sh UNPROTECTED{RESET}")
     else:
         log(f"OCO T{tier_idx+1}: no remaining shares for trailing stop (position fully allocated)")
 
@@ -1324,10 +1432,11 @@ def place_oco_for_next_tier(pos, tier_idx, prev_fill_price=None):
 
 def cancel_all_oco_for_position(pos):
     """Cancel all pending OCO orders for a position (those where leg_filled is None).
-    Remove them from pos.oco_order_ids."""
+    Remove them from pos.oco_order_ids. Waits for Alpaca confirmation on each cancel."""
     for entry in pos.oco_order_ids[:]:
         if entry.get("leg_filled") is None:
             cancel_order(entry["order_id"])
+            _wait_cancel_confirmed(entry["order_id"], timeout=2.0)
             log(f"CANCEL OCO: {entry['order_id']} for {pos.symbol} T{entry['tier_idx']+1}")
             pos.oco_order_ids.remove(entry)
 
@@ -1361,11 +1470,10 @@ def force_sell_position(symbol: str, qty: int, cancel_existing_orders=True, inte
             for o in open_orders:
                 if o.side == OrderSide.SELL:
                     cancel_order(str(o.id))
+                    _wait_cancel_confirmed(str(o.id), timeout=2.0)
                     log(f"FORCE SELL: cancelled pending sell order {o.id} for {symbol}")
         except Exception:
             pass
-        # Wait for Alpaca to process cancellations before checking position
-        time.sleep(0.5)
 
     # Get actual Alpaca position quantity (after cancellations)
     total_qty = 0
@@ -1435,10 +1543,11 @@ def force_sell_position(symbol: str, qty: int, cancel_existing_orders=True, inte
             for o in open_orders:
                 if o.side == OrderSide.SELL:
                     cancel_order(str(o.id))
+                    _wait_cancel_confirmed(str(o.id), timeout=2.0)
                     log(f"FORCE SELL (retry): cancelled sell order {o.id} for {symbol}")
         except Exception:
             cancel_all_orders()
-        time.sleep(2)
+        time.sleep(1)
         # Re-check actual position
         current_qty = 0
         try:
@@ -1661,32 +1770,30 @@ def _verify_order_active(order_id: str) -> bool:
 
 
 def replace_with_trailing_stop(pos: LivePosition, trail_pct: float) -> str | None:
-    """替换为trailing stop — 先挂新单再取消旧单，避免裸仓空窗期
+    """替换为trailing stop — 先取消旧单再挂新单（Alpaca锁仓机制要求必须先释放股份）
     Returns order_id if successful, None if failed.
     If pos.remaining_shares == 0 after call, emergency exit occurred — caller must handle cleanup."""
     old_order_id = pos.protective_order_id
-    # 先挂新trailing stop（不取消旧单）
+
+    # Alpaca锁仓: 旧卖单锁定股份，新卖单无法覆盖同一批股份
+    # 必须先取消旧单释放股份，才能挂新单（有0.3-2秒裸仓窗口，不可避免）
+    if old_order_id:
+        cancel_order(old_order_id)
+        _wait_cancel_confirmed(old_order_id, timeout=2.0)
+        pos.protective_order_id = None
+
+    # 挂新trailing stop
     order = place_trailing_stop_sell(pos.symbol, pos.remaining_shares, trail_pct * 100)
     if order:
-        # 新单成功 → 取消旧单
-        if old_order_id:
-            cancel_order(old_order_id)
         pos.protective_order_id = str(order.id)
         return str(order.id)
-    # trailing stop失败 → fallback到stop-limit（同样先挂新再取消旧）
+    # trailing stop失败 → fallback到stop-limit
     log(f"Trailing stop failed for {pos.symbol}, falling back to stop-limit")
     result = place_protective_stop(pos)
     if result:
-        # fallback成功 → 取消旧单
-        if old_order_id:
-            cancel_order(old_order_id)
         return result
-    # fallback也失败 → 检查旧止损是否仍然有效
-    if old_order_id and _verify_order_active(old_order_id):
-        log(f"{YELLOW}Both trailing and stop-limit failed for {pos.symbol} — verified old protective order still active{RESET}")
-        return None
-    # 旧止损已失效 → 裸仓！INV-2将在下轮检查中捕获
-    log(f"{RED}Both trailing and stop-limit failed AND old protective order invalid for {pos.symbol} — NAKED POSITION!{RESET}")
+    # 两者都失败 → 裸仓！INV-2将在下轮检查中捕获
+    log(f"{RED}Both trailing and stop-limit failed for {pos.symbol} — NAKED POSITION!{RESET}")
     pos.protective_order_id = None
     return None
 
@@ -1709,33 +1816,29 @@ def replace_stop_for_remaining(pos: LivePosition) -> str | None:
             # replace_with_trailing_stop已内部处理先新再旧
             return result
         else:
-            # 先挂新stop-limit，成功再取消旧单
+            # 先取消旧单再挂新stop-limit（Alpaca锁仓机制要求）
+            if old_order_id:
+                cancel_order(old_order_id)
+                _wait_cancel_confirmed(old_order_id, timeout=2.0)
+                pos.protective_order_id = None
             result = place_protective_stop(pos)
             if result:
-                if old_order_id and old_order_id != pos.protective_order_id:
-                    cancel_order(old_order_id)
                 return result
-            # 新单失败 → 检查旧止损是否仍然有效
-            if old_order_id and _verify_order_active(old_order_id):
-                log(f"{YELLOW}Protective stop replacement failed for {pos.symbol} — verified old order still active{RESET}")
-                return None
-            # 旧止损已失效 → 裸仓
-            log(f"{RED}Protective stop replacement failed AND old order invalid for {pos.symbol} — NAKED POSITION!{RESET}")
+            # 新单失败 → 裸仓！INV-2将在下轮检查中捕获
+            log(f"{RED}Protective stop replacement failed for {pos.symbol} — NAKED POSITION!{RESET}")
             pos.protective_order_id = None
             return None
 
-    # 默认: 先挂新stop-limit，成功再取消旧单
+    # 默认: 先取消旧单再挂新stop-limit（Alpaca锁仓机制要求）
+    if old_order_id:
+        cancel_order(old_order_id)
+        _wait_cancel_confirmed(old_order_id, timeout=2.0)
+        pos.protective_order_id = None
     result = place_protective_stop(pos)
     if result:
-        if old_order_id and old_order_id != pos.protective_order_id:
-            cancel_order(old_order_id)
         return result
-    # 新单失败 → 检查旧止损是否仍然有效
-    if old_order_id and _verify_order_active(old_order_id):
-        log(f"{YELLOW}Protective stop replacement failed for {pos.symbol} — verified old order still active{RESET}")
-        return None
-    # 旧止损已失效 → 裸仓
-    log(f"{RED}Protective stop replacement failed AND old order invalid for {pos.symbol} — NAKED POSITION!{RESET}")
+    # 新单失败 → 裸仓！INV-2将在下轮检查中捕获
+    log(f"{RED}Protective stop replacement failed for {pos.symbol} — NAKED POSITION!{RESET}")
     pos.protective_order_id = None
     return None
 
@@ -2630,6 +2733,17 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                         "symbol": o.symbol,
                         "qty": float(o.qty) if o.qty else 0,
                         "order_type": o.order_type.value if hasattr(o.order_type, 'value') else str(o.order_type),
+                        "order_class": o.order_class.value if hasattr(o.order_class, 'value') else str(o.order_class) if o.order_class else None,
+                        "legs": [
+                            {
+                                "status": leg.status.value if hasattr(leg.status, 'value') else str(leg.status),
+                                "filled_avg_price": float(leg.filled_avg_price) if leg.filled_avg_price else 0.0,
+                                "order_type": leg.order_type.value if hasattr(leg.order_type, 'value') else str(leg.order_type),
+                                "qty": float(leg.qty) if leg.qty else 0,
+                                "filled_qty": int(float(leg.filled_qty)) if leg.filled_qty else 0,
+                            }
+                            for leg in (o.legs or [])
+                        ] if o.legs else [],
                     }
             except Exception as e:
                 log(f"Order cache refresh error: {e}")
@@ -2833,6 +2947,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     cancel_all_oco_for_position(pos)
                     if pos.protective_order_id:
                         cancel_order(pos.protective_order_id)
+                        _wait_cancel_confirmed(pos.protective_order_id, timeout=2.0)
                         pos.protective_order_id = None
                     sold = force_sell_position(pos.symbol, pos.remaining_shares)
                     if sold >= pos.remaining_shares:
@@ -3036,12 +3151,11 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 events_log.append(f"{now_est.strftime('%H:%M:%S')} PULLBACK STOP {symbol} -{(dh - dl) / dh:.1%}")
                 # 1.2: Cancel OCO orders before pullback stop exit
                 cancel_all_oco_for_position(pos)
-                # Cancel protective stop first to avoid double-sell — verify cancel succeeded
+                # Cancel protective stop first to avoid double-sell
                 old_order_id = pos.protective_order_id
                 if old_order_id:
                     cancel_order(old_order_id)
-                    if _verify_order_active(old_order_id):
-                        log(f"{YELLOW}PULLBACK STOP: cancel protective stop {old_order_id} FAILED — order still active, may double-sell{RESET}")
+                    _wait_cancel_confirmed(old_order_id, timeout=2.0)
                     pos.protective_order_id = None
                 sold_shares = pos.remaining_shares
                 sold = force_sell_position(symbol, pos.remaining_shares)
@@ -3104,6 +3218,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 cancel_all_oco_for_position(pos)
                 if pos.protective_order_id:
                     cancel_order(pos.protective_order_id)
+                    _wait_cancel_confirmed(pos.protective_order_id, timeout=2.0)
                     pos.protective_order_id = None
                 sold = force_sell_position(pos.symbol, pos.remaining_shares)
                 if sold >= pos.remaining_shares:
@@ -3205,9 +3320,9 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     add_chart_event(pos.symbol, "sell", cur_price, f"TIME LIMIT {pos.remaining_shares}sh")
                     # 1.2: Cancel OCO orders before time limit exit
                     cancel_all_oco_for_position(pos)
-                    # No pending ladder sells to cancel — market sells fill immediately
                     if pos.protective_order_id:
                         cancel_order(pos.protective_order_id)
+                        _wait_cancel_confirmed(pos.protective_order_id, timeout=2.0)
                         pos.protective_order_id = None
                     sold = force_sell_position(pos.symbol, pos.remaining_shares)
                     if sold >= pos.remaining_shares:
@@ -3323,7 +3438,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                                 continue
 
                         elif leg_type == "stop":
-                            # ── OCO stop leg filled: price reversed, tier sold at stop price ──
+                            # ── OCO stop leg filled: tier sold at stop price ──
                             pos.sold_shares_list[ti] = tier_qty
                             pos.remaining_shares -= tier_qty
                             pos.reached_list[ti] = True
@@ -3337,15 +3452,23 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                             add_chart_event(pos.symbol, "sell", fill_price, f"OCO STOP T{ti+1} {tier_qty}sh")
                             record_trade(pos, fill_price, f"oco_stop_t{ti+1}_sell", sold_shares=tier_qty)
 
-                            # DON'T place next OCO — price reversed, trailing stop protects remaining
                             pos.oco_order_ids.remove(oco_entry)
                             if pos.remaining_shares <= 0:
                                 record_trade(pos, fill_price, f"oco_stop_t{ti+1}_exit")
                                 positions.remove(pos)
                                 continue
 
+                            # Place next OCO for next tier (same as after limit fill)
+                            if pos.next_tier_idx < len(pos.targets):
+                                prev_fill = pos.tier_fill_prices[pos.next_tier_idx - 1] if pos.next_tier_idx > 0 and len(pos.tier_fill_prices) > pos.next_tier_idx - 1 else None
+                                oco_result = place_oco_for_next_tier(pos, pos.next_tier_idx, prev_fill_price=prev_fill)
+                                if oco_result:
+                                    need_replace_protective = False
+                                else:
+                                    need_replace_protective = True
+
                 # ── Polling fallback: place OCO if no active one for next tier, and price reached target ──
-                # Handles: OCO stop fill (price reversed, no new OCO), then price recovers
+                # Handles: OCO placement failed, or OCO stop fill + OCO placement failed, then price recovers
                 if OCO_ENABLED and pos.remaining_shares > 0 and pos.targets and pos.next_tier_idx > 0:
                     next_ti = pos.next_tier_idx
                     has_active_oco = any(e["tier_idx"] == next_ti and e.get("leg_filled") is None
@@ -3460,6 +3583,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                         cancel_all_oco_for_position(pos)
                         if pos.protective_order_id:
                             cancel_order(pos.protective_order_id)
+                            _wait_cancel_confirmed(pos.protective_order_id, timeout=2.0)
                             pos.protective_order_id = None
                         sold = force_sell_position(pos.symbol, pos.remaining_shares)
                         if sold >= pos.remaining_shares:
@@ -3586,21 +3710,65 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 if pdt_hit:
                     _pdt_detected = True
                 if order:
-                    pos_data = {
-                        "symbol": symbol, "entry_price": entry_price, "shares": actual_shares,
-                        "stop_price": stop, "open_price": cand["open_price"],
-                        "entry_time": now_est, "atr": atr,
-                        "targets": targets, "sell_ratios": sell_ratios,
-                        "trail_pcts": trail_pcts, "target_mode": target_mode,
-                        "reached_list": [False] * len(targets),
-                        "sold_shares_list": [0] * len(targets),
-                    }
-                    pending_buys[symbol] = (str(order.id), pos_data)
-                    entry_checked.add(symbol)
-                    allocated_this_cycle += actual_shares * entry_price
-                    log(f"BUY MARKET PENDING {symbol}: entry=${entry_price:.4f}, "
-                        f"stop=${stop:.4f}, targets={[round(t, 2) for t in targets]}, mode={target_mode}, shares={actual_shares}")
-                    events_log.append(f"{now_est.strftime('%H:%M:%S')} BUY MARKET {symbol} @ ${entry_price:.4f}")
+                    # place_buy_market已等待确认成交
+                    actual_fill_price = get_order_filled_price(str(order.id)) if not DRY_RUN else entry_price
+                    if actual_fill_price > 0:
+                        # 已确认成交，使用实际成交价直接建仓
+                        entry_price = actual_fill_price
+                        stop = calc_stop_price(entry_price, atr)
+                        targets, sell_ratios, trail_pcts, target_mode = calc_targets(entry_price, cand["open_price"])
+                        log(f"  Recalc after fill: {symbol} entry=${entry_price:.4f} stop=${stop:.4f} mode={target_mode}")
+                        pos_data = {
+                            "symbol": symbol, "entry_price": entry_price, "shares": actual_shares,
+                            "stop_price": stop, "open_price": cand["open_price"],
+                            "entry_time": now_est, "atr": atr,
+                            "targets": targets, "sell_ratios": sell_ratios,
+                            "trail_pcts": trail_pcts, "target_mode": target_mode,
+                            "reached_list": [False] * len(targets),
+                            "sold_shares_list": [0] * len(targets),
+                        }
+                        # 直接建仓+挂protective stop
+                        pos = LivePosition(**pos_data)
+                        positions.append(pos)
+                        entered_symbols.add(symbol)
+                        entry_checked.add(symbol)
+                        allocated_this_cycle += actual_shares * entry_price
+                        ps_result = None
+                        for _ps_attempt in range(3):
+                            ps_result = place_protective_stop(pos)
+                            if ps_result:
+                                log(f"PROTECTIVE STOP placed for all {pos.shares} shares: {pos.symbol} stop=${pos.stop_price:.4f}")
+                                break
+                            log(f"PROTECTIVE STOP retry ({_ps_attempt+1}/3) for {pos.symbol}")
+                            time.sleep(2)
+                        if not ps_result:
+                            if pos.remaining_shares <= 0:
+                                record_trade(pos, pos.stop_price, "emergency_exit")
+                                log(f"EMERGENCY EXIT: {pos.symbol} — protective stop failed, market sold all shares")
+                            else:
+                                log(f"{RED}WARNING: Protective stop FAILED 3/3 for {pos.symbol} — INV-2 will catch next loop{RESET}")
+                        log(f"BUY FILLED: {symbol} {actual_shares}sh @ ${entry_price:.4f} stop=${stop:.4f} targets={[round(t, 2) for t in targets]} mode={target_mode}")
+                        events_log.append(f"{now_est.strftime('%H:%M:%S')} BUY FILLED {symbol} @ ${entry_price:.4f}")
+                        add_chart_event(symbol, "buy", entry_price, f"BUY {actual_shares}sh")
+                        if _stream_state:
+                            _stream_state.update_symbols([symbol])
+                    else:
+                        # 超时未确认，走pending_buys兜底路径
+                        pos_data = {
+                            "symbol": symbol, "entry_price": entry_price, "shares": actual_shares,
+                            "stop_price": stop, "open_price": cand["open_price"],
+                            "entry_time": now_est, "atr": atr,
+                            "targets": targets, "sell_ratios": sell_ratios,
+                            "trail_pcts": trail_pcts, "target_mode": target_mode,
+                            "reached_list": [False] * len(targets),
+                            "sold_shares_list": [0] * len(targets),
+                        }
+                        pending_buys[symbol] = (str(order.id), pos_data)
+                        entry_checked.add(symbol)
+                        allocated_this_cycle += actual_shares * entry_price
+                        log(f"{YELLOW}BUY MARKET PENDING (timeout): {symbol} entry=${entry_price:.4f}, "
+                            f"stop=${stop:.4f}, targets={[round(t, 2) for t in targets]}, mode={target_mode}, shares={actual_shares}{RESET}")
+                        events_log.append(f"{now_est.strftime('%H:%M:%S')} BUY MARKET PENDING {symbol} @ ${entry_price:.4f}")
                 else:
                     # 瞬态错误(rate_limit/network)不永久排除，下一轮可重试
                     if reject_cat in ("rate_limit", "network"):
@@ -3715,7 +3883,13 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 if pdt_hit:
                     _pdt_detected = True
                 if order:
-                    # v1.4: Re-entry uses same 8-tier ladder as first trade
+                    # 使用实际成交价重新计算（place_buy_market已等待确认）
+                    actual_fill_price = get_order_filled_price(str(order.id)) if not DRY_RUN else entry_price
+                    if actual_fill_price > 0 and actual_fill_price != entry_price:
+                        log(f"RE-ENTRY actual fill: {symbol} @ ${actual_fill_price:.4f} (expected ${entry_price:.4f})")
+                        entry_price = actual_fill_price
+                        stop = calc_stop_price(entry_price, atr)
+                    # v1.3: Re-entry uses same 8-tier ladder as first trade
                     # open_price = prev_high (gap = prev_high - entry_price)
                     targets, sell_ratios, trail_pcts, target_mode = calc_targets(entry_price, prev_high)
                     pos = LivePosition(
