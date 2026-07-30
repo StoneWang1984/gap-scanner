@@ -1171,13 +1171,18 @@ def _wait_oco_confirmed(order_id, timeout=5.0, poll_interval=0.5):
         time.sleep(poll_interval)
     log(f"{YELLOW}OCO CONFIRM TIMEOUT: {order_id} not confirmed after {timeout}s{RESET}")
     return False
+
+
+def cancel_all_orders():
+    """Cancel all open orders on the account."""
     if DRY_RUN:
         dry_run_orders.clear()
         return
     try:
         trading_client.cancel_orders()
-    except Exception:
-        pass
+        log("CANCEL ALL ORDERS: all open orders cancelled")
+    except Exception as e:
+        log(f"CANCEL ALL ORDERS error: {e}")
 
 
 def close_all_positions():
