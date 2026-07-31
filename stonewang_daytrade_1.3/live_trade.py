@@ -182,6 +182,12 @@ def analyze_alpaca_rejection(error_msg: str) -> dict:
     elif "market is closed" in msg:
         result = {"category": "market_closed", "action": "skip", "retry": False,
                   "detail": "市场已关闭"}
+    elif "not allowed to short" in msg or ("short" in msg and "not allowed" in msg):
+        result = {"category": "no_position", "action": "clear_position", "retry": False,
+                  "detail": "无仓位可卖(Alpaca已清仓)，清除本地幽灵仓位"}
+    elif "insufficient qty" in msg or "insufficient quantity" in msg:
+        result = {"category": "insufficient_qty", "action": "sync_qty", "retry": True,
+                  "detail": "Alpaca实际股数不足，同步本地股数"}
     elif "connection" in msg or "timeout" in msg or "network" in msg:
         result = {"category": "network", "action": "wait_retry", "retry": True,
                   "detail": "网络问题，5秒后重试"}
@@ -1535,6 +1541,10 @@ def force_sell_position(symbol: str, qty: int, cancel_existing_orders=True, inte
                 log(f"FORCE SELL (market): {symbol} {sell_qty} shares")
                 return sell_qty
     except Exception as e:
+        rejection = analyze_alpaca_rejection(str(e))
+        if rejection["category"] in ("no_position", "market_closed"):
+            log(f"FORCE SELL: {symbol} cannot sell — {rejection['detail']}")
+            return 0
         log(f"market sell failed for {symbol}: {e}")
 
     # Method 3: Cancel all sell orders for this symbol, wait, retry market sell
@@ -1562,7 +1572,7 @@ def force_sell_position(symbol: str, qty: int, cancel_existing_orders=True, inte
             pass
         if current_qty <= 0:
             log(f"FORCE SELL (retry): {symbol} position already closed")
-            return qty
+            return 0
         # FIX: For partial sells, sell only the requested qty; for full sells, sell all
         retry_qty = min(qty, current_qty)
         order = place_sell_market(symbol, retry_qty)
@@ -1589,9 +1599,23 @@ def force_sell_position(symbol: str, qty: int, cancel_existing_orders=True, inte
                         log(f"FORCE SELL (deep discount limit): {symbol} {sell_qty} shares")
                         return sell_qty
     except Exception as e:
+        rejection = analyze_alpaca_rejection(str(e))
+        if rejection["category"] in ("no_position", "market_closed"):
+            log(f"FORCE SELL: {symbol} cannot sell — {rejection['detail']}")
+            return 0
         log(f"Deep discount limit sell also failed for {symbol}: {e}")
 
     if sell_qty > 0:
+        # Final check: verify Alpaca still has position before reporting critical
+        if not DRY_RUN:
+            try:
+                ap = trading_client.get_open_position(symbol)
+                if int(float(ap.qty)) <= 0:
+                    log(f"FORCE SELL: {symbol} Alpaca position already closed (all methods failed but position gone)")
+                    return 0
+            except Exception:
+                log(f"FORCE SELL: {symbol} no Alpaca position found (all methods failed but position gone)")
+                return 0
         log(f"{RED}CRITICAL: ALL 4 force_sell methods failed for {symbol} {sell_qty}sh — manual intervention required!{RESET}")
 
     return 0
@@ -2548,6 +2572,11 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
             try:
                 alpaca_pos = trading_client.get_open_position(pos.symbol)
                 alpaca_qty = int(float(alpaca_pos.qty))
+                # Tolerate <=1 share difference (partial fill rounding)
+                if abs(pos.remaining_shares - alpaca_qty) <= 1:
+                    if pos.remaining_shares != alpaca_qty:
+                        pos.remaining_shares = alpaca_qty  # sync silently
+                    continue
                 if pos.remaining_shares != alpaca_qty:
                     errors.append(f"INV-1 仓位不一致: {pos.symbol} 本地={pos.remaining_shares} Alpaca={alpaca_qty}")
                     fixes.append(("sync_remaining", pos.symbol, alpaca_qty))
@@ -2610,6 +2639,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
             actual_sold = pos.shares - pos.remaining_shares
             if expected_sold != actual_sold and pos.remaining_shares > 0:
                 errors.append(f"INV-5 tier不一致: {pos.symbol} 预期已卖={expected_sold}, 实际={actual_sold}, next_tier={pos.next_tier_idx}")
+                fixes.append(("sync_tier_progress", pos.symbol))
 
         # INV-6: pending_buys和positions不重叠
         pos_symbols = {p.symbol for p in positions if p.remaining_shares > 0}
@@ -2668,9 +2698,23 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     for i in range(new_tier_idx, len(pos.sold_shares_list)):
                         pos.sold_shares_list[i] = 0
                     log(f"  同步tier: next_tier_idx→{new_tier_idx}, sold_shares_list={pos.sold_shares_list}")
+                # Rebuild protective stop to match new qty
+                if pos.remaining_shares > 0:
+                    if pos.protective_order_id:
+                        cancel_order(pos.protective_order_id)
+                        _wait_cancel_confirmed(pos.protective_order_id, timeout=2.0)
+                        pos.protective_order_id = None
+                    replace_stop_for_remaining(pos)
+                    log(f"  重建protective stop for {symbol}")
 
             elif action == "clear_ghost":
                 log(f"  修复INV-1: 清理幽灵仓位 {symbol}, remaining→0")
+                # Cancel all associated orders before clearing
+                cancel_all_oco_for_position(pos)
+                if pos.protective_order_id:
+                    cancel_order(pos.protective_order_id)
+                    _wait_cancel_confirmed(pos.protective_order_id, timeout=2.0)
+                    pos.protective_order_id = None
                 pos.remaining_shares = 0
 
             elif action == "add_stop":
@@ -2710,6 +2754,27 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                 # After canceling OCOs, remaining shares are unprotected — add trailing
                 if pos.remaining_shares > 0:
                     replace_stop_for_remaining(pos)
+
+            elif action == "sync_tier_progress":
+                # INV-5: sold_shares_list与remaining_shares不一致
+                # 重新计算sold_shares_list和next_tier_idx以匹配实际remaining
+                actual_sold = pos.shares - pos.remaining_shares
+                log(f"  修复INV-5: {symbol} 同步tier进度, actual_sold={actual_sold}")
+                if pos.sold_shares_list and pos.trade_type != "reentry":
+                    cumulative = 0
+                    new_tier_idx = 0
+                    for i, s in enumerate(pos.sold_shares_list):
+                        cumulative += s
+                        if cumulative <= actual_sold:
+                            new_tier_idx = i + 1
+                        else:
+                            pos.sold_shares_list[i] = actual_sold - (cumulative - s)
+                            new_tier_idx = i + 1
+                            break
+                    pos.next_tier_idx = new_tier_idx
+                    for i in range(new_tier_idx, len(pos.sold_shares_list)):
+                        pos.sold_shares_list[i] = 0
+                    log(f"  同步tier: next_tier_idx→{new_tier_idx}, sold_shares_list={pos.sold_shares_list}")
 
     _invariant_fixes = []  # 修复指令队列（跨轮传递）
 
@@ -2933,7 +2998,20 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                         record_trade(pos, exit_price, "oco_orphan_sell", sold_shares=orphan_sold)
                         pos.remaining_shares -= orphan_sold
                     if pos.remaining_shares > 0:
-                        log(f"{RED}OCO-ORPHAN: {pos.symbol} still has {pos.remaining_shares} unsold shares!{RESET}")
+                        # Verify Alpaca still has position before flagging error
+                        if not DRY_RUN:
+                            try:
+                                ap = trading_client.get_open_position(pos.symbol)
+                                alpaca_qty = int(float(ap.qty))
+                                if alpaca_qty <= 0:
+                                    log(f"OCO-ORPHAN: {pos.symbol} Alpaca已无仓位，清除本地残留")
+                                else:
+                                    pos.remaining_shares = min(pos.remaining_shares, alpaca_qty)
+                                    log(f"{RED}OCO-ORPHAN: {pos.symbol} Alpaca仍有{alpaca_qty}股，同步本地→{pos.remaining_shares}{RESET}")
+                            except Exception:
+                                log(f"OCO-ORPHAN: {pos.symbol} Alpaca无仓位(查询异常)，清除本地残留")
+                        else:
+                            log(f"{RED}OCO-ORPHAN: {pos.symbol} still has {pos.remaining_shares} unsold shares!{RESET}")
                 pos.remaining_shares = 0
                 positions.remove(pos)
                 continue
