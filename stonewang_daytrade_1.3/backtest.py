@@ -174,7 +174,7 @@ def get_1min_bars(client, symbol, date) -> pd.DataFrame:
 
 
 def find_entry_with_confirmation_1min(bars_1m, open_price):
-    """1分钟K线折返点检测 — 3根确认bar + 至少1根阳线（与实盘check_entry_1min一致）。"""
+    """1分钟K线折返点检测 — 锤子线/1-2根确认bar，1-2分钟内确认。返回确认bar的close。"""
     if bars_1m.empty or len(bars_1m) < 2:
         return 0, -1, False
     pullback_idx = -1
@@ -188,25 +188,63 @@ def find_entry_with_confirmation_1min(bars_1m, open_price):
         return 0, -1, False
     if not config.ENTRY_CONFIRMATION:
         return pullback_price, pullback_idx, True
+
+    # 第一层：底部bar本身就是锤子线 → 1分钟确认
+    def _is_hammer(idx):
+        b = bars_1m.iloc[idx]
+        b_open = b["open"]
+        b_high = b["high"]
+        b_low = b["low"]
+        b_close = b["close"]
+        bar_range = b_high - b_low
+        if bar_range < 0.001:
+            bar_range = 0.001
+        return (b_low < open_price and
+                b_close > b_open and
+                (b_close - b_low) / bar_range >= 0.6 and
+                (b_close - b_open) / b_open >= 0.005 and
+                (b_close - b_low) / b_low >= 0.01)
+
+    if _is_hammer(pullback_idx):
+        return pullback_price, pullback_idx, True
+
+    # 第二层/第三层：等1-2根确认bar
     confirm_count = 0
     bullish_count = 0
+    last_confirm_idx = -1
     for i in range(pullback_idx + 1, len(bars_1m)):
         bar_low = bars_1m.iloc[i]["low"]
         bar_close = bars_1m.iloc[i]["close"]
         bar_open = bars_1m.iloc[i]["open"]
+
+        # 更深底部 → 重置
         if bar_low < open_price and bar_low < pullback_price:
             pullback_idx = i
             pullback_price = bar_low
             confirm_count = 0
             bullish_count = 0
+            last_confirm_idx = -1
+            if _is_hammer(i):
+                return pullback_price, i, True
             continue
+
         if bar_low <= pullback_price or bar_close <= pullback_price:
             continue
+
         confirm_count += 1
+        last_confirm_idx = i
         if bar_close > bar_open:
             bullish_count += 1
-        if confirm_count >= 3 and bullish_count >= 1:
-            return pullback_price, pullback_idx, True
+
+        # 第二层：1根确认bar（需阳线+实体>=0.3%）
+        if confirm_count == 1 and bullish_count == 1:
+            if (bar_close - bar_open) / bar_open >= 0.003:
+                return pullback_price, i, True
+
+        # 第三层：2根确认bar（至少1根阳线）
+        if confirm_count >= 2 and bullish_count >= 1:
+            return pullback_price, last_confirm_idx, True
+
     return 0, -1, False
 
 
@@ -463,8 +501,12 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
                 bars_for_atr.append({"high": b["high"], "low": b["low"], "close": b["close"]})
             atr = calc_atr(bars_for_atr, period=14)
 
-            # ── Entry slippage model: market buy fills at ask, not bar low ──
-            entry_slippage = getattr(config, "SLIPPAGE_ENTRY_PCT", 0.005)
+            # ── Entry slippage model: dynamic based on gap size ──
+            gap_pct = (open_price - pullback) / open_price if open_price > 0 else 0
+            slippage_base = getattr(config, "SLIPPAGE_ENTRY_BASE", 0.01)
+            slippage_gap_factor = getattr(config, "SLIPPAGE_ENTRY_GAP_FACTOR", 0.15)
+            slippage_max = getattr(config, "SLIPPAGE_ENTRY_MAX", 0.05)
+            entry_slippage = min(slippage_max, slippage_base + gap_pct * slippage_gap_factor)
             entry_price_actual = round(pullback * (1 + entry_slippage), 2)
 
             stop_price = calc_stop_price(entry_price_actual, atr)

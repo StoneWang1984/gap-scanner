@@ -101,8 +101,8 @@ from strategy import (
 )
 
 # ── 0.4.10 Parameters ────────────────────────────────────────────────
-ENTRY_LIMIT_BUFFER = getattr(config, "ENTRY_LIMIT_BUFFER", 0.005)
-MAX_ENTRY_SLIPPAGE = getattr(config, "MAX_ENTRY_SLIPPAGE", 0.10)  # skip buy if ask > entry × (1 + this)
+ENTRY_LIMIT_BUFFER = getattr(config, "ENTRY_LIMIT_BUFFER", 0.01)
+MAX_ENTRY_SLIPPAGE = getattr(config, "MAX_ENTRY_SLIPPAGE", 0.04)  # skip buy if ask > entry × (1 + this)
 STOP_LIMIT_BUFFER = getattr(config, "STOP_LIMIT_BUFFER", 0.03)
 FORCE_CLOSE_LIMIT_TIMEOUT = getattr(config, "FORCE_CLOSE_LIMIT_TIMEOUT", 120)
 TARGET_LIMIT_BUFFER = 0.003
@@ -930,6 +930,57 @@ def place_buy_market(symbol, shares):
             if not analysis["retry"] or attempt >= 2:
                 return None, False, shares, last_reject
     return None, False, shares, last_reject
+
+
+def place_buy_limit(symbol, shares, limit_price, timeout=10):
+    """限价买入 — limit_price = entry_price * (1 + ENTRY_LIMIT_BUFFER)
+    等待timeout秒成交，超时则取消并回退市价单。
+    Returns (order, pdt_flag, actual_shares, reject_category) — 与place_buy_market相同签名
+    """
+    if DRY_RUN:
+        oid = f"DRY-BL-{uuid4().hex[:8]}"
+        price = _dry_run_get_price(symbol) or 0
+        fill_price = round(min(price * (1 + ENTRY_LIMIT_BUFFER), limit_price), 2) if price else 0
+        mock = MockOrder(id=oid, symbol=symbol, qty=shares, side="buy",
+                         order_type="limit", limit_price=limit_price, stop_price=None, trail_percent=None,
+                         status="filled", filled_qty=shares, filled_price=fill_price)
+        dry_run_orders[oid] = mock
+        log(f"[DRY] BUY LIMIT {symbol} {shares} @ ${limit_price:.2f} -> {oid} (filled @ ${fill_price:.2f})")
+        return mock, False, shares, None
+
+    # 提交限价买单
+    try:
+        order = trading_client.submit_order(LimitOrderRequest(
+            symbol=symbol, qty=shares, side=OrderSide.BUY,
+            time_in_force=TimeInForce.DAY, limit_price=round(limit_price, 2),
+        ))
+        log(f"BUY LIMIT {symbol} {shares} @ ${limit_price:.2f} -> order {order.id}")
+    except Exception as e:
+        analysis = analyze_alpaca_rejection(e)
+        log(f"BUY LIMIT REJECTED {symbol}: {analysis['detail']} — falling back to market order")
+        if analysis["category"] == "pdt":
+            return None, True, shares, "pdt"
+        # 限价单被拒，直接回退市价单
+        return place_buy_market(symbol, shares)
+
+    # 等待成交
+    filled = _wait_order_filled(str(order.id), timeout=timeout)
+    if filled:
+        filled_qty = get_order_filled_qty(str(order.id))
+        actual_fill_price = get_order_filled_price(str(order.id))
+        actual_shares = filled_qty if filled_qty > 0 else shares
+        log(f"BUY LIMIT FILLED: {symbol} {actual_shares}sh @ ${actual_fill_price:.4f}")
+        return order, False, actual_shares, None
+
+    # 超时未成交 — 取消限价单，回退市价单
+    log(f"{YELLOW}BUY LIMIT TIMEOUT: {symbol} not filled in {timeout}s — cancel and fallback to market{RESET}")
+    try:
+        cancel_order(str(order.id))
+        _wait_cancel_confirmed(str(order.id), timeout=3.0)
+    except Exception:
+        log(f"  Warning: failed to cancel limit order {order.id}, proceeding with market order anyway")
+
+    return place_buy_market(symbol, shares)
 
 
 def place_sell_limit(symbol, shares, price):
@@ -1873,8 +1924,24 @@ def replace_stop_for_remaining(pos: LivePosition) -> str | None:
 
 
 # ── Entry detection ────────────────────────────────────────────────
+def _is_hammer_bar(bar, open_price):
+    """判断一根bar是否是锤子线（探底+反弹合一）。"""
+    b_open = bar.get("open", bar.get("open_price", 0.0))
+    b_high = bar["high"]
+    b_low = bar["low"]
+    b_close = bar["close"]
+    bar_range = b_high - b_low
+    if bar_range < 0.001:
+        bar_range = 0.001
+    return (b_low < open_price and                       # 探底
+            b_close > b_open and                         # 阳线
+            (b_close - b_low) / bar_range >= 0.6 and     # 收盘在上半部
+            (b_close - b_open) / b_open >= 0.005 and      # 实体至少0.5%
+            (b_close - b_low) / b_low >= 0.01)            # 从低到收盘至少1%反弹
+
+
 def check_entry_1min(symbol, open_price, accumulator):
-    """1分钟K线折返点检测 — 3根确认bar（low > bottom + close > bottom + 至少1根阳线）。"""
+    """1分钟K线折返点检测 — 锤子线(1min)/1-2根确认bar(2-3min)，返回底部low。"""
     bars = accumulator.get_1min_bars(symbol)
     if len(bars) < 2:
         return 0, False
@@ -1889,51 +1956,68 @@ def check_entry_1min(symbol, open_price, accumulator):
         return 0, False
     if not config.ENTRY_CONFIRMATION:
         return pullback_price, True
+
+    # 第一层：底部bar本身就是锤子线 → 1分钟确认
+    if _is_hammer_bar(bars[pullback_idx], open_price):
+        return pullback_price, True
+
+    # 第二层/第三层：等1-2根确认bar
     confirm_count = 0
     bullish_count = 0
+    last_confirm_close = 0.0
     for i in range(pullback_idx + 1, len(bars)):
         bar = bars[i]
         bar_low = bar["low"]
         bar_close = bar["close"]
         bar_open = bar.get("open", bar.get("open_price", 0.0))
-        # New deeper bottom resets confirmation
+
+        # 更深底部 → 重置，检查新底部是否是锤子线
         if bar_low < open_price and bar_low < pullback_price:
             pullback_idx = i
             pullback_price = bar_low
             confirm_count = 0
             bullish_count = 0
+            last_confirm_close = 0.0
+            if _is_hammer_bar(bar, open_price):
+                return pullback_price, True
             continue
-        # Skip bars still touching/exceeding bottom (low <= bottom or close <= bottom)
+
+        # 还在底部区域 → 跳过
         if bar_low <= pullback_price or bar_close <= pullback_price:
             continue
-        # This bar is a valid confirmation: low > bottom AND close > bottom
+
+        # 有效确认bar
         confirm_count += 1
-        # Track bullish bars (close > open) — signals real reversal momentum
+        last_confirm_close = bar_close
         if bar_close > bar_open:
             bullish_count += 1
-        if confirm_count >= 3 and bullish_count >= 1:
+
+        # 第二层：1根确认bar（需阳线+实体>=0.3%）
+        if confirm_count == 1 and bullish_count == 1:
+            if (bar_close - bar_open) / bar_open >= 0.003:
+                return pullback_price, True
+
+        # 第三层：2根确认bar（至少1根阳线）
+        if confirm_count >= 2 and bullish_count >= 1:
             return pullback_price, True
-    # Not enough confirmation bars yet — wait for more data
+
     return 0, False
 
 
 def check_reentry_1min(symbol, open_price, accumulator, min_pullback=0.04):
-    """1分钟K线re-entry检测 — recent peak后pullback+3根确认bar
-    Uses last 60 bars (1 hour window) for peak detection, not global peak."""
+    """1分钟K线re-entry检测 — 锤子线/1-2根确认bar，1-2分钟内确认。
+    Uses last 60 bars (1 hour window) for peak detection."""
     bars = accumulator.get_1min_bars(symbol)
     if len(bars) < 5:
         return 0, 0, False
-    # Use recent window (last 60 bars ≈ 1 hour) instead of global peak
     recent = bars[-60:] if len(bars) >= 60 else bars
-    # Stock must have recovered at least 3% from open
     peak = max(b["high"] for b in recent)
     if peak < open_price * 1.03:
         return 0, 0, False
-    # Find peak bar index within the recent window
     peak_idx = max(range(len(recent)), key=lambda i: recent[i]["high"])
-    # Pullback threshold: peak * (1 - min_pullback)
     pb_threshold = peak * (1 - min_pullback)
-    # Find pullback start (first bar below threshold AFTER peak)
+
+    # 找底部bar
     pullback_idx = -1
     pullback_price = 0.0
     for i in range(peak_idx + 1, len(recent)):
@@ -1943,27 +2027,73 @@ def check_reentry_1min(symbol, open_price, accumulator, min_pullback=0.04):
             break
     if pullback_idx < 0:
         return 0, 0, False
-    # Confirm bottom (3 bars: low > bottom + close > bottom + 1 bullish)
+
+    # 第一层：底部bar是锤子线 → 1分钟确认
+    bottom = recent[pullback_idx]
+    b_open = bottom.get("open", bottom.get("open_price", 0.0))
+    b_high = bottom["high"]
+    b_low = bottom["low"]
+    b_close = bottom["close"]
+    bar_range = b_high - b_low
+    if bar_range < 0.001:
+        bar_range = 0.001
+    if (b_low < pb_threshold and
+        b_close > b_open and
+        (b_close - b_low) / bar_range >= 0.6 and
+        (b_close - b_open) / b_open >= 0.005 and
+        (b_close - b_low) / b_low >= 0.01):
+        return pullback_price, peak, True
+
+    # 第二层/第三层：等1-2根确认bar
     confirm_count = 0
     bullish_count = 0
+    last_confirm_close = 0.0
     for i in range(pullback_idx + 1, len(recent)):
         bar = recent[i]
         bar_low = bar["low"]
         bar_close = bar["close"]
         bar_open = bar.get("open", bar.get("open_price", 0.0))
+
+        # 更深底部 → 重置
         if bar_low < pb_threshold and bar_low < pullback_price:
             pullback_idx = i
             pullback_price = bar_low
             confirm_count = 0
             bullish_count = 0
+            last_confirm_close = 0.0
+            # 重新检查新底部是否是锤子线
+            b_high = bar["high"]
+            b_open = bar_open
+            b_low = bar_low
+            b_close = bar_close
+            bar_range = b_high - b_low
+            if bar_range < 0.001:
+                bar_range = 0.001
+            if (b_low < pb_threshold and
+                b_close > b_open and
+                (b_close - b_low) / bar_range >= 0.6 and
+                (b_close - b_open) / b_open >= 0.005 and
+                (b_close - b_low) / b_low >= 0.01):
+                return pullback_price, peak, True
             continue
+
         if bar_low <= pullback_price or bar_close <= pullback_price:
             continue
+
         confirm_count += 1
+        last_confirm_close = bar_close
         if bar_close > bar_open:
             bullish_count += 1
-        if confirm_count >= 3 and bullish_count >= 1:
+
+        # 第二层：1根确认bar
+        if confirm_count == 1 and bullish_count == 1:
+            if (bar_close - bar_open) / bar_open >= 0.003:
+                return pullback_price, peak, True
+
+        # 第三层：2根确认bar
+        if confirm_count >= 2 and bullish_count >= 1:
             return pullback_price, peak, True
+
     return 0, 0, False
 
 

@@ -153,6 +153,9 @@ BACKTEST_DAYS = 180
 
 # ── Slippage model ───────────────────────────────────────────────────
 SLIPPAGE_ENTRY_PCT = 0.005
+SLIPPAGE_ENTRY_BASE = 0.01        # 动态滑点基础值1%
+SLIPPAGE_ENTRY_GAP_FACTOR = 0.15  # gap每1%增加0.15%滑点
+SLIPPAGE_ENTRY_MAX = 0.05         # 动态滑点上限5%
 SLIPPAGE_STOP_PCT = 0.02
 SLIPPAGE_TRAILING_PCT = 0.01
 SLIPPAGE_TARGET_PCT = 0.003
@@ -160,8 +163,8 @@ SLIPPAGE_FORCE_CLOSE_PCT = 0.01
 SLIPPAGE_REENTRY_STOP_PCT = 0.025
 
 # ── Live trading order parameters ────────────────────────────────────
-ENTRY_LIMIT_BUFFER = 0.005
-MAX_ENTRY_SLIPPAGE = 0.10  # reject buy if ask > entry_price × (1 + this); 0 = no check
+ENTRY_LIMIT_BUFFER = 0.01   # 限价单buffer: 1%高于entry_price，cap滑点
+MAX_ENTRY_SLIPPAGE = 0.04  # reject buy if ask > entry_price × (1 + this); 0 = no check
 STOP_LIMIT_BUFFER = 0.03
 FORCE_CLOSE_LIMIT_TIMEOUT = 120
 
