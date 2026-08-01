@@ -173,6 +173,12 @@ def analyze_alpaca_rejection(error_msg: str) -> dict:
     elif "stop price too close" in msg or "stop_price must be" in msg:
         result = {"category": "stop_distance", "action": "increase_buffer", "retry": True,
                   "detail": "止损距离太近，增大缓冲"}
+    elif "limit_price must be" in msg and "stop_price" in msg:
+        result = {"category": "oco_invalid", "action": "adjust_params", "retry": True,
+                  "detail": "OCO limit_price<=stop_price，自动调整参数重试"}
+    elif "oco orders must be exit orders" in msg:
+        result = {"category": "oco_structure", "action": "cancel_existing", "retry": True,
+                  "detail": "OCO结构错误(oco orders must be exit orders)，取消已有订单重试"}
     elif "429" in msg or "rate limit" in msg or "too many requests" in msg:
         result = {"category": "rate_limit", "action": "wait_retry", "retry": True,
                   "detail": "API限频，5秒后重试"}
@@ -1206,7 +1212,7 @@ def _wait_cancel_confirmed(order_id, timeout=2.0, poll_interval=0.3):
     return False
 
 
-def _wait_oco_confirmed(order_id, timeout=5.0, poll_interval=0.5):
+def _wait_oco_confirmed(order_id, timeout=10.0, poll_interval=0.5):
     """等待Alpaca确认OCO订单已接受（status=new/held）。
     Returns True if order is confirmed accepted.
     Returns False if timeout or order is rejected/canceled."""
@@ -1284,12 +1290,12 @@ def place_oco_sell(symbol, shares, target_price, stop_price, stop_limit_price):
                                           limit_price=round(stop_limit_price, 2)),
             ))
             # Wait for Alpaca to confirm the order is accepted
-            confirmed = _wait_oco_confirmed(str(order.id), timeout=5.0)
+            confirmed = _wait_oco_confirmed(str(order.id), timeout=10.0)
             if confirmed:
                 log(f"OCO SELL {symbol} {shares} limit=${target_price:.2f} stop=${stop_price:.2f} stop_limit=${stop_limit_price:.2f} -> order {order.id} CONFIRMED")
                 return order
             else:
-                log(f"{YELLOW}OCO SELL {symbol} order {order.id} not confirmed after 5s — treating as failed{RESET}")
+                log(f"{YELLOW}OCO SELL {symbol} order {order.id} not confirmed after 10s — treating as failed{RESET}")
                 # Try to cancel the unconfirmed order to free shares
                 try:
                     trading_client.cancel_order_by_id(order.id)
@@ -1308,6 +1314,25 @@ def place_oco_sell(symbol, shares, target_price, stop_price, stop_limit_price):
                 stop_price = round(stop_price * (1 - buffer_increase), 2)
                 stop_limit_price = round(stop_price * 0.99, 2)
                 log(f"  OCO stop buffer increase: stop=${stop_price:.2f} stop_limit=${stop_limit_price:.2f}")
+                continue
+            if analysis["category"] == "oco_invalid" and attempt < 2:
+                # limit_price <= stop_price, adjust stop down
+                stop_price = round(target_price - 0.01, 2)
+                stop_limit_price = round(stop_price * 0.99, 2)
+                log(f"  OCO price fix: stop→${stop_price:.2f} stop_limit→${stop_limit_price:.2f}")
+                continue
+            if analysis["category"] == "oco_structure" and attempt < 2:
+                # OCO structure error — cancel existing orders and retry
+                log(f"  OCO structure error: cancel existing sell orders for {symbol} and retry")
+                try:
+                    open_orders = trading_client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol]))
+                    for o in open_orders:
+                        if o.side == OrderSide.SELL:
+                            cancel_order(str(o.id))
+                            _wait_cancel_confirmed(str(o.id), timeout=2.0)
+                except Exception:
+                    pass
+                time.sleep(1)
                 continue
             if analysis["category"] in ("rate_limit", "network") and attempt < 2:
                 time.sleep(5)
@@ -1441,6 +1466,14 @@ def place_oco_for_next_tier(pos, tier_idx, prev_fill_price=None):
     stop_price = max(stop_price, 0.01)
     stop_limit_price = max(stop_limit_price, 0.01)
 
+    # Ensure target_price > stop_price, otherwise Alpaca rejects OCO
+    if target_price <= stop_price:
+        log(f"  OCO T{tier_idx+1}: target ${target_price:.2f} <= stop ${stop_price:.2f}, adjusting stop down")
+        stop_price = round(target_price - 0.01, 2)
+        stop_limit_price = round(stop_price * 0.99, 2)
+        stop_price = max(stop_price, 0.01)
+        stop_limit_price = max(stop_limit_price, 0.01)
+
     # Cancel current trailing/protective stop first (to unlock shares for OCO + new trailing)
     if pos.protective_order_id:
         cancel_order(pos.protective_order_id)
@@ -1453,6 +1486,16 @@ def place_oco_for_next_tier(pos, tier_idx, prev_fill_price=None):
     if not oco_order:
         # OCO failed — fallback to v1.1 mode (trailing stop only)
         log(f"{YELLOW}OCO T{tier_idx+1} FAILED for {pos.symbol} — falling back to v1.1 trailing-only mode{RESET}")
+        # Sync Alpaca shares before placing trailing stop
+        if not DRY_RUN:
+            try:
+                ap = trading_client.get_open_position(pos.symbol)
+                actual_qty = int(float(ap.qty))
+                if actual_qty != pos.remaining_shares:
+                    log(f"  OCO fallback sync: {pos.symbol} local={pos.remaining_shares} Alpaca={actual_qty}")
+                    pos.remaining_shares = actual_qty
+            except Exception:
+                pos.remaining_shares = 0
         # Re-place trailing stop for all remaining shares
         if pos.remaining_shares > 0:
             current_trail_pct = pos.trail_pcts[min(tier_idx - 1, len(pos.trail_pcts) - 1)] if tier_idx > 0 else pos.trail_pcts[0]
@@ -1854,6 +1897,21 @@ def replace_with_trailing_stop(pos: LivePosition, trail_pct: float) -> str | Non
     Returns order_id if successful, None if failed.
     If pos.remaining_shares == 0 after call, emergency exit occurred — caller must handle cleanup."""
     old_order_id = pos.protective_order_id
+
+    # Sync Alpaca actual shares before placing new order
+    if not DRY_RUN:
+        try:
+            ap = trading_client.get_open_position(pos.symbol)
+            actual_qty = int(float(ap.qty))
+            if actual_qty != pos.remaining_shares:
+                log(f"  trailing sync: {pos.symbol} local={pos.remaining_shares} Alpaca={actual_qty}")
+                pos.remaining_shares = actual_qty
+        except Exception:
+            log(f"  trailing sync: {pos.symbol} Alpaca无仓位，跳过trailing")
+            pos.remaining_shares = 0
+            return None
+    if pos.remaining_shares <= 0:
+        return None
 
     # Alpaca锁仓: 旧卖单锁定股份，新卖单无法覆盖同一批股份
     # 必须先取消旧单释放股份，才能挂新单（有0.3-2秒裸仓窗口，不可避免）
@@ -3172,8 +3230,24 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                         log(f"STOP MARKET SELL PARTIAL: {pos.symbol} {sold} sold, {pos.remaining_shares} remain — re-placing stop")
                         replace_stop_for_remaining(pos)
                     else:
-                        log(f"{RED}STOP MARKET SELL FAILED: {pos.symbol} — re-placing protective stop{RESET}")
-                        replace_stop_for_remaining(pos)
+                        # force_sell returned 0 — check if Alpaca already closed position
+                        alpaca_gone = False
+                        if not DRY_RUN:
+                            try:
+                                ap = trading_client.get_open_position(pos.symbol)
+                                if int(float(ap.qty)) <= 0:
+                                    alpaca_gone = True
+                            except Exception:
+                                alpaca_gone = True
+                        if alpaca_gone:
+                            log(f"STOP SELL FAILED but Alpaca position gone: {pos.symbol} — clearing local state")
+                            cancel_all_oco_for_position(pos)
+                            pos.remaining_shares = 0
+                            record_trade(pos, pos.stop_price, "stop_triggered_market_sell")
+                            positions.remove(pos)
+                        else:
+                            log(f"{RED}STOP MARKET SELL FAILED: {pos.symbol} — re-placing protective stop{RESET}")
+                            replace_stop_for_remaining(pos)
                     continue
 
         # Filter out closed positions to prevent double-sell race condition
