@@ -409,22 +409,35 @@ def cancel_order(order_id: str) -> bool:
 
 
 # ── Entry detection: 3-bar confirmation (from stonewang 1.2) ──
-def check_entry_1min(symbol, open_price, accumulator):
-    """3-bar pullback confirmation: bottom bar + 3 confirm bars (low>bottom, close>bottom, >=1 bullish)."""
+def check_entry_1min(symbol, open_price, accumulator, is_reentry=False):
+    """3-bar pullback confirmation: bottom bar + 3 confirm bars (low>bottom, close>bottom, >=1 bullish).
+    is_reentry=True: find any local pullback (not necessarily below open_price)."""
     bars = accumulator.get_1min_bars(symbol)
     if len(bars) < 4:
         return 0, False
 
-    # Find first bar where low < open_price (the pullback)
-    pullback_idx = -1
-    pullback_price = 0.0
-    for i in range(len(bars)):
-        if bars[i]["low"] < open_price:
-            pullback_idx = i
-            pullback_price = bars[i]["low"]
-            break
-    if pullback_idx < 0:
-        return 0, False
+    if is_reentry:
+        # Re-entry: find local pullback (lowest point in recent bars)
+        pullback_idx = 0
+        pullback_price = bars[0]["low"]
+        for i in range(1, len(bars)):
+            if bars[i]["low"] < pullback_price:
+                pullback_idx = i
+                pullback_price = bars[i]["low"]
+        # No pullback if all bars same low
+        if pullback_idx >= len(bars) - 3:
+            return 0, False
+    else:
+        # First entry: must break below open_price
+        pullback_idx = -1
+        pullback_price = 0.0
+        for i in range(len(bars)):
+            if bars[i]["low"] < open_price:
+                pullback_idx = i
+                pullback_price = bars[i]["low"]
+                break
+        if pullback_idx < 0:
+            return 0, False
 
     if not config.ENTRY_CONFIRMATION:
         return pullback_price, True
@@ -438,13 +451,22 @@ def check_entry_1min(symbol, open_price, accumulator):
         bar_close = bar["close"]
         bar_open = bar.get("open", 0.0)
 
-        # Deeper bottom → reset
-        if bar_low < open_price and bar_low < pullback_price:
-            pullback_idx = i
-            pullback_price = bar_low
-            confirm_count = 0
-            bullish_count = 0
-            continue
+        if is_reentry:
+            # Deeper local bottom → reset
+            if bar_low < pullback_price:
+                pullback_idx = i
+                pullback_price = bar_low
+                confirm_count = 0
+                bullish_count = 0
+                continue
+        else:
+            # Deeper bottom below open_price → reset
+            if bar_low < open_price and bar_low < pullback_price:
+                pullback_idx = i
+                pullback_price = bar_low
+                confirm_count = 0
+                bullish_count = 0
+                continue
 
         # Still in bottom zone → skip
         if bar_low <= pullback_price or bar_close <= pullback_price:
@@ -761,6 +783,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str, today_info:
     trades_detail = []
     candidates = []
     entry_checked = set()
+    tp_exited_syms = set()  # symbols that exited via take_profit (eligible for re-entry with relaxed pullback)
     accumulator = BarAccumulator()
     day_highs = {}
 
@@ -913,6 +936,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str, today_info:
                 if leg == "take_profit":
                     pnl = (fill_price - pos.entry_price) * pos.shares
                     log(f"{GREEN}TAKE PROFIT: {pos.symbol} {pos.shares}sh @ ${fill_price:.4f} P&L ${pnl:.2f}{RESET}")
+                    tp_exited_syms.add(pos.symbol)
                     trades_detail.append({
                         "symbol": pos.symbol, "entry": pos.entry_price,
                         "exit": fill_price, "shares": pos.shares,
@@ -974,7 +998,8 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str, today_info:
                 last_rescan_idx += 1
 
         # ── Check new entries ──
-        if entry_start <= now_time <= entry_end:
+        in_entry_window = entry_start <= now_time <= entry_end
+        if in_entry_window or tp_exited_syms:
             n_open = len(positions)
             available_slots = MAX_POSITIONS - n_open
             if available_slots > 0:
@@ -987,8 +1012,13 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str, today_info:
                     if available_slots <= 0:
                         break
 
+                    is_reentry = sym in tp_exited_syms
+                    # Outside entry window: only check re-entries
+                    if not in_entry_window and not is_reentry:
+                        continue
+
                     # Check pullback entry
-                    pullback_price, confirmed = check_entry_1min(sym, c["open_price"], accumulator)
+                    pullback_price, confirmed = check_entry_1min(sym, c["open_price"], accumulator, is_reentry=is_reentry)
                     if not confirmed:
                         continue
 
@@ -1051,17 +1081,20 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str, today_info:
                         continue
 
                     # Track position
+                    trade_type = "reentry" if is_reentry else "first"
                     pos = Position(
                         symbol=sym, shares=actual_shares, entry_price=fill_price,
                         stop_price=stop_price, target_price=target_price,
                         oco_order_id=oco_id, entry_time=now_est,
-                        gap_pct=c["gap_pct"], trade_type="first",
+                        gap_pct=c["gap_pct"], trade_type=trade_type,
                     )
                     positions.append(pos)
                     daily_trades += 1
                     available_slots -= 1
                     entry_checked.add(sym)
-                    log(f"{GREEN}ENTERED: {sym} {actual_shares}sh @ ${fill_price:.4f} stop=${stop_price:.2f} target=${target_price:.2f} (gap {c['gap_pct']:.1%}){RESET}")
+                    tp_exited_syms.discard(sym)
+                    reentry_tag = " (RE-ENTRY)" if is_reentry else ""
+                    log(f"{GREEN}ENTERED: {sym} {actual_shares}sh @ ${fill_price:.4f} stop=${stop_price:.2f} target=${target_price:.2f} (gap {c['gap_pct']:.1%}){reentry_tag}{RESET}")
 
         # ── Update day highs ──
         if positions:
@@ -1116,23 +1149,30 @@ def get_next_trading_day():
     """Get next trading day info from Alpaca calendar."""
     try:
         now_est = dt.datetime.now(tz=ZoneInfo("America/New_York"))
+        from alpaca.trading.requests import GetCalendarRequest
         calendar = trading_client.get_calendar(
-            start=now_est.strftime("%Y-%m-%d"),
-            end=(now_est + dt.timedelta(days=7)).strftime("%Y-%m-%d"),
+            GetCalendarRequest(
+                start=now_est.strftime("%Y-%m-%d"),
+                end=(now_est + dt.timedelta(days=7)).strftime("%Y-%m-%d"),
+            )
         )
         for day in calendar:
             day_date = day.date
             if hasattr(day_date, 'to_pydatetime'):
                 day_date = day_date.to_pydatetime()
+            if hasattr(day_date, 'date'):
+                day_date_val = day_date.date()
+            else:
+                day_date_val = day_date
             close_time = day.close
             if hasattr(close_time, 'to_pytime'):
                 close_time = close_time.to_pytime()
             open_time = day.open
             if hasattr(open_time, 'to_pytime'):
                 open_time = open_time.to_pytime()
-            if day_date.date() >= now_est.date():
+            if day_date_val >= now_est.date():
                 return {
-                    "date": day_date,
+                    "date": day_date_val,
                     "open": open_time,
                     "close": close_time,
                 }
@@ -1187,7 +1227,7 @@ def main():
 
         now_est = dt.datetime.now(tz=ZoneInfo("America/New_York"))
         day_date = next_day["date"]
-        if hasattr(day_date, 'date'):
+        if hasattr(day_date, 'date') and callable(day_date.date):
             target_date = day_date.date()
         else:
             target_date = day_date
@@ -1216,7 +1256,7 @@ def main():
         next_day2 = get_next_trading_day()
         if next_day2:
             nd = next_day2["date"]
-            if hasattr(nd, 'date'):
+            if hasattr(nd, 'date') and callable(nd.date):
                 next_date = nd.date()
             else:
                 next_date = nd

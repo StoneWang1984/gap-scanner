@@ -168,20 +168,32 @@ def get_5min_bars(client, symbol, date):
 
 
 # ── Entry detection: 3-bar confirmation ──
-def find_entry_3bar(bars_1m, open_price):
-    """3-bar pullback: bottom bar (low < open) + 3 confirm bars (low>bottom, close>bottom, >=1 bullish)."""
+def find_entry_3bar(bars_1m, open_price, is_reentry=False):
+    """3-bar pullback: bottom bar (low < open) + 3 confirm bars (low>bottom, close>bottom, >=1 bullish).
+    is_reentry=True: find any local pullback (not necessarily below open_price)."""
     if bars_1m.empty or len(bars_1m) < 4:
         return 0, -1, False
 
-    pullback_idx = -1
-    pullback_price = 0.0
-    for i in range(len(bars_1m)):
-        if bars_1m.iloc[i]["low"] < open_price:
-            pullback_idx = i
-            pullback_price = bars_1m.iloc[i]["low"]
-            break
-    if pullback_idx < 0:
-        return 0, -1, False
+    if is_reentry:
+        pullback_idx = 0
+        pullback_price = bars_1m.iloc[0]["low"]
+        for i in range(1, len(bars_1m)):
+            if bars_1m.iloc[i]["low"] < pullback_price:
+                pullback_idx = i
+                pullback_price = bars_1m.iloc[i]["low"]
+        if pullback_idx >= len(bars_1m) - 3:
+            return 0, -1, False
+    else:
+        pullback_idx = -1
+        pullback_price = 0.0
+        for i in range(len(bars_1m)):
+            if bars_1m.iloc[i]["low"] < open_price:
+                pullback_idx = i
+                pullback_price = bars_1m.iloc[i]["low"]
+                break
+        if pullback_idx < 0:
+            return 0, -1, False
+
     if not config.ENTRY_CONFIRMATION:
         return pullback_price, pullback_idx, True
 
@@ -193,13 +205,22 @@ def find_entry_3bar(bars_1m, open_price):
         bar_close = bars_1m.iloc[i]["close"]
         bar_open = bars_1m.iloc[i]["open"]
 
-        if bar_low < open_price and bar_low < pullback_price:
-            pullback_idx = i
-            pullback_price = bar_low
-            confirm_count = 0
-            bullish_count = 0
-            last_confirm_idx = -1
-            continue
+        if is_reentry:
+            if bar_low < pullback_price:
+                pullback_idx = i
+                pullback_price = bar_low
+                confirm_count = 0
+                bullish_count = 0
+                last_confirm_idx = -1
+                continue
+        else:
+            if bar_low < open_price and bar_low < pullback_price:
+                pullback_idx = i
+                pullback_price = bar_low
+                confirm_count = 0
+                bullish_count = 0
+                last_confirm_idx = -1
+                continue
 
         if bar_low <= pullback_price or bar_close <= pullback_price:
             continue
@@ -313,6 +334,7 @@ def run_backtest(end_date=None, n_days=30):
         daily_loss_limit = equity * config.MAX_DAILY_LOSS_PCT
         active_positions = 0
         entry_checked = set()
+        tp_exited_syms = set()  # symbols that exited via take_profit (eligible for re-entry with local pullback)
 
         for _, row in candidates.iterrows():
             if active_positions >= max_positions:
@@ -332,12 +354,13 @@ def run_backtest(end_date=None, n_days=30):
             # Entry detection
             if bars_1m.empty or len(bars_1m) < 4:
                 continue
-            pullback, entry_idx_1m, confirmed = find_entry_3bar(bars_1m, open_price)
+            is_reentry = symbol in tp_exited_syms
+            pullback, entry_idx_1m, confirmed = find_entry_3bar(bars_1m, open_price, is_reentry=is_reentry)
             if not confirmed or pullback <= 0:
                 print(f"  {symbol}: no confirmed entry, skipping")
                 continue
 
-            # Entry time check
+            # Entry time check (re-entry has no time restriction)
             entry_ts_1m = bars_1m.index[entry_idx_1m]
             if isinstance(entry_ts_1m, tuple):
                 entry_ts_1m = entry_ts_1m[1]
@@ -346,7 +369,7 @@ def run_backtest(end_date=None, n_days=30):
                 entry_ts = entry_ts.tz_localize('UTC')
             entry_ts = entry_ts.tz_convert('America/New_York')
             cutoff = pd.Timestamp(f"{date_key} 10:00", tz="America/New_York")
-            if entry_ts > cutoff:
+            if not is_reentry and entry_ts > cutoff:
                 print(f"  {symbol}: entry after 10:00, skipping")
                 continue
 
@@ -388,7 +411,7 @@ def run_backtest(end_date=None, n_days=30):
             pnl = (exit_price - entry_price) * shares
             pnl_pct = (exit_price - entry_price) / entry_price
 
-            tag = "[1st]"
+            tag = "[RE]" if is_reentry else "[1st]"
             print(f"  {symbol} {tag} entry=${entry_price:.4f} exit=${exit_price:.4f} ({exit_reason}), "
                   f"P&L=${pnl:,.2f} ({pnl_pct:.2%}), stop=${stop_price:.2f} target=${target_price:.2f}, high=${highest:.4f}")
 
@@ -412,8 +435,9 @@ def run_backtest(end_date=None, n_days=30):
             if exit_reason == "stop_loss":
                 entry_checked.add(symbol)  # Stop loss → no re-entry for this symbol today
             else:
-                # Take profit → slot freed, can re-enter
+                # Take profit → slot freed, can re-enter with local pullback
                 active_positions -= 1
+                tp_exited_syms.add(symbol)
 
         # End of day: force close any remaining positions
         if active_positions > 0:
