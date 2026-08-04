@@ -64,6 +64,7 @@ MAX_POSITIONS = getattr(config, "MAX_POSITIONS", 5)
 MIN_POSITION_SIZE = getattr(config, "MIN_POSITION_SIZE", 40)
 MAX_POSITION_SIZE = getattr(config, "MAX_POSITION_SIZE", 200)
 MAX_DAILY_LOSS_PCT = getattr(config, "MAX_DAILY_LOSS_PCT", 0.05)
+MAX_DAILY_PROFIT_PCT = getattr(config, "MAX_DAILY_PROFIT_PCT", 0.05)
 POLL_INTERVAL = getattr(config, "POLL_INTERVAL", 3)
 ENTRY_BUFFER_PCT = getattr(config, "ENTRY_BUFFER_PCT", 0.01)
 MAX_ENTRY_SLIPPAGE = getattr(config, "MAX_ENTRY_SLIPPAGE", 0.04)
@@ -1007,11 +1008,28 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str, today_info:
                     })
                 positions.remove(pos)
 
-        # ── Circuit breaker ──
+        # ── Circuit breaker (loss) ──
         if MAX_DAILY_LOSS_PCT > 0:
             realized_pnl = sum(t["pnl"] for t in trades_detail)
             if realized_pnl <= -(capital * MAX_DAILY_LOSS_PCT):
                 log(f"{RED}CIRCUIT BREAKER: realized PnL ${realized_pnl:.2f} exceeds -{MAX_DAILY_LOSS_PCT*100:.0f}%${RESET}")
+                entry_checked.update(c["symbol"] for c in candidates)
+
+        # ── Profit target circuit breaker ──
+        if MAX_DAILY_PROFIT_PCT > 0:
+            realized_pnl = sum(t["pnl"] for t in trades_detail)
+            if realized_pnl >= capital * MAX_DAILY_PROFIT_PCT and positions:
+                log(f"{GREEN}PROFIT TARGET HIT: realized PnL ${realized_pnl:.2f} >= {MAX_DAILY_PROFIT_PCT*100:.0f}% of ${capital:.2f} — closing all positions{RESET}")
+                for pos in list(positions):
+                    sold, fill_px = force_sell_position(pos.symbol, pos.shares)
+                    pnl = round((fill_px - pos.entry_price) * sold, 2) if sold > 0 else 0
+                    trades_detail.append({
+                        "symbol": pos.symbol, "shares": sold,
+                        "entry": pos.entry_price,
+                        "pnl": pnl, "reason": "profit_target",
+                        "trade_type": pos.trade_type,
+                    })
+                    positions.remove(pos)
                 entry_checked.update(c["symbol"] for c in candidates)
 
         # ── Mid-day rescan ──

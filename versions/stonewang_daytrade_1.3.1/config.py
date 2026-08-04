@@ -64,6 +64,7 @@ MAX_POSITION_SIZE = 100       # 最大仓位$100
 # ── EOD / Circuit breaker ──
 FORCE_CLOSE_TIME = "15:50"    # 强制平仓时间 EST
 MAX_DAILY_LOSS_PCT = 0.05     # 日亏5%熔断
+MAX_DAILY_PROFIT_PCT = 0.05   # 日盈5%止盈熔断: 盈利达5%全部平仓停止交易
 
 # ── Trading ──
 DRY_RUN = False
