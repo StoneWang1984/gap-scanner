@@ -576,7 +576,23 @@ def place_trailing_stop(symbol, shares, trail_pct):
             trail_percent=round(trail_pct, 1),
         ))
         order_id = str(order.id)
-        log(f"TRAIL PLACED: {symbol} {shares}sh trail={trail_pct}% -> {order_id}")
+        # Wait for order to be accepted (not rejected/canceled)
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            try:
+                o = trading_client.get_order_by_id(order_id)
+                if o.status in (OrderStatus.ACCEPTED, OrderStatus.FILLED,
+                                OrderStatus.PARTIALLY_FILLED, OrderStatus.NEW):
+                    log(f"TRAIL CONFIRMED: {symbol} {shares}sh trail={trail_pct}% -> {order_id}")
+                    return order_id
+                if o.status in (OrderStatus.REJECTED, OrderStatus.CANCELED,
+                                OrderStatus.EXPIRED):
+                    log(f"{RED}TRAIL REJECTED AFTER SUBMIT {symbol}: status={o.status}{RESET}")
+                    return None
+            except Exception:
+                pass
+            time.sleep(0.5)
+        log(f"{YELLOW}TRAIL TIMEOUT (no confirm) {symbol} {order_id}, assuming accepted{RESET}")
         return order_id
     except Exception as e:
         log(f"{RED}TRAIL REJECTED {symbol}: {e}{RESET}")
@@ -620,6 +636,18 @@ def tighten_trail(pos):
     """Cancel old trailing stop and place tighter one. Returns new order_id or None."""
     if pos.trail_order_id:
         cancel_order(pos.trail_order_id)
+        # Wait for cancel confirmation before placing new trail
+        if not DRY_RUN:
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                try:
+                    o = trading_client.get_order_by_id(pos.trail_order_id)
+                    if o.status in (OrderStatus.CANCELED, OrderStatus.FILLED,
+                                    OrderStatus.REJECTED, OrderStatus.EXPIRED):
+                        break
+                except Exception:
+                    break
+                time.sleep(0.3)
         log(f"  Cancelled old trail {pos.trail_order_id}")
 
     new_id = place_trailing_stop(pos.symbol, pos.shares, TIGHT_TRAIL_PCT)
