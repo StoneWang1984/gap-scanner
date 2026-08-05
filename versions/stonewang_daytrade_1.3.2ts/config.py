@@ -1,9 +1,10 @@
-"""Config — stonewang_daytrade_1.3.1: hybrid 1.2.0 entry + rossway 0.1wp stop/target.
+"""Config — stonewang_daytrade_1.3.2ts: phased trailing stop strategy.
 
-Changes from 1.3.0 → 1.3.1:
-- Entry: revert to 1.2.0's 3-bar confirmation (remove hammer bar / 2-tier fast confirm)
-- Exit: replace 8-tier ladder with single OCO using rossway 0.1wp's STOP_TIERS
-- Added STOP_TIERS for tiered stop/target by price range
+Exit: phased trailing stop (wide→tight)
+- Entry: place 10% trailing stop (= initial stop loss 10%)
+- After gain >5%: cancel old trail, place 3% trailing stop (lock profits)
+- Only ONE trailing stop active at any time
+- EOD 15:50 force close
 """
 
 import os
@@ -24,7 +25,7 @@ DATA_FEED = "SIP"
 from alpaca.data.enums import DataFeed as _DF
 DATA_FEED_OBJ = _DF.SIP
 
-# ── Scanner (继承 stonewang 1.3) ──
+# ── Scanner ──
 GAP_THRESHOLD = 0.10   # min 10% gap
 GAP_MAX = 1.0          # max 100% gap
 MIN_VOLUME = 10000
@@ -41,19 +42,11 @@ ENTRY_WINDOW_START = "09:31"
 ENTRY_WINDOW_END = "10:00"
 MAX_CANDIDATES = 20
 
-# ── Exit: OCO单 (按价格分档, rossway 0.1wp) ──
-USE_TIERED_STOP_TARGET = True
-# (min_price, max_price, stop_pct, target_pct)
-STOP_TIERS = [
-    (1,  2,  0.06,  0.12),    # $1-2:  止损6%,  止盈12%   (R:R 2.0)
-    (2,  3,  0.05,  0.10),    # $2-3:  止损5%,  止盈10%   (R:R 2.0)
-    (3,  4,  0.04,  0.08),    # $3-4:  止损4%,  止盈8%    (R:R 2.0)
-    (4,  5,  0.03,  0.06),    # $4-5:  止损3%,  止盈6%    (R:R 2.0)
-    (5,  10, 0.025, 0.05),    # $5-10: 止损2.5%,止盈5%    (R:R 2.0)
-    (10, 15, 0.02,  0.04),    # $10-15:止损2%,  止盈4%    (R:R 2.0)
-    (15, 20, 0.018, 0.036),   # $15-20:止损1.8%,止盈3.6% (R:R 2.0)
-]
-STOP_LIMIT_BUFFER = 0.03     # stop-limit 3% buffer
+# ── Exit: Phased trailing stop ──
+WIDE_TRAIL_PCT = 10.0       # 入场时 trailing stop 宽度% (= 初始止损10%)
+TIGHT_TRAIL_PCT = 3.0       # 收紧后 trailing stop 宽度%
+TIGHTEN_AFTER_PCT = 5.0     # 盈利达到此%后收紧 trailing
+TIME_LIMIT_BARS = 8         # 无盈利时 breakeven 退出 (8×5min=40min)
 
 # ── Position management ──
 MAX_POSITIONS = 0             # 0=不限, 全力部署购买力
@@ -64,7 +57,7 @@ MAX_POSITION_SIZE = 100       # 最大仓位$100
 # ── EOD / Circuit breaker ──
 FORCE_CLOSE_TIME = "15:50"    # 强制平仓时间 EST
 MAX_DAILY_LOSS_PCT = 0.05     # 日亏5%熔断
-MAX_DAILY_PROFIT_PCT = 0      # 止盈熔断已禁用 (高频小仓策略不适用)
+MAX_DAILY_PROFIT_PCT = 0      # 止盈熔断已禁用
 
 # ── Trading ──
 DRY_RUN = False
@@ -120,12 +113,8 @@ SLIPPAGE_REENTRY_STOP_PCT = 0.025
 ENTRY_LIMIT_BUFFER = 0.01
 STOP_LOSS_MIN_CENTS = 0.15
 
-# ── OCO (legacy compat for backtest.py) ──
-OCO_ENABLED = True
-OCO_STOP_BUFFER_PCT = 0.02
-
 # ── Invariant checker ──
 INVARIANT_CHECK_INTERVAL = 4
 
 # ── Version ──
-VERSION = "stonewang_daytrade_1.3.1"
+VERSION = "stonewang_daytrade_1.3.2ts"

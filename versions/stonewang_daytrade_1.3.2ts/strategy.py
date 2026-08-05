@@ -315,6 +315,168 @@ def evaluate_trade_stone(
     return _make_result("force_close", exit_price, len(bars_after_entry) - 1)
 
 
+def evaluate_trade_phased_trail(
+    entry_price: float,
+    shares: int,
+    bars_after_entry: list[dict],
+    symbol: str = "",
+    open_price: float = 0.0,
+    atr: float = 0.0,
+    wide_pct: float = None,
+    tight_pct: float = None,
+    tighten_after_pct: float = None,
+    time_limit_bars: int = 0,
+    force_close_price: float | None = None,
+) -> TradeResult:
+    """Phased trailing stop: start wide, tighten after profit.
+
+    - Phase "wide": trailing stop at wide_pct (e.g. 10%)
+    - When gain >= tighten_after_pct: switch to "tight" phase (e.g. 3%)
+    - Only ONE trailing stop active at any time
+    - time_limit_bars: breakeven exit if no profit after N bars
+    - EOD force close at end of bars
+    """
+    if wide_pct is None:
+        wide_pct = getattr(config, "WIDE_TRAIL_PCT", 10.0)
+    if tight_pct is None:
+        tight_pct = getattr(config, "TIGHT_TRAIL_PCT", 3.0)
+    if tighten_after_pct is None:
+        tighten_after_pct = getattr(config, "TIGHTEN_AFTER_PCT", 5.0)
+
+    slippage_trailing = getattr(config, "SLIPPAGE_TRAILING_PCT", 0)
+    slippage_force_close = getattr(config, "SLIPPAGE_FORCE_CLOSE_PCT", 0)
+
+    peak = entry_price
+    phase = "wide"
+    trail_pct = wide_pct
+
+    def _make_result(reason, exit_price, bi):
+        pnl = (exit_price - entry_price) * shares
+        pnl_pct = pnl / (entry_price * shares) if entry_price > 0 else 0
+        _date = ""
+        if bi >= 0 and bi < len(bars_after_entry):
+            bar = bars_after_entry[bi]
+            import pandas as pd
+            _date = str(bar.get("timestamp", pd.Timestamp.now()).date())
+        return TradeResult(
+            symbol=symbol, date=_date,
+            entry_price=entry_price, exit_price=exit_price, shares=shares,
+            pnl=round(pnl, 2), pnl_pct=round(pnl_pct, 4), exit_reason=reason,
+            open_price=open_price, sell_target=0,
+            stop_price=round(entry_price * (1 - wide_pct / 100), 2),
+            partial_sells=[],
+            trailing_high=peak, trailing_exit_price=exit_price, atr=atr,
+            exit_bar_idx=bi, position_size=entry_price * shares,
+            trade_type="first",
+        )
+
+    for bi, bar in enumerate(bars_after_entry):
+        high, low, close = bar["high"], bar["low"], bar["close"]
+        if high > peak:
+            peak = high
+
+        # Check tighten condition
+        gain_pct = (peak - entry_price) / entry_price * 100
+        if phase == "wide" and gain_pct >= tighten_after_pct:
+            phase = "tight"
+            trail_pct = tight_pct
+
+        # Check trailing stop trigger
+        stop_price = round(peak * (1 - trail_pct / 100), 2)
+        if low <= stop_price:
+            adj = round(stop_price * (1 - slippage_trailing), 2) if slippage_trailing > 0 else stop_price
+            reason = f"trailing_{phase}"
+            return _make_result(reason, adj, bi)
+
+        # Time limit: breakeven exit if no profit after N bars
+        if time_limit_bars > 0 and bi >= time_limit_bars:
+            if close >= entry_price:
+                exit_price = max(close, entry_price)
+                if slippage_force_close > 0:
+                    exit_price = round(exit_price * (1 - slippage_force_close), 2)
+                return _make_result("time_limit", exit_price, bi)
+
+    # EOD force close
+    if force_close_price is not None:
+        exit_price = force_close_price
+    else:
+        exit_price = bars_after_entry[-1]["close"] if bars_after_entry else entry_price
+    if slippage_force_close > 0:
+        exit_price = round(exit_price * (1 - slippage_force_close), 2)
+    return _make_result("force_close", exit_price, len(bars_after_entry) - 1)
+
+
+def evaluate_reentry_phased_trail(
+    entry_price: float,
+    shares: int,
+    bars_after_entry: list[dict],
+    symbol: str = "",
+    open_price: float = 0.0,
+    wide_pct: float = None,
+    tight_pct: float = None,
+    tighten_after_pct: float = None,
+    force_close_price: float | None = None,
+) -> TradeResult:
+    """Re-entry trade with phased trailing stop (same logic as first trade)."""
+    if wide_pct is None:
+        wide_pct = getattr(config, "WIDE_TRAIL_PCT", 10.0)
+    if tight_pct is None:
+        tight_pct = getattr(config, "TIGHT_TRAIL_PCT", 3.0)
+    if tighten_after_pct is None:
+        tighten_after_pct = getattr(config, "TIGHTEN_AFTER_PCT", 5.0)
+
+    slippage_trailing = getattr(config, "SLIPPAGE_TRAILING_PCT", 0)
+    slippage_force_close = getattr(config, "SLIPPAGE_FORCE_CLOSE_PCT", 0)
+
+    peak = entry_price
+    phase = "wide"
+    trail_pct = wide_pct
+
+    def _make_result(reason, exit_price, bi):
+        pnl = (exit_price - entry_price) * shares
+        pnl_pct = pnl / (entry_price * shares) if entry_price > 0 else 0
+        _date = ""
+        if bi >= 0 and bi < len(bars_after_entry):
+            bar = bars_after_entry[bi]
+            import pandas as pd
+            _date = str(bar.get("timestamp", pd.Timestamp.now()).date())
+        return TradeResult(
+            symbol=symbol, date=_date,
+            entry_price=entry_price, exit_price=exit_price, shares=shares,
+            pnl=round(pnl, 2), pnl_pct=round(pnl_pct, 4), exit_reason=reason,
+            open_price=open_price, sell_target=0,
+            stop_price=round(entry_price * (1 - wide_pct / 100), 2),
+            partial_sells=[],
+            trailing_high=peak, trailing_exit_price=exit_price, atr=0,
+            exit_bar_idx=bi, position_size=entry_price * shares,
+            trade_type="reentry",
+        )
+
+    for bi, bar in enumerate(bars_after_entry):
+        high, low, close = bar["high"], bar["low"], bar["close"]
+        if high > peak:
+            peak = high
+
+        gain_pct = (peak - entry_price) / entry_price * 100
+        if phase == "wide" and gain_pct >= tighten_after_pct:
+            phase = "tight"
+            trail_pct = tight_pct
+
+        stop_price = round(peak * (1 - trail_pct / 100), 2)
+        if low <= stop_price:
+            adj = round(stop_price * (1 - slippage_trailing), 2) if slippage_trailing > 0 else stop_price
+            reason = f"reentry_trailing_{phase}"
+            return _make_result(reason, adj, bi)
+
+    if force_close_price is not None:
+        exit_price = force_close_price
+    else:
+        exit_price = bars_after_entry[-1]["close"] if bars_after_entry else entry_price
+    if slippage_force_close > 0:
+        exit_price = round(exit_price * (1 - slippage_force_close), 2)
+    return _make_result("reentry_force_close", exit_price, len(bars_after_entry) - 1)
+
+
 def find_reentry_point(bars: list[dict], open_price: float, initial_highest: float = 0.0,
                        min_pullback_pct: float = None):
     """Find re-entry after first trade exits: peak then pullback with confirmation.
