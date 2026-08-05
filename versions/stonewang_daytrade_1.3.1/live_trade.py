@@ -489,7 +489,8 @@ def check_entry_1min(symbol, open_price, accumulator, is_reentry=False):
 
 # ── Buy ──
 def place_buy_market(symbol, shares):
-    """Market buy. Returns (order, actual_shares, reject_category)."""
+    """Market buy. Returns (order, actual_shares, reject_category).
+    Falls back to limit order if market order rejected due to trading halt."""
     if DRY_RUN:
         oid = f"DRY-BM-{uuid4().hex[:8]}"
         price = _dry_run_get_price(symbol) or 0
@@ -519,9 +520,41 @@ def place_buy_market(symbol, shares):
                 log(f"{YELLOW}BUY TIMEOUT: {symbol} order {order.id}{RESET}")
                 return order, shares, None
         except Exception as e:
+            err_str = str(e)
             analysis = analyze_alpaca_rejection(e)
             last_reject = analysis["category"]
             log(f"BUY REJECTED ({attempt+1}/3) {symbol}: {analysis['detail']}")
+            # Trading halt: fallback to limit order
+            if "trading halt" in err_str.lower():
+                log(f"  Trading halt detected, retrying with limit order...")
+                try:
+                    snap = data_client.get_stock_snapshot(
+                        StockSnapshotRequest(symbol_or_symbols=symbol, feed=DATA_FEED))
+                    ask = float(snap[symbol].latest_quote.ask_price) if symbol in snap else 0
+                except Exception:
+                    ask = 0
+                if ask > 0:
+                    limit_price = round(ask * (1 + MAX_ENTRY_SLIPPAGE), 2)
+                    try:
+                        order = trading_client.submit_order(LimitOrderRequest(
+                            symbol=symbol, qty=shares, side=OrderSide.BUY,
+                            time_in_force=TimeInForce.DAY,
+                            limit_price=limit_price,
+                        ))
+                        log(f"BUY LIMIT {symbol} {shares} @ ${limit_price:.2f} -> order {order.id}")
+                        filled = _wait_order_filled(str(order.id), timeout=30)
+                        if filled:
+                            filled_qty = get_order_filled_qty(str(order.id))
+                            fill_price = get_order_filled_price(str(order.id))
+                            actual = filled_qty if filled_qty > 0 else shares
+                            log(f"BUY CONFIRMED (limit): {symbol} {actual}sh @ ${fill_price:.4f}")
+                            return order, actual, None
+                        else:
+                            log(f"{YELLOW}BUY LIMIT TIMEOUT: {symbol}{RESET}")
+                            cancel_order(str(order.id))
+                    except Exception as le:
+                        log(f"BUY LIMIT FAILED {symbol}: {le}")
+                return None, shares, "trading_halt"
             if analysis["category"] == "pdt":
                 return None, shares, "pdt"
             if analysis["category"] == "buying_power" and attempt < 2:
@@ -801,12 +834,53 @@ def save_state(positions, candidates, daily_trades, trades_detail):
         ],
         "trades_detail": trades_detail[-50:],
     }
-    state_path = os.path.join(_ver_dir, "live_state.json")
     try:
-        with open(state_path, "w") as f:
+        with open(_STATE_PATH, "w") as f:
             json.dump(state, f, indent=2)
     except Exception:
         pass
+
+
+# ── State save/load ──
+_STATE_PATH = os.path.join(_ver_dir, "live_state.json")
+
+
+def load_state() -> dict:
+    """Load persisted state from live_state.json."""
+    try:
+        with open(_STATE_PATH, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def restore_positions_from_state() -> tuple[list[Position], list[dict], int]:
+    """Restore positions and trade history from state file.
+    Returns (positions, trades_detail, daily_trades)."""
+    state = load_state()
+    positions = []
+    for pd_ in state.get("positions", []):
+        entry_time = None
+        if pd_.get("entry_time"):
+            try:
+                entry_time = dt.datetime.fromisoformat(pd_["entry_time"])
+            except Exception:
+                pass
+        pos = Position(
+            symbol=pd_["symbol"], shares=pd_["shares"],
+            entry_price=pd_["entry_price"], stop_price=pd_["stop_price"],
+            target_price=pd_["target_price"],
+            oco_order_id=pd_.get("oco_order_id"),
+            entry_time=entry_time, gap_pct=pd_.get("gap_pct", 0),
+            trade_type=pd_.get("trade_type", "first"),
+            highest=pd_.get("highest", pd_["entry_price"]),
+        )
+        positions.append(pos)
+    trades_detail = state.get("trades_detail", [])
+    daily_trades = state.get("daily_trades", 0)
+    if positions or trades_detail:
+        log(f"STATE RESTORED: {len(positions)} positions, {len(trades_detail)} trades, daily_trades={daily_trades}")
+    return positions, trades_detail, daily_trades
 
 
 # ── Main trading day ──
@@ -814,11 +888,15 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str, today_info:
     capital = _get_account_equity()
     log(f"Account equity: ${capital:.2f}")
 
-    positions: list[Position] = []
-    daily_trades = 0
-    trades_detail = []
+    # Restore state from previous run (crash/restart recovery)
+    positions, trades_detail, daily_trades = restore_positions_from_state()
     candidates = []
     entry_checked = set()
+    # Mark already-traded symbols as checked
+    for p in positions:
+        entry_checked.add(p.symbol)
+    for t in trades_detail:
+        entry_checked.add(t["symbol"])
     tp_exited_syms = set()  # symbols that exited via take_profit (eligible for re-entry with relaxed pullback)
     accumulator = BarAccumulator()
     day_highs = {}
@@ -899,11 +977,22 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str, today_info:
         try:
             alpaca_positions = trading_client.get_all_positions()
             alpaca_orders = trading_client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN))
+            # First, refresh OCO order IDs for state-restored positions
+            existing_syms = {p.symbol for p in positions}
+            for pos in positions:
+                if pos.oco_order_id:
+                    continue
+                for ao in alpaca_orders:
+                    if ao.symbol == pos.symbol and ao.side == OrderSide.SELL:
+                        pos.oco_order_id = str(ao.id)
+                        log(f"RECOVER: Updated OCO for {pos.symbol} -> {ao.id}")
+                        break
+            # Then, add Alpaca positions not in state (e.g. position entered before crash)
             for ap in alpaca_positions:
                 sym = ap.symbol
                 qty = int(float(ap.qty))
                 avg_entry = float(ap.avg_entry_price)
-                if sym in [p.symbol for p in positions]:
+                if sym in existing_syms:
                     continue
                 log(f"RECOVER: {sym} {qty}sh @ ${avg_entry:.4f}")
                 cand = next((c for c in candidates if c["symbol"] == sym), None)
@@ -1056,7 +1145,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str, today_info:
         in_entry_window = entry_start <= now_time <= entry_end
         if in_entry_window or tp_exited_syms:
             n_open = len(positions)
-            available_slots = MAX_POSITIONS - n_open
+            available_slots = (MAX_POSITIONS - n_open) if MAX_POSITIONS > 0 else 999
             if available_slots > 0:
                 for c in candidates:
                     sym = c["symbol"]
@@ -1172,9 +1261,16 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str, today_info:
 
         # ── WebSocket health check ──
         if _stream_state and _stream_state._running:
-            if time.time() - _stream_state._last_bar_time > 60:
-                log("WebSocket: 60s without bars, reconnecting...")
+            if time.time() - _stream_state._last_bar_time > 45:
+                log("WebSocket: 45s without bars, reconnecting...")
                 _stream_state.restart([c["symbol"] for c in candidates])
+                # After reconnect, immediately check all OCO states
+                for pos in positions[:]:
+                    if pos.oco_order_id:
+                        filled, leg, fill_price, fill_qty = check_oco_fill(pos.oco_order_id, pos.symbol)
+                        if filled and leg != "canceled":
+                            log(f"POST-RECONNECT: {pos.symbol} OCO filled ({leg})")
+                            # This will be handled in next loop iteration's OCO check
 
         # ── Save state ──
         save_state(positions, candidates, daily_trades, trades_detail)
@@ -1267,6 +1363,12 @@ def main():
     log(f"Stop/Target: tiered by price ({len(STOP_TIERS)} tiers)" if STOP_TIERS else "Stop/Target: 3%/3%")
     log(f"Max positions: {MAX_POSITIONS} | EOD: {config.FORCE_CLOSE_TIME}")
     log(f"Entry: {config.ENTRY_WINDOW_START}-{config.ENTRY_WINDOW_END} | 3-bar confirmation")
+    # Config fingerprint: log key parameters to detect mid-session changes
+    _cfg_keys = ["DRY_RUN", "MAX_POSITIONS", "MAX_POSITION_SIZE", "MIN_POSITION_SIZE",
+                 "MAX_DAILY_LOSS_PCT", "STOP_TIERS", "POLL_INTERVAL", "FORCE_CLOSE_TIME"]
+    _cfg_vals = {k: getattr(config, k, None) for k in _cfg_keys}
+    _cfg_hash = hash(json.dumps(_cfg_vals, default=str))
+    log(f"Config fingerprint: {_cfg_hash:#x} ({len(_cfg_keys)} keys)")
     log("=" * 60)
 
     if not test_connectivity():
