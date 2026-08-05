@@ -1,12 +1,10 @@
-"""stonewang_daytrade_1.3.1 — hybrid 1.2.0 entry + rossway 0.1wp stop/target
+"""stonewang_daytrade_1.3.1 — phased trailing stop strategy
 
-核心: 1.2.0三根确认入场 + rossway 0.1wp分档OCO出场
-- 扫描选股: 继承 stonewang_daytrade_1.3 scanner.py + strategy.py
-- 入场确认: 3-bar pullback (from stonewang 1.2.0 style)
-- 止损/止盈: 按价格分档 (rossway 0.1wp STOP_TIERS)
-- 退出: 单次OCO单 (take_profit + stop_loss)
-- 多次入场: OCO成交后slot释放，可再次入场
-- 不持仓过夜: EOD 15:50强制平仓
+核心: 1.2.0三根确认入场 + 分段trailing stop出场
+- 入场: 3-bar pullback confirmation
+- 出场: 入场放10% trailing stop, 盈利>5%后收紧3% trailing
+- 任一时刻只有1个trailing stop活跃
+- EOD 15:50强制平仓
 """
 
 # ── ANSI colors ──
@@ -29,10 +27,10 @@ import pandas as pd
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import (
     LimitOrderRequest, MarketOrderRequest,
-    GetOrdersRequest, TakeProfitRequest, StopLossRequest,
+    GetOrdersRequest, TrailingStopOrderRequest,
 )
 from alpaca.trading.enums import (
-    OrderSide, TimeInForce, QueryOrderStatus, OrderStatus, OrderClass,
+    OrderSide, TimeInForce, QueryOrderStatus, OrderStatus,
     OrderType,
 )
 from alpaca.data.historical.stock import StockHistoricalDataClient
@@ -58,13 +56,15 @@ from scanner import get_tradable_symbols, scan_gaps_for_symbols, scan_gaps_batch
 from strategy import calc_atr
 
 # ── Constants from config ──
-STOP_TIERS = getattr(config, "STOP_TIERS", None)
-STOP_LIMIT_BUFFER = getattr(config, "STOP_LIMIT_BUFFER", 0.03)
-MAX_POSITIONS = getattr(config, "MAX_POSITIONS", 5)
+WIDE_TRAIL_PCT = getattr(config, "WIDE_TRAIL_PCT", 10.0)
+TIGHT_TRAIL_PCT = getattr(config, "TIGHT_TRAIL_PCT", 3.0)
+TIGHTEN_AFTER_PCT = getattr(config, "TIGHTEN_AFTER_PCT", 5.0)
+TIME_LIMIT_BARS = getattr(config, "TIME_LIMIT_BARS", 8)
+MAX_POSITIONS = getattr(config, "MAX_POSITIONS", 0)
 MIN_POSITION_SIZE = getattr(config, "MIN_POSITION_SIZE", 40)
 MAX_POSITION_SIZE = getattr(config, "MAX_POSITION_SIZE", 200)
 MAX_DAILY_LOSS_PCT = getattr(config, "MAX_DAILY_LOSS_PCT", 0.05)
-MAX_DAILY_PROFIT_PCT = getattr(config, "MAX_DAILY_PROFIT_PCT", 0.05)
+MAX_DAILY_PROFIT_PCT = getattr(config, "MAX_DAILY_PROFIT_PCT", 0)
 POLL_INTERVAL = getattr(config, "POLL_INTERVAL", 3)
 ENTRY_BUFFER_PCT = getattr(config, "ENTRY_BUFFER_PCT", 0.01)
 MAX_ENTRY_SLIPPAGE = getattr(config, "MAX_ENTRY_SLIPPAGE", 0.04)
@@ -79,6 +79,7 @@ trading_client = TradingClient(config.ALPACA_API_KEY, config.ALPACA_SECRET_KEY, 
 data_client = StockHistoricalDataClient(config.ALPACA_API_KEY, config.ALPACA_SECRET_KEY)
 
 _LOG_FILE = os.path.join(_ver_dir, "live_trade.log")
+_STATE_PATH = os.path.join(_ver_dir, "live_state.json")
 
 # ── Data feed ──
 DATA_FEED = DataFeed.IEX
@@ -155,28 +156,25 @@ def analyze_alpaca_rejection(error_msg: str) -> dict:
     elif "429" in msg or "rate limit" in msg:
         result = {"category": "rate_limit", "action": "wait_retry", "retry": True,
                   "detail": "API限频"}
-    elif "limit_price must be" in msg and "stop_price" in msg:
-        result = {"category": "oco_invalid", "action": "skip", "retry": False,
-                  "detail": "OCO limit_price<=stop_price"}
     elif "market is closed" in msg:
         result = {"category": "market_closed", "action": "skip", "retry": False,
                   "detail": "市场已关闭"}
     return result
 
 
-# ── Position dataclass (9 fields vs stonewang's 30+) ──
+# ── Position dataclass ──
 @dataclass
 class Position:
     symbol: str
     shares: int
     entry_price: float
-    stop_price: float       # max($0.15, entry × 1.5%)
-    target_price: float     # entry + (entry - stop) × 2.5
-    oco_order_id: str = None
+    trail_order_id: str = None    # 当前活跃的 trailing stop 订单 ID
+    trail_pct: float = 10.0       # 当前 trail 宽度%
+    phase: str = "wide"           # "wide" 或 "tight"
     entry_time: dt.datetime = None
     gap_pct: float = 0.0
-    trade_type: str = "first"  # "first" or "reentry"
-    highest: float = 0.0
+    trade_type: str = "first"
+    highest: float = 0.0          # 持仓期间最高价
 
     def __post_init__(self):
         if self.highest == 0.0:
@@ -192,9 +190,8 @@ class MockOrder:
     symbol: str
     qty: int
     side: str
-    order_type: str  # "market" / "oco"
-    limit_price: float = 0.0
-    stop_price: float = 0.0
+    order_type: str  # "market" / "trailing"
+    trail_pct: float = 0.0
     status: str = "new"
     filled_qty: int = 0
     filled_price: float = 0.0
@@ -212,19 +209,6 @@ def _dry_run_get_price(symbol):
         return float(trade.price)
     except Exception:
         return None
-
-
-# ── Stop/Target calculation ──
-def calc_stop_and_target(entry_price: float) -> tuple[float, float]:
-    """按价格分档止损止盈"""
-    if STOP_TIERS:
-        for min_p, max_p, stop_pct, target_pct in STOP_TIERS:
-            if min_p <= entry_price < max_p:
-                stop_price = round(entry_price * (1 - stop_pct), 2)
-                target_price = round(entry_price * (1 + target_pct), 2)
-                return stop_price, target_price
-    # Fallback
-    return round(entry_price * 0.97, 2), round(entry_price * 1.03, 2)
 
 
 # ── Bar accumulator ──
@@ -358,7 +342,6 @@ def _get_buying_power():
 
 # ── Order helpers ──
 def _wait_order_filled(order_id: str, timeout: float = 10) -> bool:
-    """Wait for order to reach filled/canceled/rejected state."""
     if DRY_RUN:
         mo = dry_run_orders.get(order_id)
         return mo and mo.status == "filled"
@@ -411,27 +394,22 @@ def cancel_order(order_id: str) -> bool:
         return False
 
 
-# ── Entry detection: 3-bar confirmation (from stonewang 1.2) ──
+# ── Entry detection: 3-bar confirmation ──
 def check_entry_1min(symbol, open_price, accumulator, is_reentry=False):
-    """3-bar pullback confirmation: bottom bar + 3 confirm bars (low>bottom, close>bottom, >=1 bullish).
-    is_reentry=True: find any local pullback (not necessarily below open_price)."""
     bars = accumulator.get_1min_bars(symbol)
     if len(bars) < 4:
         return 0, False
 
     if is_reentry:
-        # Re-entry: find local pullback (lowest point in recent bars)
         pullback_idx = 0
         pullback_price = bars[0]["low"]
         for i in range(1, len(bars)):
             if bars[i]["low"] < pullback_price:
                 pullback_idx = i
                 pullback_price = bars[i]["low"]
-        # No pullback if all bars same low
         if pullback_idx >= len(bars) - 3:
             return 0, False
     else:
-        # First entry: must break below open_price
         pullback_idx = -1
         pullback_price = 0.0
         for i in range(len(bars)):
@@ -445,7 +423,6 @@ def check_entry_1min(symbol, open_price, accumulator, is_reentry=False):
     if not config.ENTRY_CONFIRMATION:
         return pullback_price, True
 
-    # Look for 3 confirmation bars after the pullback
     confirm_count = 0
     bullish_count = 0
     for i in range(pullback_idx + 1, len(bars)):
@@ -455,7 +432,6 @@ def check_entry_1min(symbol, open_price, accumulator, is_reentry=False):
         bar_open = bar.get("open", 0.0)
 
         if is_reentry:
-            # Deeper local bottom → reset
             if bar_low < pullback_price:
                 pullback_idx = i
                 pullback_price = bar_low
@@ -463,7 +439,6 @@ def check_entry_1min(symbol, open_price, accumulator, is_reentry=False):
                 bullish_count = 0
                 continue
         else:
-            # Deeper bottom below open_price → reset
             if bar_low < open_price and bar_low < pullback_price:
                 pullback_idx = i
                 pullback_price = bar_low
@@ -471,16 +446,13 @@ def check_entry_1min(symbol, open_price, accumulator, is_reentry=False):
                 bullish_count = 0
                 continue
 
-        # Still in bottom zone → skip
         if bar_low <= pullback_price or bar_close <= pullback_price:
             continue
 
-        # Valid confirmation bar
         confirm_count += 1
         if bar_close > bar_open:
             bullish_count += 1
 
-        # Need 3 confirm bars with at least 1 bullish
         if confirm_count >= 3 and bullish_count >= 1:
             return pullback_price, True
 
@@ -489,8 +461,6 @@ def check_entry_1min(symbol, open_price, accumulator, is_reentry=False):
 
 # ── Buy ──
 def place_buy_market(symbol, shares):
-    """Market buy. Returns (order, actual_shares, reject_category).
-    Falls back to limit order if market order rejected due to trading halt."""
     if DRY_RUN:
         oid = f"DRY-BM-{uuid4().hex[:8]}"
         price = _dry_run_get_price(symbol) or 0
@@ -585,53 +555,86 @@ def place_buy_market(symbol, shares):
     return None, shares, "retry_exhausted"
 
 
-# ── OCO exit order ──
-def place_oco_exit(symbol, shares, target_price, stop_price):
-    """Place OCO: take_profit at target_price + stop_loss at stop_price.
-    Returns (order_id, None) on success, or (None, error_msg) on failure."""
-    stop_limit_price = round(stop_price * (1 - STOP_LIMIT_BUFFER), 2)
-
-    # Pre-validate: target must be > stop
-    if target_price <= stop_price:
-        msg = f"OCO invalid: target ${target_price:.2f} <= stop ${stop_price:.2f}"
-        log(f"{RED}{msg}{RESET}")
-        return None, msg
-
+# ── Trailing stop ──
+def place_trailing_stop(symbol, shares, trail_pct):
+    """Place trailing stop sell order. Returns order_id or None."""
     if DRY_RUN:
-        oid = f"DRY-OCO-{uuid4().hex[:8]}"
+        oid = f"DRY-TR-{uuid4().hex[:8]}"
         mock = MockOrder(id=oid, symbol=symbol, qty=shares, side="sell",
-                         order_type="oco", limit_price=target_price,
-                         stop_price=stop_price, status="new")
+                         order_type="trailing", trail_pct=trail_pct,
+                         status="new")
         dry_run_orders[oid] = mock
-        log(f"[DRY] OCO {symbol} {shares} target=${target_price:.2f} stop=${stop_price:.2f}")
-        return oid, None
+        log(f"[DRY] TRAILING STOP {symbol} {shares} @ {trail_pct}%")
+        return oid
 
     try:
-        order = trading_client.submit_order(LimitOrderRequest(
+        order = trading_client.submit_order(TrailingStopOrderRequest(
             symbol=symbol,
             qty=shares,
             side=OrderSide.SELL,
             time_in_force=TimeInForce.DAY,
-            limit_price=target_price,
-            order_class=OrderClass.OCO,
-            take_profit=TakeProfitRequest(limit_price=target_price),
-            stop_loss=StopLossRequest(
-                stop_price=stop_price,
-                limit_price=stop_limit_price,
-            ),
+            trail_percent=round(trail_pct, 1),
         ))
         order_id = str(order.id)
-        log(f"OCO PLACED: {symbol} {shares}sh target=${target_price:.2f} stop=${stop_price:.2f} stop_limit=${stop_limit_price:.2f} -> {order_id}")
-        return order_id, None
+        log(f"TRAIL PLACED: {symbol} {shares}sh trail={trail_pct}% -> {order_id}")
+        return order_id
     except Exception as e:
-        analysis = analyze_alpaca_rejection(e)
-        log(f"{RED}OCO REJECTED {symbol}: {analysis['detail']}{RESET}")
-        return None, str(e)
+        log(f"{RED}TRAIL REJECTED {symbol}: {e}{RESET}")
+        return None
 
 
-# ── Force sell (for EOD / circuit breaker) ──
+def check_trail_fill(trail_order_id, symbol):
+    """Check if trailing stop filled. Returns (filled, fill_price, fill_qty)."""
+    if DRY_RUN:
+        mo = dry_run_orders.get(trail_order_id)
+        if not mo or mo.status != "filled":
+            price = _dry_run_get_price(symbol) or 0
+            if price > 0 and mo:
+                # Simulate: check if price dropped trail_pct% from entry
+                # (simplified DRY_RUN simulation)
+                return False, 0, 0
+            return False, 0, 0
+        return True, mo.filled_price, mo.filled_qty
+
+    try:
+        order = trading_client.get_order_by_id(trail_order_id)
+        if order.status in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
+            fill_price = float(order.filled_avg_price) if order.filled_avg_price else 0
+            fill_qty = int(float(order.filled_qty)) if order.filled_qty else 0
+            return True, fill_price, fill_qty
+        elif order.status in (OrderStatus.CANCELED, OrderStatus.REJECTED, OrderStatus.EXPIRED):
+            # Trail canceled externally — check if position still exists
+            try:
+                pos = trading_client.get_open_position(symbol)
+                # Position still exists — trail was canceled but not filled
+                return False, 0, 0
+            except Exception:
+                # Position gone — trail must have filled via a companion order
+                return True, 0, 0
+        return False, 0, 0
+    except Exception:
+        return False, 0, 0
+
+
+def tighten_trail(pos):
+    """Cancel old trailing stop and place tighter one. Returns new order_id or None."""
+    if pos.trail_order_id:
+        cancel_order(pos.trail_order_id)
+        log(f"  Cancelled old trail {pos.trail_order_id}")
+
+    new_id = place_trailing_stop(pos.symbol, pos.shares, TIGHT_TRAIL_PCT)
+    if new_id:
+        pos.trail_order_id = new_id
+        pos.trail_pct = TIGHT_TRAIL_PCT
+        pos.phase = "tight"
+        log(f"{GREEN}TRAIL TIGHTENED: {pos.symbol} {WIDE_TRAIL_PCT}%→{TIGHT_TRAIL_PCT}%{RESET}")
+    else:
+        log(f"{RED}TRAIL TIGHTEN FAILED: {pos.symbol}, keeping wide trail{RESET}")
+    return new_id
+
+
+# ── Force sell (EOD / circuit breaker) ──
 def force_sell_position(symbol, shares):
-    """Market sell all shares. Returns (actual_shares_sold, fill_price)."""
     if shares <= 0:
         return 0, 0
 
@@ -646,7 +649,6 @@ def force_sell_position(symbol, shares):
         log(f"[DRY] FORCE SELL {symbol} {shares} @ ~${fill_price:.2f}")
         return shares, fill_price
 
-    # Cancel any open orders for this symbol first
     try:
         open_orders = trading_client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN))
         for o in open_orders:
@@ -675,12 +677,11 @@ def force_sell_position(symbol, shares):
             analysis = analyze_alpaca_rejection(e)
             log(f"FORCE SELL REJECTED {symbol}: {analysis['detail']}")
             if analysis["category"] == "no_position":
-                return shares, 0  # Alpaca already cleared it
+                return shares, 0
             if analysis["category"] in ("rate_limit", "network") and attempt < 2:
                 time.sleep(3)
                 continue
 
-    # Last resort: close_position
     try:
         result = trading_client.close_position(symbol)
         log(f"CLOSE POSITION {symbol}: {result}")
@@ -690,82 +691,8 @@ def force_sell_position(symbol, shares):
         return 0, 0
 
 
-# ── Check OCO fill ──
-def check_oco_fill(oco_order_id, symbol):
-    """Check if an OCO order has filled. Returns (filled, leg_type, fill_price, fill_qty).
-    leg_type: "take_profit" or "stop_loss" or None."""
-    if DRY_RUN:
-        mo = dry_run_orders.get(oco_order_id)
-        if not mo or mo.status != "filled":
-            # Simulate fill based on current price
-            price = _dry_run_get_price(symbol) or 0
-            if price > 0 and mo:
-                if price >= mo.limit_price:
-                    mo.status = "filled"
-                    mo.filled_qty = mo.qty
-                    mo.filled_price = mo.limit_price
-                    return True, "take_profit", mo.limit_price, mo.qty
-                elif price <= mo.stop_price:
-                    mo.status = "filled"
-                    mo.filled_qty = mo.qty
-                    mo.filled_price = mo.stop_price
-                    return True, "stop_loss", mo.stop_price, mo.qty
-            return False, None, 0, 0
-        leg = "take_profit" if mo.filled_price >= mo.limit_price * 0.99 else "stop_loss"
-        return True, leg, mo.filled_price, mo.filled_qty
-
-    try:
-        order = trading_client.get_order_by_id(oco_order_id)
-        if order.status == OrderStatus.FILLED:
-            fill_price = float(order.filled_avg_price) if order.filled_avg_price else 0
-            fill_qty = int(float(order.filled_qty)) if order.filled_qty else 0
-            leg = "take_profit"  # limit fill = take profit
-            return True, leg, fill_price, fill_qty
-        elif order.status in (OrderStatus.CANCELED, OrderStatus.REJECTED, OrderStatus.EXPIRED):
-            # OCO LIMIT canceled — check if the companion STOP_LIMIT filled (stop loss)
-            # When stop loss triggers, Alpaca cancels the LIMIT leg and fills the STOP_LIMIT leg
-            try:
-                closed_orders = trading_client.get_orders(
-                    GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=50))
-                for o in closed_orders:
-                    if (o.symbol == symbol and o.side == OrderSide.SELL
-                            and o.status == OrderStatus.FILLED
-                            and getattr(o, 'order_class', None) == OrderClass.OCO
-                            and o.order_type in (OrderType.STOP_LIMIT, OrderType.STOP)):
-                        fill_price = float(o.filled_avg_price) if o.filled_avg_price else 0
-                        fill_qty = int(float(o.filled_qty)) if o.filled_qty else 0
-                        if fill_qty > 0:
-                            return True, "stop_loss", fill_price, fill_qty
-            except Exception:
-                pass
-            # No filled companion found — check if position still exists
-            try:
-                pos = trading_client.get_open_position(symbol)
-                # Position still exists → genuine external cancellation
-                return True, "canceled", 0, 0
-            except Exception:
-                # Position gone → OCO filled but we couldn't find the fill
-                # Look for any recent filled sell for this symbol
-                try:
-                    for o in closed_orders:
-                        if (o.symbol == symbol and o.side == OrderSide.SELL
-                                and o.status == OrderStatus.FILLED):
-                            fill_price = float(o.filled_avg_price) if o.filled_avg_price else 0
-                            fill_qty = int(float(o.filled_qty)) if o.filled_qty else 0
-                            if fill_qty > 0:
-                                leg = "stop_loss"  # assume stop loss if not take profit
-                                return True, leg, fill_price, fill_qty
-                except Exception:
-                    pass
-                return True, "canceled", 0, 0
-        return False, None, 0, 0
-    except Exception:
-        return False, None, 0, 0
-
-
 # ── Scan gaps ──
 def scan_gaps():
-    """Scan for gap-down stocks matching criteria."""
     try:
         all_symbols = get_tradable_symbols()
         all_symbols = [s for s in all_symbols if not is_leveraged_etf(s)]
@@ -778,7 +705,6 @@ def scan_gaps():
         if df.empty:
             return []
 
-        # Filter: gap down >= threshold
         gap_min = getattr(config, "GAP_THRESHOLD", 0.10)
         gap_max = getattr(config, "GAP_MAX", 1.0)
         price_min = getattr(config, "PRICE_MIN", 1.0)
@@ -813,7 +739,7 @@ def scan_gaps():
 def save_state(positions, candidates, daily_trades, trades_detail):
     state = {
         "updated": dt.datetime.now().isoformat(),
-        "version": "rossway_0.1",
+        "version": "phased_trail",
         "daily_trades": daily_trades,
         "candidates": [
             {"symbol": c["symbol"], "open_price": c["open_price"],
@@ -823,9 +749,9 @@ def save_state(positions, candidates, daily_trades, trades_detail):
         "positions": [
             {
                 "symbol": p.symbol, "shares": p.shares,
-                "entry_price": p.entry_price, "stop_price": p.stop_price,
-                "target_price": p.target_price,
-                "oco_order_id": p.oco_order_id,
+                "entry_price": p.entry_price,
+                "trail_order_id": p.trail_order_id,
+                "trail_pct": p.trail_pct, "phase": p.phase,
                 "entry_time": p.entry_time.isoformat() if p.entry_time else None,
                 "gap_pct": p.gap_pct, "trade_type": p.trade_type,
                 "highest": p.highest,
@@ -841,12 +767,7 @@ def save_state(positions, candidates, daily_trades, trades_detail):
         pass
 
 
-# ── State save/load ──
-_STATE_PATH = os.path.join(_ver_dir, "live_state.json")
-
-
 def load_state() -> dict:
-    """Load persisted state from live_state.json."""
     try:
         with open(_STATE_PATH, "r") as f:
             return json.load(f)
@@ -855,8 +776,6 @@ def load_state() -> dict:
 
 
 def restore_positions_from_state() -> tuple[list[Position], list[dict], int]:
-    """Restore positions and trade history from state file.
-    Returns (positions, trades_detail, daily_trades)."""
     state = load_state()
     positions = []
     for pd_ in state.get("positions", []):
@@ -868,9 +787,10 @@ def restore_positions_from_state() -> tuple[list[Position], list[dict], int]:
                 pass
         pos = Position(
             symbol=pd_["symbol"], shares=pd_["shares"],
-            entry_price=pd_["entry_price"], stop_price=pd_["stop_price"],
-            target_price=pd_["target_price"],
-            oco_order_id=pd_.get("oco_order_id"),
+            entry_price=pd_["entry_price"],
+            trail_order_id=pd_.get("trail_order_id"),
+            trail_pct=pd_.get("trail_pct", WIDE_TRAIL_PCT),
+            phase=pd_.get("phase", "wide"),
             entry_time=entry_time, gap_pct=pd_.get("gap_pct", 0),
             trade_type=pd_.get("trade_type", "first"),
             highest=pd_.get("highest", pd_["entry_price"]),
@@ -888,20 +808,17 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str, today_info:
     capital = _get_account_equity()
     log(f"Account equity: ${capital:.2f}")
 
-    # Restore state from previous run (crash/restart recovery)
     positions, trades_detail, daily_trades = restore_positions_from_state()
     candidates = []
     entry_checked = set()
-    # Mark already-traded symbols as checked
     for p in positions:
         entry_checked.add(p.symbol)
     for t in trades_detail:
         entry_checked.add(t["symbol"])
-    tp_exited_syms = set()  # symbols that exited via take_profit (eligible for re-entry with relaxed pullback)
+    tp_exited_syms = set()
     accumulator = BarAccumulator()
     day_highs = {}
 
-    # Parse entry window
     entry_start = dt.time(*[int(x) for x in config.ENTRY_WINDOW_START.split(":")])
     entry_end = dt.time(*[int(x) for x in config.ENTRY_WINDOW_END.split(":")])
 
@@ -977,17 +894,17 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str, today_info:
         try:
             alpaca_positions = trading_client.get_all_positions()
             alpaca_orders = trading_client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN))
-            # First, refresh OCO order IDs for state-restored positions
             existing_syms = {p.symbol for p in positions}
+            # Refresh trail order IDs for state-restored positions
             for pos in positions:
-                if pos.oco_order_id:
+                if pos.trail_order_id:
                     continue
                 for ao in alpaca_orders:
                     if ao.symbol == pos.symbol and ao.side == OrderSide.SELL:
-                        pos.oco_order_id = str(ao.id)
-                        log(f"RECOVER: Updated OCO for {pos.symbol} -> {ao.id}")
+                        pos.trail_order_id = str(ao.id)
+                        log(f"RECOVER: Updated trail for {pos.symbol} -> {ao.id}")
                         break
-            # Then, add Alpaca positions not in state (e.g. position entered before crash)
+            # Add Alpaca positions not in state
             for ap in alpaca_positions:
                 sym = ap.symbol
                 qty = int(float(ap.qty))
@@ -996,24 +913,21 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str, today_info:
                     continue
                 log(f"RECOVER: {sym} {qty}sh @ ${avg_entry:.4f}")
                 cand = next((c for c in candidates if c["symbol"] == sym), None)
-                open_price = cand["open_price"] if cand else avg_entry
                 gap_pct = cand["gap_pct"] if cand else 0
-
-                stop_price, target_price = calc_stop_and_target(avg_entry)
-
-                # Find existing OCO order
-                oco_id = None
+                # Find existing trail order
+                trail_id = None
+                trail_pct_found = WIDE_TRAIL_PCT
+                phase = "wide"
                 for ao in alpaca_orders:
                     if ao.symbol == sym and ao.side == OrderSide.SELL:
-                        oco_id = str(ao.id)
-                        log(f"RECOVER: Found OCO {ao.id}")
+                        trail_id = str(ao.id)
+                        if hasattr(ao, 'trail_price') and ao.trail_price:
+                            trail_pct_found = round(float(ao.trail_price) / avg_entry * 100, 1)
                         break
-
                 pos = Position(
                     symbol=sym, shares=qty, entry_price=avg_entry,
-                    stop_price=stop_price, target_price=target_price,
-                    oco_order_id=oco_id,
-                    entry_time=now_est, gap_pct=gap_pct,
+                    trail_order_id=trail_id, trail_pct=trail_pct_found,
+                    phase=phase, entry_time=now_est, gap_pct=gap_pct,
                     trade_type="recovered",
                 )
                 positions.append(pos)
@@ -1022,8 +936,8 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str, today_info:
 
     # ── Main polling loop ──
     log(f"Starting main loop (poll every {POLL_INTERVAL}s)...")
+    log(f"Strategy: phased trailing stop (wide={WIDE_TRAIL_PCT}% → tight={TIGHT_TRAIL_PCT}% after +{TIGHTEN_AFTER_PCT}%)")
     last_rescan_idx = 0
-    ws_reconnect_time = time.time() + 60  # Check WebSocket health every 60s
 
     while True:
         now_est = dt.datetime.now(tz=ZoneInfo("America/New_York"))
@@ -1034,8 +948,8 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str, today_info:
             log(f"{RED}=== EOD FORCE CLOSE ({force_close_str}) ==={RESET}")
             for pos in positions[:]:
                 log(f"EOD: Force closing {pos.symbol} {pos.shares}sh")
-                if pos.oco_order_id:
-                    cancel_order(pos.oco_order_id)
+                if pos.trail_order_id:
+                    cancel_order(pos.trail_order_id)
                 sold, fill_price = force_sell_position(pos.symbol, pos.shares)
                 if sold > 0:
                     if fill_price <= 0:
@@ -1052,73 +966,89 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str, today_info:
             positions.clear()
             break
 
-        # ── Check OCO fills ──
+        # ── Check trailing stop fills ──
         for pos in positions[:]:
-            if not pos.oco_order_id:
+            if not pos.trail_order_id:
                 continue
-            filled, leg, fill_price, fill_qty = check_oco_fill(pos.oco_order_id, pos.symbol)
-            if filled and leg != "canceled":
+            filled, fill_price, fill_qty = check_trail_fill(pos.trail_order_id, pos.symbol)
+            if filled:
                 daily_trades += 1
-                if leg == "take_profit":
-                    pnl = (fill_price - pos.entry_price) * pos.shares
-                    log(f"{GREEN}TAKE PROFIT: {pos.symbol} {pos.shares}sh @ ${fill_price:.4f} P&L ${pnl:.2f}{RESET}")
+                if fill_price <= 0:
+                    # Try to get fill price from Alpaca position
+                    try:
+                        ap = trading_client.get_open_position(pos.symbol)
+                        fill_price = float(ap.current_price) if not DRY_RUN else pos.entry_price
+                    except Exception:
+                        fill_price = pos.entry_price
+                pnl = (fill_price - pos.entry_price) * pos.shares
+                if pnl >= 0:
+                    log(f"{GREEN}TRAIL EXIT: {pos.symbol} {pos.shares}sh @ ${fill_price:.4f} P&L ${pnl:.2f} ({pos.phase} {pos.trail_pct}%){RESET}")
                     tp_exited_syms.add(pos.symbol)
-                    trades_detail.append({
-                        "symbol": pos.symbol, "entry": pos.entry_price,
-                        "exit": fill_price, "shares": pos.shares,
-                        "pnl": round(pnl, 2), "reason": "take_profit",
-                        "trade_type": pos.trade_type,
-                    })
-                else:  # stop_loss
-                    pnl = (fill_price - pos.entry_price) * pos.shares
-                    log(f"{RED}STOP LOSS: {pos.symbol} {pos.shares}sh @ ${fill_price:.4f} P&L ${pnl:.2f}{RESET}")
-                    trades_detail.append({
-                        "symbol": pos.symbol, "entry": pos.entry_price,
-                        "exit": fill_price, "shares": pos.shares,
-                        "pnl": round(pnl, 2), "reason": "stop_loss",
-                        "trade_type": pos.trade_type,
-                    })
-                    entry_checked.add(pos.symbol)  # Stop loss → no re-entry today
+                else:
+                    log(f"{RED}TRAIL EXIT: {pos.symbol} {pos.shares}sh @ ${fill_price:.4f} P&L ${pnl:.2f} ({pos.phase} {pos.trail_pct}%){RESET}")
+                    entry_checked.add(pos.symbol)  # stop loss → no re-entry
+                trades_detail.append({
+                    "symbol": pos.symbol, "entry": pos.entry_price,
+                    "exit": fill_price, "shares": pos.shares,
+                    "pnl": round(pnl, 2), "reason": "trailing_stop",
+                    "trade_type": pos.trade_type,
+                    "phase": pos.phase, "trail_pct": pos.trail_pct,
+                })
+                positions.remove(pos)
+                pos.trail_order_id = None
 
-                positions.remove(pos)
-                pos.oco_order_id = None
-            elif filled and leg == "canceled":
-                # OCO was canceled externally — force sell
-                log(f"{YELLOW}OCO CANCELED: {pos.symbol} — force selling{RESET}")
-                sold, sell_price = force_sell_position(pos.symbol, pos.shares)
-                if sold > 0:
-                    daily_trades += 1
-                    pnl = (sell_price - pos.entry_price) * sold
+        # ── DRY_RUN trailing simulation ──
+        if DRY_RUN:
+            for pos in positions[:]:
+                price = _dry_run_get_price(pos.symbol)
+                if not price:
+                    continue
+                if price > pos.highest:
+                    pos.highest = price
+                stop_price = pos.highest * (1 - pos.trail_pct / 100)
+                if price <= stop_price:
+                    pnl = (price - pos.entry_price) * pos.shares
+                    if pnl >= 0:
+                        log(f"{GREEN}[DRY] TRAIL EXIT: {pos.symbol} @ ${price:.4f} P&L ${pnl:.2f}{RESET}")
+                    else:
+                        log(f"{RED}[DRY] TRAIL EXIT: {pos.symbol} @ ${price:.4f} P&L ${pnl:.2f}{RESET}")
                     trades_detail.append({
                         "symbol": pos.symbol, "entry": pos.entry_price,
-                        "exit": sell_price, "shares": sold,
-                        "pnl": round(pnl, 2), "reason": "oco_canceled",
-                        "trade_type": pos.trade_type,
+                        "exit": price, "shares": pos.shares,
+                        "pnl": round(pnl, 2), "reason": "trailing_stop",
                     })
-                positions.remove(pos)
+                    daily_trades += 1
+                    positions.remove(pos)
+
+        # ── Update peaks & tighten trailing ──
+        if positions:
+            try:
+                syms = [p.symbol for p in positions]
+                snaps = get_snapshots(syms)
+                for pos in positions:
+                    snap = snaps.get(pos.symbol)
+                    if snap and snap.latest_trade:
+                        cur = float(snap.latest_trade.price)
+                        if cur > pos.highest:
+                            pos.highest = cur
+                        if pos.symbol in day_highs:
+                            day_highs[pos.symbol] = max(day_highs[pos.symbol], cur)
+                        else:
+                            day_highs[pos.symbol] = cur
+
+                    # Check tighten condition
+                    if pos.phase == "wide":
+                        gain_pct = (pos.highest - pos.entry_price) / pos.entry_price * 100
+                        if gain_pct >= TIGHTEN_AFTER_PCT:
+                            tighten_trail(pos)
+            except Exception:
+                pass
 
         # ── Circuit breaker (loss) ──
         if MAX_DAILY_LOSS_PCT > 0:
             realized_pnl = sum(t["pnl"] for t in trades_detail)
             if realized_pnl <= -(capital * MAX_DAILY_LOSS_PCT):
                 log(f"{RED}CIRCUIT BREAKER: realized PnL ${realized_pnl:.2f} exceeds -{MAX_DAILY_LOSS_PCT*100:.0f}%${RESET}")
-                entry_checked.update(c["symbol"] for c in candidates)
-
-        # ── Profit target circuit breaker ──
-        if MAX_DAILY_PROFIT_PCT > 0:
-            realized_pnl = sum(t["pnl"] for t in trades_detail)
-            if realized_pnl >= capital * MAX_DAILY_PROFIT_PCT and positions:
-                log(f"{GREEN}PROFIT TARGET HIT: realized PnL ${realized_pnl:.2f} >= {MAX_DAILY_PROFIT_PCT*100:.0f}% of ${capital:.2f} — closing all positions{RESET}")
-                for pos in list(positions):
-                    sold, fill_px = force_sell_position(pos.symbol, pos.shares)
-                    pnl = round((fill_px - pos.entry_price) * sold, 2) if sold > 0 else 0
-                    trades_detail.append({
-                        "symbol": pos.symbol, "shares": sold,
-                        "entry": pos.entry_price,
-                        "pnl": pnl, "reason": "profit_target",
-                        "trade_type": pos.trade_type,
-                    })
-                    positions.remove(pos)
                 entry_checked.update(c["symbol"] for c in candidates)
 
         # ── Mid-day rescan ──
@@ -1157,16 +1087,13 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str, today_info:
                         break
 
                     is_reentry = sym in tp_exited_syms
-                    # Outside entry window: only check re-entries
                     if not in_entry_window and not is_reentry:
                         continue
 
-                    # Check pullback entry
                     pullback_price, confirmed = check_entry_1min(sym, c["open_price"], accumulator, is_reentry=is_reentry)
                     if not confirmed:
                         continue
 
-                    # Calculate position size
                     buying_power = _get_buying_power()
                     remaining_candidates = sum(
                         1 for c2 in candidates
@@ -1177,7 +1104,6 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str, today_info:
                     slot_size = buying_power / remaining_candidates
                     slot_size = max(MIN_POSITION_SIZE, min(MAX_POSITION_SIZE, slot_size))
 
-                    # Calculate shares
                     ask_price = pullback_price * (1 + ENTRY_BUFFER_PCT)
                     if ask_price > pullback_price * (1 + MAX_ENTRY_SLIPPAGE):
                         log(f"  {sym}: ask ${ask_price:.4f} exceeds slippage limit, skipping")
@@ -1203,14 +1129,10 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str, today_info:
                     if fill_price <= 0:
                         fill_price = ask_price
 
-                    # Calculate stop/target from actual fill price
-                    stop_price, target_price = calc_stop_and_target(fill_price)
-
-                    # Place OCO exit
-                    oco_id, oco_err = place_oco_exit(sym, actual_shares, target_price, stop_price)
-                    if oco_err:
-                        # OCO failed — place trailing stop as fallback, then force sell
-                        log(f"{YELLOW}OCO failed for {sym}, force selling{RESET}")
+                    # Place trailing stop
+                    trail_id = place_trailing_stop(sym, actual_shares, WIDE_TRAIL_PCT)
+                    if not trail_id and not DRY_RUN:
+                        log(f"{YELLOW}Trail failed for {sym}, force selling{RESET}")
                         sold, fs_price = force_sell_position(sym, actual_shares)
                         if sold > 0:
                             actual_exit = fs_price if fs_price > 0 else fill_price * 0.99
@@ -1218,8 +1140,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str, today_info:
                             trades_detail.append({
                                 "symbol": sym, "entry": fill_price,
                                 "exit": actual_exit, "shares": sold,
-                                "pnl": round(pnl, 2), "reason": "oco_failed",
-                                "trade_type": "first",
+                                "pnl": round(pnl, 2), "reason": "trail_failed",
                             })
                             daily_trades += 1
                         entry_checked.add(sym)
@@ -1229,8 +1150,8 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str, today_info:
                     trade_type = "reentry" if is_reentry else "first"
                     pos = Position(
                         symbol=sym, shares=actual_shares, entry_price=fill_price,
-                        stop_price=stop_price, target_price=target_price,
-                        oco_order_id=oco_id, entry_time=now_est,
+                        trail_order_id=trail_id, trail_pct=WIDE_TRAIL_PCT,
+                        phase="wide", entry_time=now_est,
                         gap_pct=c["gap_pct"], trade_type=trade_type,
                     )
                     positions.append(pos)
@@ -1239,38 +1160,18 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str, today_info:
                     entry_checked.add(sym)
                     tp_exited_syms.discard(sym)
                     reentry_tag = " (RE-ENTRY)" if is_reentry else ""
-                    log(f"{GREEN}ENTERED: {sym} {actual_shares}sh @ ${fill_price:.4f} stop=${stop_price:.2f} target=${target_price:.2f} (gap {c['gap_pct']:.1%}){reentry_tag}{RESET}")
-
-        # ── Update day highs ──
-        if positions:
-            try:
-                syms = [p.symbol for p in positions]
-                snaps = get_snapshots(syms)
-                for pos in positions:
-                    snap = snaps.get(pos.symbol)
-                    if snap and snap.latest_trade:
-                        cur = float(snap.latest_trade.price)
-                        if cur > pos.highest:
-                            pos.highest = cur
-                        if pos.symbol in day_highs:
-                            day_highs[pos.symbol] = max(day_highs[pos.symbol], cur)
-                        else:
-                            day_highs[pos.symbol] = cur
-            except Exception:
-                pass
+                    log(f"{GREEN}ENTERED: {sym} {actual_shares}sh @ ${fill_price:.4f} trail={WIDE_TRAIL_PCT}% (gap {c['gap_pct']:.1%}){reentry_tag}{RESET}")
 
         # ── WebSocket health check ──
         if _stream_state and _stream_state._running:
             if time.time() - _stream_state._last_bar_time > 45:
                 log("WebSocket: 45s without bars, reconnecting...")
                 _stream_state.restart([c["symbol"] for c in candidates])
-                # After reconnect, immediately check all OCO states
                 for pos in positions[:]:
-                    if pos.oco_order_id:
-                        filled, leg, fill_price, fill_qty = check_oco_fill(pos.oco_order_id, pos.symbol)
-                        if filled and leg != "canceled":
-                            log(f"POST-RECONNECT: {pos.symbol} OCO filled ({leg})")
-                            # This will be handled in next loop iteration's OCO check
+                    if pos.trail_order_id:
+                        filled, fill_price, fill_qty = check_trail_fill(pos.trail_order_id, pos.symbol)
+                        if filled:
+                            log(f"POST-RECONNECT: {pos.symbol} trail filled")
 
         # ── Save state ──
         save_state(positions, candidates, daily_trades, trades_detail)
@@ -1280,7 +1181,6 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str, today_info:
     if _stream_state:
         _stream_state.stop()
 
-    # Print summary
     log("=" * 60)
     total_pnl = sum(t["pnl"] for t in trades_detail)
     log(f"Day complete: {daily_trades} trades, P&L ${total_pnl:.2f}")
@@ -1298,7 +1198,6 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str, today_info:
 
 # ── Scheduling ──
 def get_next_trading_day():
-    """Get next trading day info from Alpaca calendar."""
     try:
         now_est = dt.datetime.now(tz=ZoneInfo("America/New_York"))
         from alpaca.trading.requests import GetCalendarRequest
@@ -1334,7 +1233,6 @@ def get_next_trading_day():
 
 
 def test_connectivity():
-    """Test API and data connectivity."""
     log("Testing data connectivity...")
     try:
         req = StockBarsRequest(
@@ -1359,13 +1257,12 @@ def test_connectivity():
 def main():
     mode = "DRY RUN" if DRY_RUN else "LIVE"
     log("=" * 60)
-    log(f"rossway_daytrade_0.1 — {mode} Trading")
-    log(f"Stop/Target: tiered by price ({len(STOP_TIERS)} tiers)" if STOP_TIERS else "Stop/Target: 3%/3%")
+    log(f"stonewang_daytrade_1.3.1 — {mode} Trading")
+    log(f"Exit: phased trailing stop (wide={WIDE_TRAIL_PCT}% → tight={TIGHT_TRAIL_PCT}% after +{TIGHTEN_AFTER_PCT}%)")
     log(f"Max positions: {MAX_POSITIONS} | EOD: {config.FORCE_CLOSE_TIME}")
     log(f"Entry: {config.ENTRY_WINDOW_START}-{config.ENTRY_WINDOW_END} | 3-bar confirmation")
-    # Config fingerprint: log key parameters to detect mid-session changes
     _cfg_keys = ["DRY_RUN", "MAX_POSITIONS", "MAX_POSITION_SIZE", "MIN_POSITION_SIZE",
-                 "MAX_DAILY_LOSS_PCT", "STOP_TIERS", "POLL_INTERVAL", "FORCE_CLOSE_TIME"]
+                 "WIDE_TRAIL_PCT", "TIGHT_TRAIL_PCT", "TIGHTEN_AFTER_PCT", "POLL_INTERVAL"]
     _cfg_vals = {k: getattr(config, k, None) for k in _cfg_keys}
     _cfg_hash = hash(json.dumps(_cfg_vals, default=str))
     log(f"Config fingerprint: {_cfg_hash:#x} ({len(_cfg_keys)} keys)")
@@ -1395,20 +1292,16 @@ def main():
             smart_sleep_until(open_dt)
             continue
 
-        # It's a trading day
         force_close_str = config.FORCE_CLOSE_TIME
         force_close_time = dt.time(*[int(x) for x in force_close_str.split(":")])
 
-        # Wait for market open if needed
         market_open = dt.time(9, 30)
         if now_est.time() < market_open:
             open_dt = dt.datetime.combine(now_est.date(), market_open, tzinfo=ZoneInfo("America/New_York"))
             smart_sleep_until(open_dt)
 
-        # Run trading day
         result = run_trading_day(force_close_time, force_close_str, next_day)
 
-        # Wait until next trading day
         now_est = dt.datetime.now(tz=ZoneInfo("America/New_York"))
         next_day2 = get_next_trading_day()
         if next_day2:

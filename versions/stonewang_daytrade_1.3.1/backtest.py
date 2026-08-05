@@ -14,6 +14,7 @@ import config
 from scanner import get_data_client, get_tradable_symbols
 from strategy import (
     build_trade_plan, evaluate_trade_stone, evaluate_reentry_trade,
+    evaluate_trade_phased_trail, evaluate_reentry_phased_trail,
     calc_atr, calc_stop_price, calc_price_at_retracement, calc_position_size,
     find_reentry_point,
     TradeResult, TradePlan,
@@ -381,25 +382,13 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
     print(f"[Stone 1.3.1] Backtesting {len(trading_days)} trading days: {trading_days[0].date()} to {trading_days[-1].date()}")
     print(f"Capital: ${config.INITIAL_CAPITAL:,.0f} | Deploy: {config.EQUITY_POSITION_RATIO:.0%} | "
           f"Per-stock cap: ${config.MAX_POSITION_SIZE:,.0f} | Max daily trades: {config.MAX_DAILY_TRADES}")
-    retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.10, 0.20, 0.35, 0.50, 0.75, 1.00, 1.25, 1.50])
-    sell_ratios = getattr(config, "PARTIAL_SELL_RATIOS", [1/8]*8)
-    caps = getattr(config, "TARGET_CAP_TIERS", [0.01, 0.02, 0.035, 0.05, 0.08, 0.10, 0.13, 0.18])
-    trail_pcts = getattr(config, "TRAILING_STOP_PCTS", [0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.05])
-    tier_desc = " + ".join(f"{int(r*100)}%/1÷{int(round(1/s))}" for r, s in zip(retracements, sell_ratios))
-    cap_desc = "/".join(f"{int(c*100)}%" for c in caps)
-    print(f"First trade: {tier_desc} | Caps: {cap_desc} | Trail: {'/'.join(f'{t:.1%}' for t in trail_pcts)}")
-    reentry_ret1 = getattr(config, "REENTRY_PROFIT_RETRACEMENT_1", 0.75)
-    use_tiered = getattr(config, "USE_TIERED_STOP_TARGET", False)
-    if use_tiered:
-        tiers = getattr(config, "STOP_TIERS", [])
-        print(f"Exit: tiered OCO ({len(tiers)} price tiers) | Entry: 3-bar (1.2.0 style)")
-    else:
-        print(f"Exit: 8-tier ladder | Entry: 3-tier (1.3.0 style)")
-    reentry_trail = getattr(config, "REENTRY_TRAILING_PCT", 0.01)
-    reentry_max_bars = getattr(config, "REENTRY_MAX_BARS_BEFORE_TARGET", 0)
-    tl_str = f"{reentry_max_bars} bars" if reentry_max_bars > 0 else "none"
-    print(f"Re-entry: {reentry_ret1:.0%} retracement/50% + {reentry_trail:.0%} trail | "
-          f"Time limit: {tl_str} | Pullback stop: {config.PULLBACK_STOP_THRESHOLD:.0%}")
+    wide_pct = getattr(config, "WIDE_TRAIL_PCT", 10.0)
+    tight_pct = getattr(config, "TIGHT_TRAIL_PCT", 3.0)
+    tighten_after = getattr(config, "TIGHTEN_AFTER_PCT", 5.0)
+    time_limit = getattr(config, "TIME_LIMIT_BARS", 8)
+    print(f"Exit: phased trailing (wide={wide_pct}%→tight={tight_pct}% after +{tighten_after}%) | "
+          f"Time limit: {time_limit} bars ({time_limit*5}min)")
+    print(f"Re-entry: same phased trailing | Pullback stop: {config.PULLBACK_STOP_THRESHOLD:.0%}")
 
     print("\nLoading tradable symbols...")
     symbols = get_tradable_symbols()
@@ -536,48 +525,25 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
             # Alias for chart events (5-min bar index)
             entry_bar_idx = entry_bar_idx_5m
 
-            use_tiered = getattr(config, "USE_TIERED_STOP_TARGET", False)
-
-            if use_tiered:
-                # ── Tiered OCO exit (rossway 0.1wp) ──
-                stop_price_tier, target_price_tier = calc_stop_and_target(entry_price_actual)
-                exit_price, exit_reason, exit_bar, highest = simulate_oco_trade(
-                    entry_price_actual, stop_price_tier, target_price_tier, remaining_list, shares)
-                pnl = (exit_price - entry_price_actual) * shares
-                pnl_pct = (exit_price - entry_price_actual) / entry_price_actual
-                print(f"  {symbol} [1st] entry=${entry_price_actual:.4f} exit=${exit_price:.4f} ({exit_reason}), "
-                      f"P&L=${pnl:,.2f} ({pnl_pct:.2%}), stop=${stop_price_tier:.2f} target=${target_price_tier:.2f}, high=${highest:.4f}")
-                result = TradeResult(
-                    symbol=symbol, date=str(date_key), entry_price=entry_price_actual,
-                    exit_price=exit_price, shares=shares, pnl=round(pnl, 2),
-                    pnl_pct=round(pnl_pct, 4), exit_reason=exit_reason,
-                    stop_price=stop_price_tier, sell_target=target_price_tier,
-                    open_price=open_price, trailing_high=highest,
-                )
-            else:
-                # ── 8-tier ladder exit (original 1.3.0) ──
-                plan = build_trade_plan(symbol, open_price, entry_price_actual, atr,
-                                         position_size=min(pos_per_stock, config.MAX_POSITION_SIZE))
-                time_limit = getattr(config, "FIRST_TRADE_TIME_LIMIT_BARS", 0)
-                result = evaluate_trade_stone(
-                    plan, remaining_list, force_close_price,
-                    time_limit_bars=time_limit,
-                )
-                result.date = str(date_key)
-                result.open_price = open_price
-                result.sell_target = plan.targets[-1]
-                result.stop_price = plan.stop_price
-                type_tag = f"[1st/{plan.target_mode}]"
-                extra = ""
-                retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.10, 0.20, 0.35, 0.50, 0.75, 1.00, 1.25, 1.50])
-                if result.partial_sells:
-                    for ti, (p, s) in enumerate(result.partial_sells):
-                        if s > 0:
-                            extra += f", {retracements[ti]*100:.0f}%@${p:.4f}"
-                if result.trailing_high > result.entry_price:
-                    extra += f", high=${result.trailing_high:.4f}"
-                print(f"  {symbol} {type_tag} entry=${entry_price_actual:.4f} exit=${result.exit_price:.4f} ({result.exit_reason}), "
-                      f"P&L=${result.pnl:,.2f} ({result.pnl_pct:.2%}){extra}")
+            # ── Phased trailing stop exit (v1.3.1) ──
+            result = evaluate_trade_phased_trail(
+                entry_price=entry_price_actual,
+                shares=shares,
+                bars_after_entry=remaining_list,
+                symbol=symbol,
+                open_price=open_price,
+                atr=atr,
+                time_limit_bars=time_limit,
+                force_close_price=force_close_price,
+            )
+            result.date = str(date_key)
+            result.open_price = open_price
+            result.stop_price = round(entry_price_actual * (1 - wide_pct / 100), 2)
+            extra = ""
+            if result.trailing_high > result.entry_price:
+                extra += f", high=${result.trailing_high:.4f}"
+            print(f"  {symbol} [1st] entry=${entry_price_actual:.4f} exit=${result.exit_price:.4f} ({result.exit_reason}), "
+                  f"P&L=${result.pnl:,.2f} ({result.pnl_pct:.2%}){extra}")
 
             all_trades.append(result)
             equity += result.pnl
@@ -589,45 +555,18 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
             sym_key = f"{symbol} ({date_key})"
             chart_bars = _bars_to_chart(bars_5m)
             events = []
-            # Buy event
             events.append({"ts": _bar_ts_str(all_bars_5m, entry_bar_idx), "type": "buy",
                            "price": round(entry_price_actual, 4), "label": f"BUY {shares}sh"})
-            # Target sells — find actual bar times
-            next_search = entry_bar_idx + 1
-            retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.10, 0.20, 0.35, 0.50, 0.75, 1.00, 1.25, 1.50])
-            if result.partial_sells:
-                for ti, (p, s) in enumerate(result.partial_sells):
-                    if s > 0:
-                        t_idx = _find_target_bar(all_bars_5m, next_search, plan.targets[ti])
-                        ts_str = _bar_ts_str(all_bars_5m, t_idx) if t_idx is not None else _bar_ts_str(all_bars_5m, next_search)
-                        pct_label = f"{int(retracements[ti]*100)}%"
-                        events.append({"ts": ts_str, "type": "sell", "price": round(p, 4),
-                                       "label": f"TARGET_{pct_label} {s}sh"})
-                        next_search = (t_idx or next_search) + 1
-            # Exit event
             exit_bar_in_all = entry_bar_idx + 1 + result.exit_bar_idx
-            target_reasons = {f"target_{int(r*100)}" for r in getattr(config, "PROFIT_RETRACEMENT_TIERS", [])}
-            if result.exit_reason not in target_reasons:
-                exit_label = result.exit_reason.upper().replace("_", " ")
-                total_sold = sum(s for _, s in (result.partial_sells or []))
-                remaining_shares = shares - total_sold
-                if remaining_shares > 0:
-                    events.append({"ts": _bar_ts_str(all_bars_5m, exit_bar_in_all), "type": "sell",
-                                   "price": round(result.exit_price, 4), "label": f"{exit_label} {remaining_shares}sh"})
-
-            if use_tiered:
-                targets_dict = {"OCO": round(target_price_tier, 4)}
-                chart_stop = stop_price_tier
-            else:
-                retracements = getattr(config, "PROFIT_RETRACEMENT_TIERS", [0.10, 0.20, 0.35, 0.50, 0.75, 1.00, 1.25, 1.50])
-                targets_dict = {f"{int(r*100)}%": round(t, 4) for r, t in zip(retracements, plan.targets)}
-                chart_stop = plan.stop_price
+            exit_label = result.exit_reason.upper().replace("_", " ")
+            events.append({"ts": _bar_ts_str(all_bars_5m, exit_bar_in_all), "type": "sell",
+                           "price": round(result.exit_price, 4), "label": f"{exit_label} {shares}sh"})
             chart_entries[sym_key] = {
                 "date": str(date_key), "bars_5m": chart_bars, "bars_1m": [],
                 "events": events,
                 "entry_price": round(entry_price_actual, 4),
-                "stop_price": round(chart_stop, 4),
-                "targets": targets_dict,
+                "stop_price": round(result.stop_price, 4),
+                "targets": {"phased_trail": f"{wide_pct}%→{tight_pct}%"},
                 "pnl": round(result.pnl, 2), "open_price": round(open_price, 4),
             }
 
@@ -723,17 +662,13 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
                 reentry_remaining = bars_after_exit[reentry_idx + 1:]
                 reentry_force_close = reentry_remaining[-1]["close"] if reentry_remaining else None
 
-                reentry_result = evaluate_reentry_trade(
+                reentry_result = evaluate_reentry_phased_trail(
                     entry_price=reentry_price_actual,
-                    prev_high=prev_high,
                     shares=reentry_shares,
+                    bars_after_entry=reentry_remaining,
                     symbol=symbol,
                     open_price=open_price,
-                    bars_after_entry=reentry_remaining,
                     force_close_price=reentry_force_close,
-                    stop_price=reentry_stop,
-                    reentry_profit_retracement_1=reentry_retracement_1,
-                    reentry_trailing_pct=getattr(config, "REENTRY_TRAILING_PCT", 0.01),
                 )
                 reentry_result.date = str(date_key)
 
@@ -743,7 +678,7 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
                     re_extra += f", high=${reentry_result.trailing_high:.4f}"
                 print(f"  {symbol} {type_tag} entry=${reentry_price_actual:.4f} exit=${reentry_result.exit_price:.4f} "
                       f"({reentry_result.exit_reason}), P&L=${reentry_result.pnl:,.2f} ({reentry_result.pnl_pct:.2%})"
-                      f", stop=${reentry_stop:.4f}, target=${reentry_target_1:.4f}{re_extra}")
+                      f", stop=${reentry_stop:.4f}{re_extra}")
 
                 all_trades.append(reentry_result)
                 equity += reentry_result.pnl
@@ -752,12 +687,10 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
 
                 # ── Collect chart data for re-entry trade ──
                 re_sym_key = f"{symbol} RE ({date_key})"
-                # Re-entry bars: offset into all_bars_5m
                 reentry_start_in_all = exit_bar_in_all + 1 + reentry_idx
                 re_events = []
                 re_events.append({"ts": _bar_ts_str(all_bars_5m, reentry_start_in_all), "type": "buy",
                                   "price": round(reentry_price_actual, 4), "label": f"RE-ENTRY BUY {reentry_shares}sh"})
-                # Exit event (trailing, stop, force close)
                 reentry_exit_in_all = reentry_start_in_all + 1 + reentry_result.exit_bar_idx
                 re_exit_label = reentry_result.exit_reason.upper().replace("_", " ")
                 re_events.append({"ts": _bar_ts_str(all_bars_5m, reentry_exit_in_all), "type": "sell",
@@ -768,7 +701,7 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
                     "events": re_events,
                     "entry_price": round(reentry_price_actual, 4),
                     "stop_price": round(reentry_stop, 4),
-                    "targets": {"75% retracement": round(reentry_target_1, 4)},
+                    "targets": {"phased_trail": f"{wide_pct}%→{tight_pct}%"},
                     "pnl": round(reentry_result.pnl, 2), "open_price": round(open_price, 4),
                 }
 
