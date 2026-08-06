@@ -131,10 +131,10 @@ STOP_LIMIT_BUFFER = 0.03
 FORCE_CLOSE_LIMIT_TIMEOUT = 120
 
 # ── Phased trailing stop (v1.3.2ts) ─────────────────────────────────────
-WIDE_TRAIL_PCT = 10.0       # 入场时 trailing stop 宽度% (= 初始止损10%)
+WIDE_TRAIL_PCT = 3.0        # 入场时 trailing stop 宽度% (= 初始止损3%)
 TIGHT_TRAIL_PCT = 1.0       # 收紧后 trailing stop 宽度%
 TIGHTEN_AFTER_PCT = 2.0     # 盈利达到此%后收紧 trailing
-TIME_LIMIT_BARS = 8         # 无盈利时 breakeven 退出 (8×5min=40min)
+TIME_LIMIT_BARS = 12        # 无盈利时 breakeven 退出 (12×5min=60min)
 
 # ── Polling interval ──────────────────────────────────────────────────
 POLL_INTERVAL = 3  # seconds (reduced from 5 after batch order cache optimization)

@@ -43,10 +43,10 @@ ENTRY_WINDOW_END = "10:00"
 MAX_CANDIDATES = 20
 
 # ── Exit: Phased trailing stop ──
-WIDE_TRAIL_PCT = 10.0       # 入场时 trailing stop 宽度% (= 初始止损10%)
+WIDE_TRAIL_PCT = 3.0        # 入场时 trailing stop 宽度% (= 初始止损3%)
 TIGHT_TRAIL_PCT = 1.0       # 收紧后 trailing stop 宽度%
 TIGHTEN_AFTER_PCT = 2.0     # 盈利达到此%后收紧 trailing
-TIME_LIMIT_BARS = 8         # 无盈利时 breakeven 退出 (8×5min=40min)
+TIME_LIMIT_BARS = 12        # 无盈利时 breakeven 退出 (12×5min=60min)
 
 # ── Position management ──
 MAX_POSITIONS = 0             # 0=不限, 全力部署购买力
