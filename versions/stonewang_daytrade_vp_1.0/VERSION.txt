@@ -1,0 +1,31 @@
+stonewang_daytrade_1.3.2ts
+
+Released: 2026-08-05
+
+1.3.2ts changes (8/5) — phased trailing stop (replacing 8-tier OCO ladder sell):
+
+核心改动: 分段trailing stop替代8档阶梯卖出
+- 入场时放置10% trailing stop (= 初始止损10%)
+- 盈利>5%后取消旧trailing, 放置3% trailing stop (锁定利润)
+- 任一时刻只有1个trailing stop活跃
+- 时间限制: 40分钟(8×5min)无盈利则breakeven退出
+- EOD 15:50强制平仓
+
+回测结果 (30天): $500 → $1,334 (+166.8%), 715笔交易
+
+删除的系统:
+- 8档阶梯卖出 (PROFIT_RETRACEMENT_TIERS, TARGET_CAP_TIERS, PARTIAL_SELL_RATIOS)
+- OCO预挂单系统 (OCO_ENABLED, OCO_STOP_BUFFER_PCT, calc_stop_and_target, place_oco_exit, check_oco_fill)
+- 分档trailing stop (TRAILING_STOP_PCTS)
+
+新增配置:
+- WIDE_TRAIL_PCT = 10.0 (入场时trailing宽度%)
+- TIGHT_TRAIL_PCT = 3.0 (收紧后trailing宽度%)
+- TIGHTEN_AFTER_PCT = 5.0 (盈利达到此%后收紧)
+- TIME_LIMIT_BARS = 8 (无盈利breakeven退出)
+
+继承自 v1.3.1:
+- Capital recycling (entry_checked non-permanent, REENTRY_POSITION_RATIO=1.0)
+- Mid-day re-scan (10:30/11:30)
+- 1分钟K线3-bar折返确认入场
+- 1.2 chain robustness fixes (P0-P3)
