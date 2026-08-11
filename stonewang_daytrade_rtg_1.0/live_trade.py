@@ -191,7 +191,7 @@ def start_ws_stream(symbols):
         from alpaca.data.live.stock import StockDataStream
         _ws_stream = StockDataStream(
             config.ALPACA_API_KEY, config.ALPACA_SECRET_KEY,
-            feed=getattr(config, "DATA_FEED", "sip"),
+            feed=getattr(config, "DATA_FEED_OBJ", DataFeed.SIP),
         )
         for sym in symbols:
             _ws_stream.subscribe_bars(_on_bar, sym)
@@ -316,13 +316,19 @@ def scan_gaps(target_date):
     if results.empty:
         log("No gap stocks found")
         return []
+    # Sort by prev_volume as proxy for RVOL (scan_gaps_batch doesn't compute RVOL)
     results = results.sort_values("prev_volume", ascending=False)
     candidates = []
     for _, row in results.head(config.MAX_CANDIDATES * 2).iterrows():
         rvol = row.get("rvol", 0)
-        if rvol <= 0 and "prev_volume" in row:
+        if rvol <= 0:
+            # Estimate RVOL from prev_volume / MIN_VOLUME (rough proxy)
             avg_vol = row.get("avg_volume_20d", 0)
-            rvol = row["prev_volume"] / avg_vol if avg_vol > 0 else 0
+            if avg_vol > 0:
+                rvol = row["prev_volume"] / avg_vol
+            else:
+                # Use prev_volume as ranking proxy (higher = better)
+                rvol = row["prev_volume"] / config.MIN_VOLUME
         candidates.append({
             "symbol": row["symbol"], "open_price": float(row["open_price"]),
             "prev_close": float(row["prev_close"]), "gap_pct": float(row["gap_pct"]),
@@ -419,7 +425,12 @@ def run_trading_day(target_date):
 
     candidates = scan_gaps(target_date)
     if not candidates:
-        log("No candidates, waiting for force close")
+        # Retry at 09:31 — daily bar data may not be available before 09:30
+        log("No candidates at 09:27, retrying at 09:31...")
+        _wait_until(target_date, dt.time(9, 31))
+        candidates = scan_gaps(target_date)
+    if not candidates:
+        log("No candidates after retry, waiting for force close")
         _wait_until(target_date, _parse_time(config.FORCE_CLOSE_TIME))
         return
 
