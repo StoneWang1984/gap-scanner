@@ -272,7 +272,7 @@ def place_sell_market(symbol, shares):
 
 def force_sell_position(symbol, shares):
     try:
-        trading_client.close_position(symbol_or_symbol=symbol, qty=str(shares))
+        trading_client.close_position(symbol_or_asset_id=symbol)
         # Wait for fill confirmation (up to 30s)
         time.sleep(1)
         for _ in range(30):
@@ -521,14 +521,10 @@ def run_trading_day(target_date):
             break
 
         if max_daily_loss > 0:
-            # Daily loss circuit breaker: check if all positions hit their stops,
-            # the worst-case total loss would exceed the limit
-            worst_case_loss = daily_loss
-            for pos in positions:
-                stop_price = pos.entry_price * (1 - pos.stop_pct)
-                worst_case_loss += (stop_price - pos.entry_price) * pos.shares
-            if worst_case_loss <= -max_daily_loss:
-                log(f"Daily loss worst-case ${worst_case_loss:,.2f} (realized ${daily_loss:,.2f}) exceeded limit")
+            # Daily loss circuit breaker: only trigger on realized losses.
+            # Unrealized drawdown is normal intra-trade — positions have their own stop-loss.
+            if daily_loss <= -max_daily_loss:
+                log(f"Daily realized loss ${daily_loss:,.2f} exceeded limit ${max_daily_loss:,.2f}")
                 # Close all positions before stopping
                 for pos in positions[:]:
                     sold, fill = force_sell_position(pos.symbol, pos.shares)
