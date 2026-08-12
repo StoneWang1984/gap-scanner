@@ -521,15 +521,14 @@ def run_trading_day(target_date):
             break
 
         if max_daily_loss > 0:
-            # Include unrealized P&L in daily loss check
-            unrealized = 0.0
+            # Daily loss circuit breaker: check if all positions hit their stops,
+            # the worst-case total loss would exceed the limit
+            worst_case_loss = daily_loss
             for pos in positions:
-                bars = _accumulator.get_1min_bars(pos.symbol)
-                if bars:
-                    cur = bars[-1]["close"]
-                    unrealized += (cur - pos.entry_price) * pos.shares
-            if (daily_loss + unrealized) <= -max_daily_loss:
-                log(f"Daily loss ${daily_loss:,.2f} (unrealized ${unrealized:,.2f}) exceeded limit")
+                stop_price = pos.entry_price * (1 - pos.stop_pct)
+                worst_case_loss += (stop_price - pos.entry_price) * pos.shares
+            if worst_case_loss <= -max_daily_loss:
+                log(f"Daily loss worst-case ${worst_case_loss:,.2f} (realized ${daily_loss:,.2f}) exceeded limit")
                 state["daily_stopped"] = True
                 break
 
