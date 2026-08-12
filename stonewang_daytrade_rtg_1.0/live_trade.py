@@ -529,6 +529,16 @@ def run_trading_day(target_date):
                 worst_case_loss += (stop_price - pos.entry_price) * pos.shares
             if worst_case_loss <= -max_daily_loss:
                 log(f"Daily loss worst-case ${worst_case_loss:,.2f} (realized ${daily_loss:,.2f}) exceeded limit")
+                # Close all positions before stopping
+                for pos in positions[:]:
+                    sold, fill = force_sell_position(pos.symbol, pos.shares)
+                    if sold > 0:
+                        pnl = (fill - pos.entry_price) * sold if fill > 0 else 0
+                        trades_detail.append({"symbol": pos.symbol, "entry": pos.entry_price, "exit": fill,
+                                              "shares": sold, "pnl": round(pnl, 2), "reason": "circuit_breaker",
+                                              "trade_type": pos.signal_type})
+                        daily_trades += 1
+                        log(f"Circuit breaker close {pos.symbol}, P&L=${pnl:+,.2f}")
                 state["daily_stopped"] = True
                 break
 
