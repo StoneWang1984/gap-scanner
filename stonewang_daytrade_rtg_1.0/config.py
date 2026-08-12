@@ -73,7 +73,7 @@ RTG_REENTRY_SIZE_PCT = 0.50     # Re-entry at 50% of original position size
 
 # ── Entry parameters ─────────────────────────────────────────────────
 ENTRY_WINDOW_START = "09:30"  # Start at open (v1.0 was 09:31)
-ENTRY_WINDOW_END = "12:00"    # Extended to noon (was 10:30)
+ENTRY_WINDOW_END = "15:30"    # Extended to afternoon (was 12:00)
 
 # Signal A: Red-to-Green (THE signal — 75% win rate in backtest)
 RTG_VOLUME_MULT = 1.5       # Lower threshold catches earlier signals (was 2.0)
