@@ -85,7 +85,7 @@ def get_rvol_exit_params(rvol):
     for rvol_min, stop, target, trail_act, trail in tiers:
         if rvol >= rvol_min:
             return stop, target, trail_act, trail
-    return 0.05, 0.20, 0.05, 0.03
+    return 0.03, 0.15, 0.03, 0.02
 
 
 def log(msg):
@@ -284,12 +284,19 @@ def force_sell_position(symbol, shares):
             except Exception:
                 break  # Position not found = fully closed
             time.sleep(1)
-        # Get fill price from recent closed order
+        # Get fill price from recent closed order (last 5 minutes only)
         fill_price = 0.0
         try:
+            cutoff = dt.datetime.now(_EST) - dt.timedelta(minutes=5)
             orders = trading_client.get_orders_for_symbol(symbol)
             for o in orders:
                 if o.side == OrderSide.SELL and o.status in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
+                    # Only match orders submitted in the last 5 minutes
+                    submitted = getattr(o, "submitted_at", None)
+                    if submitted and hasattr(submitted, "timestamp"):
+                        submitted_dt = dt.datetime.fromtimestamp(submitted.timestamp(), tz=_EST)
+                        if submitted_dt < cutoff:
+                            continue
                     filled_qty = int(float(o.filled_qty))
                     if filled_qty >= shares:
                         fill_price = float(o.filled_avg_price or 0)
@@ -307,6 +314,40 @@ def save_state(state):
         json.dump(state, f, indent=2, default=str)
 
 
+def _fetch_20d_avg_volumes(symbols, target_date):
+    """Fetch 20-day average daily volume from Alpaca for RVOL calculation."""
+    lookback = target_date - pd.Timedelta(days=30)
+    avg_vols = {}
+    batch_size = 50
+    for i in range(0, len(symbols), batch_size):
+        batch = symbols[i:i + batch_size]
+        try:
+            req = StockBarsRequest(
+                symbol_or_symbols=batch, timeframe=TimeFrame.Day,
+                start=lookback, end=target_date - pd.Timedelta(days=1),
+                adjustment=Adjustment.RAW,
+                feed=getattr(config, "DATA_FEED_OBJ", DataFeed.SIP),
+            )
+            bars = data_client.get_stock_bars(req)
+            if bars.df.empty:
+                continue
+            df = bars.df
+            for sym in batch:
+                try:
+                    if "symbol" in df.columns:
+                        sym_df = df[df["symbol"] == sym]
+                    else:
+                        sym_df = df.loc[sym] if sym in df.index else pd.DataFrame()
+                    if not sym_df.empty:
+                        recent = sym_df["volume"].tail(getattr(config, "RVOL_LOOKBACK_DAYS", 20))
+                        avg_vols[sym] = float(recent.mean())
+                except Exception:
+                    pass
+        except Exception as e:
+            log(f"20d volume fetch error batch {i}: {e}")
+    return avg_vols
+
+
 def scan_gaps(target_date):
     log(f"Scanning for gap stocks on {target_date.date()}...")
     symbols = get_tradable_symbols()
@@ -316,21 +357,25 @@ def scan_gaps(target_date):
     if results.empty:
         log("No gap stocks found")
         return []
-    # Sort by prev_volume as proxy for RVOL (scan_gaps_batch doesn't compute RVOL)
-    results = results.sort_values("prev_volume", ascending=False)
+
+    # Fetch real 20-day average volumes for proper RVOL calculation
+    gap_symbols = results["symbol"].tolist()
+    avg_vols = _fetch_20d_avg_volumes(gap_symbols, target_date)
+    log(f"Fetched 20d avg volume for {len(avg_vols)}/{len(gap_symbols)} symbols")
+
     candidates = []
-    for _, row in results.head(config.MAX_CANDIDATES * 2).iterrows():
-        rvol = row.get("rvol", 0)
-        if rvol <= 0:
-            # Estimate RVOL from prev_volume / MIN_VOLUME (rough proxy)
-            avg_vol = row.get("avg_volume_20d", 0)
-            if avg_vol > 0:
-                rvol = row["prev_volume"] / avg_vol
-            else:
-                # Use prev_volume as ranking proxy (higher = better)
-                rvol = row["prev_volume"] / config.MIN_VOLUME
+    for _, row in results.iterrows():
+        sym = row["symbol"]
+        avg_vol = avg_vols.get(sym, 0)
+        prev_vol = row.get("prev_volume", 0)
+        if avg_vol > 0:
+            rvol = prev_vol / avg_vol
+        elif row.get("avg_volume_20d", 0) > 0:
+            rvol = prev_vol / row["avg_volume_20d"]
+        else:
+            rvol = 0.0
         candidates.append({
-            "symbol": row["symbol"], "open_price": float(row["open_price"]),
+            "symbol": sym, "open_price": float(row["open_price"]),
             "prev_close": float(row["prev_close"]), "gap_pct": float(row["gap_pct"]),
             "rvol": float(rvol),
         })
@@ -439,7 +484,8 @@ def run_trading_day(target_date):
     restart_ws_stream(syms)
 
     positions = []
-    entry_checked = set()
+    entry_checked = set()  # Stocks that successfully entered or were confirmed no-signal
+    entry_rejected = set()  # Stocks rejected by Alpaca (retry when buying power frees)
     daily_trades = 0
     trades_detail = []
     daily_loss = 0.0
@@ -474,10 +520,18 @@ def run_trading_day(target_date):
                     log(f";Force closed {pos.symbol}, P&L=${pnl:+,.2f}")
             break
 
-        if max_daily_loss > 0 and daily_loss <= -max_daily_loss:
-            log(f"Daily loss ${daily_loss:,.2f} exceeded limit")
-            state["daily_stopped"] = True
-            break
+        if max_daily_loss > 0:
+            # Include unrealized P&L in daily loss check
+            unrealized = 0.0
+            for pos in positions:
+                bars = _accumulator.get_1min_bars(pos.symbol)
+                if bars:
+                    cur = bars[-1]["close"]
+                    unrealized += (cur - pos.entry_price) * pos.shares
+            if (daily_loss + unrealized) <= -max_daily_loss:
+                log(f"Daily loss ${daily_loss:,.2f} (unrealized ${unrealized:,.2f}) exceeded limit")
+                state["daily_stopped"] = True
+                break
 
         # Exit monitoring
         for pos in positions[:]:
@@ -534,6 +588,15 @@ def run_trading_day(target_date):
 
         # Entry monitoring
         if now < entry_end_dt and len(positions) < config.MAX_POSITIONS:
+            # Read live buying power from Alpaca before sizing
+            live_bp = 0
+            try:
+                acct_live = trading_client.get_account()
+                live_bp = float(acct_live.buying_power)
+                equity = float(acct_live.equity)
+            except Exception:
+                live_bp = equity  # Fallback to cached equity
+
             for c in candidates:
                 sym = c["symbol"]
                 rvol = c.get("rvol", 0)
@@ -556,20 +619,20 @@ def run_trading_day(target_date):
                 entry_price, confirmed, signal_type = check_rtg_entry(sym, open_price, bars)
                 if not confirmed or entry_price <= 0:
                     continue
-                # RVOL-weighted sizing
+                # RVOL-weighted sizing, capped to available buying power
                 if is_reentry:
                     reentry_pct = getattr(config, "RTG_REENTRY_SIZE_PCT", 0.50)
                     slot = max(config.MIN_POSITION_SIZE, get_rvol_sizing(rvol, equity) * reentry_pct)
                 else:
                     slot = max(config.MIN_POSITION_SIZE, get_rvol_sizing(rvol, equity))
+                slot = min(slot, live_bp * 0.95)  # Cap to 95% of buying power
                 shares = int(slot / entry_price)
                 if shares <= 0:
-                    entry_checked.add(sym)
                     continue
                 order, _, reject = place_buy_market(sym, shares)
                 if order is None:
                     log(f"Entry rejected: {sym} - {reject}")
-                    entry_checked.add(sym)
+                    entry_rejected.add(sym)
                     continue
                 filled, fill_price = wait_order_filled(str(order.id), timeout=15)
                 if filled <= 0:
@@ -589,12 +652,17 @@ def run_trading_day(target_date):
                 entry_checked.add(sym)
                 entry_count[sym] = entry_count.get(sym, 0) + 1
                 daily_trades += 1
+                live_bp -= fill_price * filled  # Track remaining buying power
                 log(f"ENTRY {sym} [{sig_label}] {filled}sh @ ${fill_price:.4f} "
                     f"[RVOL={rvol:.1f}× stop={stop_p:.0%} tgt={target_p:.0%}]")
 
-        # WS health
-        if _stream_state["running"] and time.time() - _stream_state["last_bar_ts"] > 60:
-            log("WebSocket: no bars for 60s, restarting...")
+        # WS health — restart if not running OR no bars for 60s
+        ws_stale = time.time() - _stream_state["last_bar_ts"] > 60
+        if not _stream_state["running"] or ws_stale:
+            if not _stream_state["running"]:
+                log("WebSocket: not running, restarting...")
+            else:
+                log("WebSocket: no bars for 60s, restarting...")
             restart_ws_stream(syms)
 
         # Save state
