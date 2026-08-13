@@ -536,6 +536,43 @@ def run_trading_day(target_date):
 
     positions = []
     entry_checked = set()  # Stocks that successfully entered or were confirmed no-signal
+
+    # Restore existing Alpaca positions (survive restart)
+    try:
+        existing_positions = trading_client.get_all_positions()
+        prev_state = {}
+        try:
+            with open(_state_file) as f:
+                prev_state = json.load(f)
+        except Exception:
+            pass
+        prev_positions = {p["symbol"]: p for p in prev_state.get("positions", [])}
+        for ep in existing_positions:
+            sym = ep.symbol
+            sp = prev_positions.get(sym, {})
+            cand = next((c for c in candidates if c["symbol"] == sym), None)
+            rvol = sp.get("rvol", cand.get("rvol", 0) if cand else 0)
+            stop_p, target_p, trail_act_p, trail_p = get_rvol_exit_params(rvol)
+            pos = Position(
+                symbol=sym, shares=int(float(ep.qty)),
+                entry_price=float(ep.avg_entry_price), entry_ts=time.time(),
+                open_price=sp.get("open_price", cand.get("open_price", 0) if cand else 0),
+                gap_pct=sp.get("gap_pct", cand.get("gap_pct", 0) if cand else 0),
+                signal_type=sp.get("signal_type", "rtg"),
+                highest=float(ep.current_price),
+                trail_active=sp.get("trail_active", False),
+                rvol=rvol,
+                stop_pct=sp.get("stop_pct", stop_p),
+                target_pct=sp.get("target_pct", target_p),
+                trail_activate_pct=sp.get("trail_activate_pct", trail_act_p),
+                trail_pct=sp.get("trail_pct", trail_p),
+            )
+            positions.append(pos)
+            entry_checked.add(sym)
+        if positions:
+            log(f"Restored {len(positions)} existing positions: {[p.symbol for p in positions]}")
+    except Exception as e:
+        log(f"Could not restore positions: {e}")
     entry_rejected = set()  # Stocks rejected by Alpaca (retry when buying power frees)
     daily_trades = 0
     trades_detail = []
