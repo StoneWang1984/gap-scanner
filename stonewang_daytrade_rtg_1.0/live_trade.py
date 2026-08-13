@@ -447,7 +447,7 @@ def backfill_1min_bars(symbols, target_date):
             pass
 
 
-def check_rtg_entry(symbol, open_price, bars):
+def check_rtg_entry(symbol, open_price, bars, after_time=None):
     if len(bars) < 2:
         return 0.0, False, ""
     ew_start_h, ew_start_m = (int(x) for x in config.ENTRY_WINDOW_START.split(":"))
@@ -463,6 +463,15 @@ def check_rtg_entry(symbol, open_price, bars):
         bar_time = ts.time() if isinstance(ts, dt.datetime) else (ts.time() if hasattr(ts, "time") else None)
         if bar_time is None or not (entry_start <= bar_time <= entry_end):
             continue
+        # For re-entry: only consider bars after the last exit time
+        if after_time is not None:
+            if isinstance(ts, dt.datetime):
+                if ts < after_time:
+                    continue
+            elif hasattr(ts, "time") and isinstance(after_time, dt.datetime):
+                bar_dt = dt.datetime.combine(after_time.date(), ts, tzinfo=after_time.tzinfo)
+                if bar_dt < after_time:
+                    continue
         bc = bar["close"]
         bh = bar["high"]
         bv = bar["volume"]
@@ -520,6 +529,7 @@ def run_trading_day(target_date):
     max_daily_loss = equity * config.MAX_DAILY_LOSS_PCT
     entry_count = {}  # symbol -> count of entries (for re-entry)
     _last_exit_ts = {}  # symbol -> timestamp of last exit
+    _stop_exit_ts = {}  # symbol -> timestamp of stop_loss exit (cooldown)
 
     force_close_dt = dt.datetime.combine(target_date.date(), _parse_time(config.FORCE_CLOSE_TIME), tzinfo=_EST)
     entry_end_dt = dt.datetime.combine(target_date.date(), _parse_time(config.ENTRY_WINDOW_END), tzinfo=_EST)
@@ -618,6 +628,9 @@ def run_trading_day(target_date):
                 positions.remove(pos)
                 _last_exit_ts[pos.symbol] = time.time()
                 entry_checked.discard(pos.symbol)  # Allow re-entry
+                # Stop-loss exit: add cooldown to prevent immediate re-entry into same drop
+                if reason == "stop_loss":
+                    _stop_exit_ts[pos.symbol] = time.time()
                 log(f"EXIT {pos.symbol} {reason} ${fill:.4f}, P&L=${pnl:+,.2f}")
 
         # Entry monitoring
@@ -634,31 +647,25 @@ def run_trading_day(target_date):
             for c in candidates:
                 sym = c["symbol"]
                 rvol = c.get("rvol", 0)
-                if sym in entry_checked or any(p.symbol == sym for p in positions):
+                if any(p.symbol == sym for p in positions):
                     continue
-                # Re-entry check
+                # Stop-loss cooldown: don't re-enter within 60 seconds of a stop exit
+                if sym in _stop_exit_ts and time.time() - _stop_exit_ts[sym] < 60:
+                    continue
+                # Re-entry: only check bars after last exit time
                 is_reentry = sym in _last_exit_ts
-                if is_reentry:
-                    max_entries = 1 + getattr(config, "RTG_REENTRY_MAX", 1)
-                    if entry_count.get(sym, 0) >= max_entries:
-                        continue
-                    if not getattr(config, "RTG_REENTRY_ALLOWED", False):
-                        continue
+                after_time = _last_exit_ts.get(sym) if is_reentry else None
                 if config.MAX_DAILY_TRADES > 0 and daily_trades >= config.MAX_DAILY_TRADES:
                     break
                 if max_daily_loss > 0 and daily_loss <= -max_daily_loss:
                     break
                 open_price = c["open_price"]
                 bars = _accumulator.get_1min_bars(sym)
-                entry_price, confirmed, signal_type = check_rtg_entry(sym, open_price, bars)
+                entry_price, confirmed, signal_type = check_rtg_entry(sym, open_price, bars, after_time=after_time)
                 if not confirmed or entry_price <= 0:
                     continue
                 # RVOL-weighted sizing, capped to available buying power
-                if is_reentry:
-                    reentry_pct = getattr(config, "RTG_REENTRY_SIZE_PCT", 0.50)
-                    slot = max(config.MIN_POSITION_SIZE, get_rvol_sizing(rvol, equity) * reentry_pct)
-                else:
-                    slot = max(config.MIN_POSITION_SIZE, get_rvol_sizing(rvol, equity))
+                slot = max(config.MIN_POSITION_SIZE, get_rvol_sizing(rvol, equity))
                 slot = min(slot, live_bp * 0.95)  # Cap to 95% of buying power
                 shares = int(slot / entry_price)
                 if shares <= 0:
