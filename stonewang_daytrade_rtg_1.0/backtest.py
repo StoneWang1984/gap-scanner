@@ -249,13 +249,15 @@ def _bars_to_chart(bars_df):
     return result
 
 
-def find_rtg_entry_1min(bars_1m, open_price):
+def find_rtg_entry_1min(bars_1m, open_price, min_volume=None):
     """Find RTG or Gap-and-Go entry on 1-min bars.
 
     Returns (entry_price, entry_bar_idx, confirmed, signal_type).
     """
     if bars_1m.empty or len(bars_1m) < 2:
         return 0.0, -1, False, ""
+    if min_volume is None:
+        min_volume = config.RTG_MIN_VOLUME
 
     entry_start_str = getattr(config, "ENTRY_WINDOW_START", "09:30")
     entry_end_str = getattr(config, "ENTRY_WINDOW_END", "10:30")
@@ -294,7 +296,7 @@ def find_rtg_entry_1min(bars_1m, open_price):
         if (bar_close > open_price
                 and prev_vol > 0
                 and bar_vol >= config.RTG_VOLUME_MULT * prev_vol
-                and bar_vol >= config.RTG_MIN_VOLUME):
+                and bar_vol >= min_volume):
             # Entry at open_price level (not signal bar close) for better price
             if getattr(config, "RTG_ENTRY_AT_OPEN", True):
                 entry = round(open_price * 1.001, 4)  # open_price + 0.1% buffer
@@ -316,13 +318,19 @@ def find_rtg_entry_1min(bars_1m, open_price):
     return 0.0, -1, False, ""
 
 
-def get_rvol_sizing(rvol, equity):
-    """Get position size based on RVOL-weighted tiers."""
+def _get_rvol_tier(rvol):
     tiers = getattr(config, "RVOL_SIZING_TIERS", [(10.0, 0.50), (5.0, 0.30), (0.0, 0.15)])
     for rvol_min, pct in tiers:
         if rvol >= rvol_min:
-            return round(equity * pct, 2)
-    return round(equity * 0.15, 2)
+            return rvol_min, pct
+    return 0.0, 0.15
+
+
+def get_rvol_sizing(rvol, equity, same_tier_count=1):
+    """Get position size based on RVOL-weighted tiers, split among same-tier candidates."""
+    _, pct = _get_rvol_tier(rvol)
+    split_pct = pct / max(same_tier_count, 1)
+    return round(equity * split_pct, 2)
 
 
 def get_rvol_exit_params(rvol):
@@ -418,6 +426,15 @@ def run_backtest(end_date=None, n_days=None):
         max_daily_loss = equity * config.MAX_DAILY_LOSS_PCT
         entry_count = {}  # symbol -> count of entries (for re-entry tracking)
         cached_bars = {}  # symbol -> (bars_df, bars_list)
+        # Backtest: raise daily trade limit to allow all candidates to trade concurrently
+        bt_max_daily_trades = max(config.MAX_DAILY_TRADES, len(candidates) * 20)
+
+        # Pre-compute same-tier counts for fair sizing split
+        tier_counts = {}
+        for _, r in candidates.iterrows():
+            rvol_r = r.get("rvol", 0)
+            tier_key = _get_rvol_tier(rvol_r)[0]
+            tier_counts[tier_key] = tier_counts.get(tier_key, 0) + 1
 
         for _, row in candidates.iterrows():
             symbol = row["symbol"]
@@ -435,141 +452,125 @@ def run_backtest(end_date=None, n_days=None):
             if bars_1m is None:
                 continue
 
-            # First entry
-            entries_for_sym = entry_count.get(symbol, 0)
-            if entries_for_sym >= 1 + getattr(config, "RTG_REENTRY_MAX", 0):
-                continue
-
-            # Find entry signal
-            start_bar = 0  # for re-entry, start search after previous exit
-            entry_price, entry_bar_idx, confirmed, signal_type = find_rtg_entry_1min(
-                bars_1m.iloc[start_bar:] if start_bar > 0 else bars_1m, open_price)
-            if not confirmed or entry_price <= 0:
-                continue
-
-            if config.MAX_DAILY_TRADES > 0 and daily_trades >= config.MAX_DAILY_TRADES:
-                break
-            if max_daily_loss > 0 and daily_loss <= -max_daily_loss:
-                print(f"  Daily loss ${daily_loss:,.2f} exceeded limit, stopping for day")
-                break
+            # RVOL-adaptive min volume: high RVOL relaxes liquidity floor
+            min_vol = config.RTG_MIN_VOLUME
+            if rvol >= 10:
+                min_vol = max(config.RTG_MIN_VOLUME // 3, 5000)
+            elif rvol >= 5:
+                min_vol = max(config.RTG_MIN_VOLUME // 2, 10000)
 
             entry_slippage = getattr(config, "SLIPPAGE_ENTRY_PCT", 0.005)
-            entry_price_actual = round(entry_price * (1 + entry_slippage), 4)
-
-            # RVOL-weighted position sizing
-            is_reentry = entries_for_sym > 0
-            if is_reentry:
-                reentry_pct = getattr(config, "RTG_REENTRY_SIZE_PCT", 0.50)
-                pos_size = get_rvol_sizing(rvol, equity) * reentry_pct
-            else:
-                pos_size = get_rvol_sizing(rvol, equity)
-            pos_size = max(config.MIN_POSITION_SIZE, pos_size)
-            shares = int(pos_size / entry_price_actual)
-            if shares <= 0:
-                continue
-
-            # Adaptive exit parameters based on RVOL
+            same_tier = tier_counts.get(_get_rvol_tier(rvol)[0], 1)
             stop_p, target_p, trail_act_p, trail_p = get_rvol_exit_params(rvol)
-
-            remaining_list = all_bars_1m[entry_bar_idx + 1:]
-            force_close_price = remaining_list[-1]["close"] if remaining_list else entry_price_actual
-
-            result = evaluate_trade_rtg(
-                entry_price=entry_price_actual,
-                shares=shares,
-                bars_after_entry=remaining_list,
-                symbol=symbol,
-                open_price=open_price,
-                force_close_price=force_close_price,
-                entry_bar_idx=entry_bar_idx,
-                signal_type=signal_type + ("_re" if is_reentry else ""),
-                stop_pct=stop_p,
-                target_pct=target_p,
-                trail_activate_pct=trail_act_p,
-                trail_pct=trail_p,
-            )
-            result.date = str(date_key)
-            result.open_price = open_price
-
-            entry_ts = _bar_ts_str(all_bars_1m, entry_bar_idx)
-            exit_bar = entry_bar_idx + 1 + result.exit_bar_idx
-            exit_ts = _bar_ts_str(all_bars_1m, exit_bar)
-            label = f"{signal_type}_re" if is_reentry else signal_type
-            print(f"  {symbol} [{label}] entry=${entry_price_actual:.4f}@{entry_ts} "
-                  f"exit=${result.exit_price:.4f}@{exit_ts} ({result.exit_reason}), "
-                  f"P&L=${result.pnl:+,.2f} ({result.pnl_pct:+.2%}) "
-                  f"[RVOL={rvol:.1f}× stop={stop_p:.0%} tgt={target_p:.0%}]")
-
-            all_trades.append(result)
-            equity += result.pnl
-            daily_loss += result.pnl
-            daily_trades += 1
-            entry_count[symbol] = entries_for_sym + 1
-
-            # Chart data
             sym_key = f"{symbol} ({date_key})"
             chart_bars = _bars_to_chart(bars_1m)
             events = chart_entries.get(sym_key, {}).get("events", [])
-            events.append({"ts": entry_ts, "type": "buy", "price": entry_price_actual,
-                           "label": f"BUY {shares}sh [{label}]"})
-            events.append({"ts": exit_ts, "type": "sell", "price": result.exit_price,
-                           "label": f"{result.exit_reason.upper()} {shares}sh"})
-            chart_entries[sym_key] = {
-                "date": str(date_key), "bars_1m": chart_bars, "events": events,
-                "entry_price": entry_price_actual,
-                "stop_price": result.stop_price, "target_price": result.target_price,
-                "pnl": result.pnl, "open_price": open_price, "signal": label,
-            }
 
-            # Re-entry: if profitable exit (trail_stop or target), check for new RTG signal
-            if (getattr(config, "RTG_REENTRY_ALLOWED", False)
-                    and result.exit_reason in ("trail_stop", "target")
-                    and entry_count.get(symbol, 0) <= config.RTG_REENTRY_MAX
-                    and daily_trades < config.MAX_DAILY_TRADES):
-                reentry_start = exit_bar + 1
-                if reentry_start < len(bars_1m):
-                    re_bars = bars_1m.iloc[reentry_start:]
-                    re_entry, re_idx, re_conf, re_sig = find_rtg_entry_1min(re_bars, open_price)
-                    if re_conf and re_entry > 0:
-                        re_entry_actual = round(re_entry * (1 + entry_slippage), 4)
-                        re_size = max(config.MIN_POSITION_SIZE, get_rvol_sizing(rvol, equity) * getattr(config, "RTG_REENTRY_SIZE_PCT", 0.50))
-                        re_shares = int(re_size / re_entry_actual)
-                        if re_shares > 0:
-                            re_bar_idx = reentry_start + re_idx
-                            re_remaining = all_bars_1m[re_bar_idx + 1:]
-                            re_force = re_remaining[-1]["close"] if re_remaining else re_entry_actual
-                            re_result = evaluate_trade_rtg(
-                                entry_price=re_entry_actual, shares=re_shares,
-                                bars_after_entry=re_remaining, symbol=symbol,
-                                open_price=open_price, force_close_price=re_force,
-                                entry_bar_idx=re_bar_idx, signal_type=signal_type + "_re",
-                                stop_pct=stop_p, target_pct=target_p,
-                                trail_activate_pct=trail_act_p, trail_pct=trail_p,
-                            )
-                            re_result.date = str(date_key)
-                            re_result.open_price = open_price
-                            re_entry_ts = _bar_ts_str(all_bars_1m, re_bar_idx)
-                            re_exit_bar = re_bar_idx + 1 + re_result.exit_bar_idx
-                            re_exit_ts = _bar_ts_str(all_bars_1m, re_exit_bar)
-                            print(f"  {symbol} [{signal_type}_re] entry=${re_entry_actual:.4f}@{re_entry_ts} "
-                                  f"exit=${re_result.exit_price:.4f}@{re_exit_ts} ({re_result.exit_reason}), "
-                                  f"P&L=${re_result.pnl:+,.2f} ({re_result.pnl_pct:+.2%})")
-                            all_trades.append(re_result)
-                            equity += re_result.pnl
-                            daily_loss += re_result.pnl
-                            daily_trades += 1
-                            entry_count[symbol] = entry_count.get(symbol, 0) + 1
-                            events.append({"ts": re_entry_ts, "type": "buy", "price": re_entry_actual,
-                                           "label": f"BUY {re_shares}sh [{signal_type}_re]"})
-                            events.append({"ts": re_exit_ts, "type": "sell", "price": re_result.exit_price,
-                                           "label": f"{re_result.exit_reason.upper()} {re_shares}sh"})
-                            chart_entries[sym_key] = {
-                                "date": str(date_key), "bars_1m": chart_bars, "events": events,
-                                "entry_price": re_entry_actual,
-                                "stop_price": re_result.stop_price, "target_price": re_result.target_price,
-                                "pnl": chart_entries[sym_key]["pnl"] + re_result.pnl,
-                                "open_price": open_price, "signal": signal_type,
-                            }
+            # Bar-by-bar simulation: scan for RTG, enter, exit, continue scanning
+            search_start = 0
+            last_exit_reason = None
+            while True:
+                if bt_max_daily_trades > 0 and daily_trades >= bt_max_daily_trades:
+                    break
+                if max_daily_loss > 0 and daily_loss <= -max_daily_loss:
+                    print(f"  Daily loss ${daily_loss:,.2f} exceeded limit, stopping for day")
+                    break
+                if entry_count.get(symbol, 0) > config.RTG_REENTRY_MAX:
+                    break
+
+                # Find next RTG signal after search_start
+                if search_start >= len(bars_1m):
+                    break
+                entry_price, entry_bar_idx, confirmed, signal_type = find_rtg_entry_1min(
+                    bars_1m.iloc[search_start:], open_price, min_volume=min_vol)
+                if not confirmed or entry_price <= 0:
+                    break  # No more RTG signals for this symbol
+
+                # Stop-loss cooldown: skip if last exit was stop_loss within 1 bar
+                if last_exit_reason == "stop_loss":
+                    pass  # In backtest, just allow it (no real time cooldown)
+
+                if bt_max_daily_trades > 0 and daily_trades >= bt_max_daily_trades:
+                    break
+                if max_daily_loss > 0 and daily_loss <= -max_daily_loss:
+                    break
+
+                # Adjust entry_bar_idx to absolute position
+                entry_bar_idx = search_start + entry_bar_idx
+
+                entries_for_sym = entry_count.get(symbol, 0)
+                is_reentry = entries_for_sym > 0
+                entry_price_actual = round(entry_price * (1 + entry_slippage), 4)
+
+                # RVOL-weighted position sizing
+                if is_reentry:
+                    reentry_pct = getattr(config, "RTG_REENTRY_SIZE_PCT", 0.50)
+                    pos_size = get_rvol_sizing(rvol, equity, same_tier_count=same_tier) * reentry_pct
+                else:
+                    pos_size = get_rvol_sizing(rvol, equity, same_tier_count=same_tier)
+                pos_size = max(config.MIN_POSITION_SIZE, pos_size)
+                shares = int(pos_size / entry_price_actual)
+                if shares <= 0:
+                    search_start = entry_bar_idx + 1
+                    continue
+
+                remaining_list = all_bars_1m[entry_bar_idx + 1:]
+                force_close_price = remaining_list[-1]["close"] if remaining_list else entry_price_actual
+
+                result = evaluate_trade_rtg(
+                    entry_price=entry_price_actual,
+                    shares=shares,
+                    bars_after_entry=remaining_list,
+                    symbol=symbol,
+                    open_price=open_price,
+                    force_close_price=force_close_price,
+                    entry_bar_idx=entry_bar_idx,
+                    signal_type=signal_type + ("_re" if is_reentry else ""),
+                    stop_pct=stop_p,
+                    target_pct=target_p,
+                    trail_activate_pct=trail_act_p,
+                    trail_pct=trail_p,
+                )
+                result.date = str(date_key)
+                result.open_price = open_price
+
+                entry_ts = _bar_ts_str(all_bars_1m, entry_bar_idx)
+                exit_bar = entry_bar_idx + 1 + result.exit_bar_idx
+                exit_ts = _bar_ts_str(all_bars_1m, exit_bar)
+                label = f"{signal_type}_re" if is_reentry else signal_type
+                print(f"  {symbol} [{label}] entry=${entry_price_actual:.4f}@{entry_ts} "
+                      f"exit=${result.exit_price:.4f}@{exit_ts} ({result.exit_reason}), "
+                      f"P&L=${result.pnl:+,.2f} ({result.pnl_pct:+.2%}) "
+                      f"[RVOL={rvol:.1f}× stop={stop_p:.0%} tgt={target_p:.0%}]")
+
+                all_trades.append(result)
+                equity += result.pnl
+                daily_loss += result.pnl
+                daily_trades += 1
+                entry_count[symbol] = entries_for_sym + 1
+
+                events.append({"ts": entry_ts, "type": "buy", "price": entry_price_actual,
+                               "label": f"BUY {shares}sh [{label}]"})
+                events.append({"ts": exit_ts, "type": "sell", "price": result.exit_price,
+                               "label": f"{result.exit_reason.upper()} {shares}sh"})
+
+                # After stop_loss exit, don't re-enter this symbol
+                if result.exit_reason == "stop_loss":
+                    break
+
+                # Continue searching after exit bar
+                search_start = exit_bar + 1
+                last_exit_reason = result.exit_reason
+
+            # Save chart data for this symbol
+            if events:
+                chart_entries[sym_key] = {
+                    "date": str(date_key), "bars_1m": chart_bars, "events": events,
+                    "entry_price": entry_price_actual,
+                    "stop_price": result.stop_price, "target_price": result.target_price,
+                    "pnl": sum(t.pnl for t in all_trades if t.symbol == symbol and t.date == str(date_key)),
+                    "open_price": open_price, "signal": signal_type,
+                }
 
     print(f"\n{'=' * 70}")
     print(f"[rtg_1.0] Backtest complete. Final equity: ${equity:,.2f}")

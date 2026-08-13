@@ -68,7 +68,7 @@ RVOL_EXIT_TIERS = [
 
 # ── Re-entry after profitable exit ───────────────────────────────────
 RTG_REENTRY_ALLOWED = True
-RTG_REENTRY_MAX = 1             # Max 1 re-entry per stock per day
+RTG_REENTRY_MAX = 99            # Unlimited re-entry per stock per day
 RTG_REENTRY_SIZE_PCT = 0.50     # Re-entry at 50% of original position size
 
 # ── Entry parameters ─────────────────────────────────────────────────
@@ -77,7 +77,8 @@ ENTRY_WINDOW_END = "15:30"    # Extended to afternoon (was 12:00)
 
 # Signal A: Red-to-Green (THE signal — 75% win rate in backtest)
 RTG_VOLUME_MULT = 1.5       # Lower threshold catches earlier signals (was 2.0)
-RTG_MIN_VOLUME = 30000      # Lower liquidity floor (was 50000)
+RTG_MIN_VOLUME = 30000      # Base liquidity floor — relaxed for high RVOL in live_trade.py
+# RVOL-adaptive min volume: RVOL>=10 → RTG_MIN_VOLUME/3, RVOL>=5 → RTG_MIN_VOLUME/2
 RTG_MIN_PRICE_GAIN = 0.0    # Min (close - open_price) / open_price for signal bar
 RTG_ENTRY_AT_OPEN = True    # Enter at open_price + 0.1% instead of signal bar close (better price)
 

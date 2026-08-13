@@ -69,12 +69,19 @@ def is_leveraged_etf(symbol):
     return any(symbol.startswith(p) for p in _LEV_PREFIXES)
 
 
-def get_rvol_sizing(rvol, equity):
+def _get_rvol_tier(rvol):
     tiers = getattr(config, "RVOL_SIZING_TIERS", [(10.0, 0.50), (5.0, 0.30), (0.0, 0.15)])
     for rvol_min, pct in tiers:
         if rvol >= rvol_min:
-            return round(equity * pct, 2)
-    return round(equity * 0.15, 2)
+            return rvol_min, pct
+    return 0.0, 0.15
+
+
+def get_rvol_sizing(rvol, equity, same_tier_count=1):
+    _, pct = _get_rvol_tier(rvol)
+    # Split tier equity evenly among same-tier candidates
+    split_pct = pct / max(same_tier_count, 1)
+    return round(equity * split_pct, 2)
 
 
 def get_rvol_exit_params(rvol):
@@ -447,9 +454,11 @@ def backfill_1min_bars(symbols, target_date):
             pass
 
 
-def check_rtg_entry(symbol, open_price, bars, after_time=None):
+def check_rtg_entry(symbol, open_price, bars, after_time=None, min_volume=None):
     if len(bars) < 2:
         return 0.0, False, ""
+    if min_volume is None:
+        min_volume = config.RTG_MIN_VOLUME
     ew_start_h, ew_start_m = (int(x) for x in config.ENTRY_WINDOW_START.split(":"))
     ew_end_h, ew_end_m = (int(x) for x in config.ENTRY_WINDOW_END.split(":"))
     entry_start = dt.time(ew_start_h, ew_start_m)
@@ -479,7 +488,7 @@ def check_rtg_entry(symbol, open_price, bars, after_time=None):
         ph = prev["high"]
         po = prev["open"]
         pc = prev["close"]
-        if bc > open_price and pv > 0 and bv >= config.RTG_VOLUME_MULT * pv and bv >= config.RTG_MIN_VOLUME:
+        if bc > open_price and pv > 0 and bv >= config.RTG_VOLUME_MULT * pv and bv >= min_volume:
             entry = round(open_price * 1.001, 4) if getattr(config, "RTG_ENTRY_AT_OPEN", True) else round(bc, 4)
             return entry, True, "rtg"
         if pc > po and pv >= config.GAPGO_MIN_FIRST_BAR_VOL and bh > ph and bv >= config.GAPGO_MIN_BREAKOUT_VOL:
@@ -644,6 +653,13 @@ def run_trading_day(target_date):
             except Exception:
                 live_bp = equity  # Fallback to cached equity
 
+            # Pre-compute same-tier counts for fair sizing split
+            tier_counts = {}
+            for c in candidates:
+                rvol_c = c.get("rvol", 0)
+                tier_key = _get_rvol_tier(rvol_c)[0]
+                tier_counts[tier_key] = tier_counts.get(tier_key, 0) + 1
+
             for c in candidates:
                 sym = c["symbol"]
                 rvol = c.get("rvol", 0)
@@ -661,11 +677,18 @@ def run_trading_day(target_date):
                     break
                 open_price = c["open_price"]
                 bars = _accumulator.get_1min_bars(sym)
-                entry_price, confirmed, signal_type = check_rtg_entry(sym, open_price, bars, after_time=after_time)
+                # RVOL-adaptive min volume: high RVOL relaxes liquidity floor
+                min_vol = config.RTG_MIN_VOLUME
+                if rvol >= 10:
+                    min_vol = max(config.RTG_MIN_VOLUME // 3, 5000)
+                elif rvol >= 5:
+                    min_vol = max(config.RTG_MIN_VOLUME // 2, 10000)
+                entry_price, confirmed, signal_type = check_rtg_entry(sym, open_price, bars, after_time=after_time, min_volume=min_vol)
                 if not confirmed or entry_price <= 0:
                     continue
-                # RVOL-weighted sizing, capped to available buying power
-                slot = max(config.MIN_POSITION_SIZE, get_rvol_sizing(rvol, equity))
+                # RVOL-weighted sizing, split evenly among same-tier candidates
+                same_tier = tier_counts.get(_get_rvol_tier(rvol)[0], 1)
+                slot = max(config.MIN_POSITION_SIZE, get_rvol_sizing(rvol, equity, same_tier_count=same_tier))
                 slot = min(slot, live_bp * 0.95)  # Cap to 95% of buying power
                 shares = int(slot / entry_price)
                 if shares <= 0:
