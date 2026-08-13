@@ -739,7 +739,11 @@ def run_trading_day(target_date):
             "updated": dt.datetime.now().isoformat(), "ws_connected": _stream_state["running"],
             "daily_trades": daily_trades,
             "positions": [{"symbol": p.symbol, "shares": p.shares, "entry_price": p.entry_price,
-                           "signal_type": p.signal_type} for p in positions],
+                           "signal_type": p.signal_type, "rvol": p.rvol,
+                           "open_price": p.open_price, "gap_pct": p.gap_pct,
+                           "stop_pct": p.stop_pct, "target_pct": p.target_pct,
+                           "trail_activate_pct": p.trail_activate_pct, "trail_pct": p.trail_pct,
+                           "highest": p.highest, "trail_active": p.trail_active} for p in positions],
             "trades_detail": trades_detail,
         })
         save_state(state)
