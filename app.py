@@ -200,10 +200,10 @@ elif tab == "策略概览":
 
         st.subheader("仓位管理 (RVOL加权)")
         sizing_tiers = getattr(config, "RVOL_SIZING_TIERS", [])
-        sizing_str = "\n".join(f"  RVOL>{r:.0f}× → {p:.0%} of equity" for r, p in sizing_tiers) if sizing_tiers else "  (default)"
+        sizing_str = "\n".join(f"  RVOL>{r:.0f}× → {p:.0%} of equity (同档均分)" for r, p in sizing_tiers) if sizing_tiers else "  (default)"
         st.markdown(f"""
         - 初始资金: **${config.INITIAL_CAPITAL:,.2f}**
-        - 仓位分配:
+        - 仓位分配 (同档候选均分):
         {sizing_str}
         - 最大同时持仓: **{config.MAX_POSITIONS}** 只
         - 每日最大交易: **{config.MAX_DAILY_TRADES}** 笔
@@ -212,10 +212,11 @@ elif tab == "策略概览":
     with col2:
         st.subheader("入场规则 (Red-to-Green)")
         st.markdown(f"""
-        - RTG信号: close > open_price + vol >= **{config.RTG_VOLUME_MULT}×** prior + vol >= **{config.RTG_MIN_VOLUME:,}**
+        - RTG信号: close > open_price + vol >= **{config.RTG_VOLUME_MULT}×** prior + vol >= **{config.RTG_MIN_VOLUME:,}** (RVOL自适应)
+        - RVOL≥10× 最低量: **{max(config.RTG_MIN_VOLUME // 3, 5000):,}** | RVOL≥5×: **{max(config.RTG_MIN_VOLUME // 2, 10000):,}**
         - 入场价: open_price × 1.001 (比信号bar收盘更优)
         - 入场时间: **{config.ENTRY_WINDOW_START} ~ {config.ENTRY_WINDOW_END} EST**
-        - 再入场: **{'允许 (max ' + str(config.RTG_REENTRY_MAX) + '次)' if getattr(config, 'RTG_REENTRY_ALLOWED', False) else '禁止'}**
+        - 再入场: **{'无限制' if config.RTG_REENTRY_MAX >= 99 else '允许 (max ' + str(config.RTG_REENTRY_MAX) + '次)'}**
         """)
 
         st.subheader("出场规则 (RVOL自适应)")
@@ -239,12 +240,12 @@ elif tab == "策略概览":
     st.subheader("rtg_1.0 设计理念")
     st.markdown("""
     - **Red-to-Green Volume Breakout**: 跳空股跌破开盘后收回(open_price) + 成交量放大 → 入场
-    - **RVOL加权仓位**: 高RVOL(>10×)投80%权益，中等(5-10×)投50%，低(<5×)投30%
+    - **RVOL加权仓位(同档均分)**: 同档候选股均分档位权益，避免购买力冲突
+    - **RVOL自适应最低量**: 高RVOL(≥10×)放宽至10000，避免过滤低流动性高RVOL股
     - **自适应退出**: 高RVOL宽止损(7%)+大目标(50%)，低RVOL紧止损(3%)+小目标(15%)
     - **追踪止损3%/2%**: +3%激活追踪，2% trailing — 锁住利润同时让赢家奔跑
-    - **再入场**: 止盈退出后若再次出现RTG信号可再入场(50%仓位)
+    - **无限再入场**: 止盈退出后若再次出现RTG信号可无限次再入场
     - **SIP数据源**: 覆盖100%成交量
-    - **30天回测**: +2867.4%, 87.8%胜率
     """)
 
 # ══════════════════════════════════════════════════════════════════
