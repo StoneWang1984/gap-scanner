@@ -18,6 +18,7 @@ from dataclasses import dataclass
 import threading
 from collections import deque
 from uuid import uuid4
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 from alpaca.trading.client import TradingClient
@@ -353,10 +354,33 @@ def scan_gaps(target_date):
     symbols = get_tradable_symbols()
     symbols = [s for s in symbols if not is_leveraged_etf(s)]
     log(f"After leveraged ETF filter: {len(symbols)} symbols")
-    results = scan_gaps_batch(data_client, target_date, symbols)
-    if results.empty:
+
+    # Parallel scan: 6 concurrent batch requests
+    batch_size = 200
+    batches = [(i, symbols[i:i + batch_size]) for i in range(0, len(symbols), batch_size)]
+    total_batches = len(batches)
+    all_results = []
+    completed = 0
+
+    def _scan_one(batch_idx, batch):
+        nonlocal completed
+        df = scan_gaps_for_symbols(data_client, target_date, batch)
+        completed += 1
+        if completed % 10 == 0 or completed == total_batches:
+            log(f"  Scan progress: {completed}/{total_batches} batches")
+        return df
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        futures = {pool.submit(_scan_one, idx, batch): idx for idx, batch in batches}
+        for future in as_completed(futures):
+            df = future.result()
+            if not df.empty:
+                all_results.append(df)
+
+    if not all_results:
         log("No gap stocks found")
         return []
+    results = pd.concat(all_results, ignore_index=True)
 
     # Fetch real 20-day average volumes for proper RVOL calculation
     gap_symbols = results["symbol"].tolist()
@@ -470,12 +494,16 @@ def run_trading_day(target_date):
 
     candidates = scan_gaps(target_date)
     if not candidates:
-        # Retry at 09:31 — daily bar data may not be available before 09:30
-        log("No candidates at 09:27, retrying at 09:31...")
-        _wait_until(target_date, dt.time(9, 31))
-        candidates = scan_gaps(target_date)
+        # Smart retry: every 2 minutes until 09:35, then give up
+        retry_until = dt.datetime.combine(target_date.date(), dt.time(9, 35), tzinfo=_EST)
+        while dt.datetime.now(_EST) < retry_until:
+            log("No candidates yet, retrying in 2 minutes...")
+            time.sleep(120)
+            candidates = scan_gaps(target_date)
+            if candidates:
+                break
     if not candidates:
-        log("No candidates after retry, waiting for force close")
+        log("No candidates after retries, waiting for force close")
         _wait_until(target_date, _parse_time(config.FORCE_CLOSE_TIME))
         return
 
@@ -761,7 +789,7 @@ def main():
         if now.weekday() >= 5:
             next_day = get_next_trading_day()
             log(f"Weekend. Next: {next_day.date()}")
-            _smart_sleep_until(dt.datetime.combine(next_day.date(), dt.time(9, 20), tzinfo=_EST))
+            _smart_sleep_until(dt.datetime.combine(next_day.date(), dt.time(9, 15), tzinfo=_EST))
             continue
 
         market_open = dt.datetime.combine(now.date(), dt.time(9, 30), tzinfo=_EST)
@@ -772,7 +800,7 @@ def main():
             _smart_sleep_until(dt.datetime.combine(next_day.date(), dt.time(9, 20), tzinfo=_EST))
             continue
 
-        pre_open = dt.datetime.combine(now.date(), dt.time(9, 20), tzinfo=_EST)
+        pre_open = dt.datetime.combine(now.date(), dt.time(9, 15), tzinfo=_EST)
         if now < pre_open:
             _smart_sleep_until(pre_open)
 
@@ -780,8 +808,8 @@ def main():
         run_trading_day(target)
 
         next_day = get_next_trading_day()
-        log(f"Next trading day: {next_day.date()}. Sleeping until 9:20...")
-        _smart_sleep_until(dt.datetime.combine(next_day.date(), dt.time(9, 20), tzinfo=_EST))
+        log(f"Next trading day: {next_day.date()}. Sleeping until 9:15...")
+        _smart_sleep_until(dt.datetime.combine(next_day.date(), dt.time(9, 15), tzinfo=_EST))
 
 
 def _smart_sleep_until(target_time):
