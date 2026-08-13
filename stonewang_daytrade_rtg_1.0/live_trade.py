@@ -617,6 +617,7 @@ def run_trading_day(target_date):
                 daily_trades += 1
                 positions.remove(pos)
                 _last_exit_ts[pos.symbol] = time.time()
+                entry_checked.discard(pos.symbol)  # Allow re-entry
                 log(f"EXIT {pos.symbol} {reason} ${fill:.4f}, P&L=${pnl:+,.2f}")
 
         # Entry monitoring
