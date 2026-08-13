@@ -41,7 +41,7 @@ config = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(config)
 sys.modules["config"] = config
 
-from scanner import get_tradable_symbols, scan_gaps_batch, get_data_client
+from scanner import get_tradable_symbols, scan_gaps_batch, scan_gaps_for_symbols, get_data_client
 
 _EST = ZoneInfo("America/New_York")
 _LEV_PATTERN = re.compile(r"(2X|3X|BULL|BEAR)$", re.IGNORECASE)
