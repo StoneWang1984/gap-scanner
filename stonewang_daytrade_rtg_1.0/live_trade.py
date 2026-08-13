@@ -474,12 +474,17 @@ def check_rtg_entry(symbol, open_price, bars, after_time=None, min_volume=None):
             continue
         # For re-entry: only consider bars after the last exit time
         if after_time is not None:
+            # after_time can be a float (time.time()) or datetime
+            if isinstance(after_time, float):
+                after_dt = dt.datetime.fromtimestamp(after_time, tz=_EST)
+            else:
+                after_dt = after_time
             if isinstance(ts, dt.datetime):
-                if ts < after_time:
+                if ts < after_dt:
                     continue
-            elif hasattr(ts, "time") and isinstance(after_time, dt.datetime):
-                bar_dt = dt.datetime.combine(after_time.date(), ts, tzinfo=after_time.tzinfo)
-                if bar_dt < after_time:
+            elif hasattr(ts, "time"):
+                bar_dt = dt.datetime.combine(after_dt.date(), ts, tzinfo=after_dt.tzinfo)
+                if bar_dt < after_dt:
                     continue
         bc = bar["close"]
         bh = bar["high"]
