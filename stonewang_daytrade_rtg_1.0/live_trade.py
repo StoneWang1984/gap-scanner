@@ -617,8 +617,16 @@ def run_trading_day(target_date):
             )
             positions.append(pos)
             entry_checked.add(sym)
+            # Restore entry tracking so re-entry limits survive restart
+            entry_count[sym] = entry_count.get(sym, 0) + 1
         if positions:
             log(f"Restored {len(positions)} existing positions: {[p.symbol for p in positions]}")
+        # Also restore exit tracking from previous state
+        for sp_sym in prev_positions:
+            if sp_sym not in {p.symbol for p in positions}:
+                # This symbol was exited before restart — mark it
+                _last_exit_ts[sp_sym] = time.time()  # Approximate
+                entry_count[sp_sym] = entry_count.get(sp_sym, 0) + 1
     except Exception as e:
         log(f"Could not restore positions: {e}")
     entry_rejected = set()  # Stocks rejected by Alpaca (retry when buying power frees)
@@ -703,7 +711,7 @@ def run_trading_day(target_date):
                     target_price = round(pos.entry_price * (1 + pos.target_pct), 4)
                     if bar_high >= target_price:
                         reason = "target"
-                    elif time.time() - pos.entry_ts >= config.RTG_TIME_LIMIT_SEC:
+                    elif config.RTG_TIME_LIMIT_SEC > 0 and time.time() - pos.entry_ts >= config.RTG_TIME_LIMIT_SEC:
                         reason = "time_limit"
 
             if reason is None:
@@ -759,8 +767,10 @@ def run_trading_day(target_date):
                 rvol = c.get("rvol", 0)
                 if any(p.symbol == sym for p in positions):
                     continue
-                # Re-entry checks (before RTG signal detection)
+                # Re-entry checks — Cam Connor: the opening drive is your only edge
                 is_reentry = sym in _last_exit_ts
+                if is_reentry and not config.RTG_REENTRY_ALLOWED:
+                    continue
                 # Stop-loss exit = setup FAILED → no re-entry
                 if is_reentry and sym in _stop_exit_ts:
                     continue
@@ -803,7 +813,10 @@ def run_trading_day(target_date):
                 same_tier = tier_counts.get(_get_rvol_tier(rvol)[0], 1)
                 slot = max(config.MIN_POSITION_SIZE, get_rvol_sizing(rvol, equity, same_tier_count=same_tier))
                 slot = min(slot, live_bp * 0.95)  # Cap to 95% of buying power
-                shares = int(slot / entry_price)
+                # Use latest market price for sizing (not open_price which underestimates cost)
+                latest_bar = _accumulator.get_1min_bars(sym)
+                sizing_price = latest_bar[-1]["close"] if latest_bar else entry_price
+                shares = int(slot / sizing_price)
                 if shares <= 0:
                     continue
                 order, _, reject = place_buy_market(sym, shares)

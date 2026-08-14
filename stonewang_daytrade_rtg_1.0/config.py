@@ -59,26 +59,24 @@ RVOL_SIZING_TIERS = [
 
 # ── RVOL-adaptive exit tiers ─────────────────────────────────────────
 # (rvol_min, stop_pct, target_pct, trail_activate_pct, trail_pct)
-# Breakthrough: activate trail at +3%, trail at 2% — captures 17% more per winner
+# Key insight: gap-momentum stocks have 5-10% normal intraday swings.
+# 2% trail gets stopped out on first pullback, missing 80%+ of the move.
+# High RVOL gap stocks need 5%+ trail to ride the opening drive.
 RVOL_EXIT_TIERS = [
-    (10.0, 0.07, 0.50, 0.03, 0.02),  # High RVOL: 7% stop, 50% target, trail +3%/2%
-    (5.0,  0.05, 0.30, 0.03, 0.02),  # Medium: 5% stop, 30% target, trail +3%/2%
+    (10.0, 0.07, 0.50, 0.05, 0.05),  # High RVOL: 7% stop, 50% target, trail +5%/5%
+    (5.0,  0.05, 0.30, 0.04, 0.04),  # Medium: 5% stop, 30% target, trail +4%/4%
     (0.0,  0.03, 0.15, 0.03, 0.02),  # Low: 3% stop, 15% target, trail +3%/2%
 ]
 
-# ── Re-entry rules (strict — re-entry is the #1 P&L killer) ──────────
-# Backtest proof: first entry P&L +$37.70 (83% WR), re-entry P&L -$39.50 (35% WR)
-# Rule 1: Max 1 re-entry per stock (not unlimited)
-# Rule 2: Stop-loss exit = setup FAILED → no re-entry
-# Rule 3: Re-entry price must be < 115% of open_price (opening drive still intact)
-# Rule 4: Re-entry price must have pulled back ≥3% from day's high (not chasing)
-# Rule 5: Trail-stop cooldown: 120 seconds
-RTG_REENTRY_ALLOWED = True
-RTG_REENTRY_MAX = 1             # Max 1 re-entry per stock per day
-RTG_REENTRY_SIZE_PCT = 0.50     # Re-entry at 50% of original position size
-REENTRY_MAX_PRICE_VS_OPEN = 1.15  # Don't re-enter if price > 115% of open
-REENTRY_MIN_PULLBACK = 0.03       # Must pull back 3% from high to re-enter
-REENTRY_COOLDOWN_SEC = 120        # 2 min cooldown after any exit
+# ── Re-entry: NONE (Cam Connor — "the opening drive is your only edge") ──
+# Backtest proof: first entry P&L +$37.70 (83% WR), ALL re-entries -$39.50 (35% WR)
+# Stop-loss = setup failed. Trail-stop = move captured. Either way, you're done.
+RTG_REENTRY_ALLOWED = False
+RTG_REENTRY_MAX = 0              # No re-entry — the edge was the opening drive
+RTG_REENTRY_SIZE_PCT = 0.50      # (unused when REENTRY_MAX=0)
+REENTRY_MAX_PRICE_VS_OPEN = 1.15  # (unused)
+REENTRY_MIN_PULLBACK = 0.03       # (unused)
+REENTRY_COOLDOWN_SEC = 120        # (unused)
 
 # ── Entry parameters ─────────────────────────────────────────────────
 ENTRY_WINDOW_START = "09:30"  # Start at open
@@ -98,7 +96,7 @@ GAPGO_MIN_BREAKOUT_VOL = 99999999    # Effectively disabled
 # ── Exit parameters (defaults — overridden by RVOL_EXIT_TIERS) ──────
 RTG_STOP_PCT = 0.05           # 5% hard stop loss (default)
 RTG_TARGET_PCT = 0.30         # 30% profit target (default)
-RTG_TIME_LIMIT_SEC = 1200     # 20-minute time limit
+RTG_TIME_LIMIT_SEC = 0          # No time limit — let trail/stop manage the trade (Cam Connor)
 RTG_TRAIL_ACTIVATE_PCT = 0.03 # Activate trailing stop after +3% gain
 RTG_TRAIL_PCT = 0.02          # 2% trailing stop
 

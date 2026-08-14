@@ -70,7 +70,7 @@ def evaluate_trade_rtg(
     stop_price = round(entry_price * (1 - _stop_pct), 4)
     target_price = round(entry_price * (1 + _target_pct), 4)
     trail_activate = entry_price * (1 + _trail_act)
-    time_limit_bars = max(1, _time_sec // 60)
+    time_limit_bars = 0 if _time_sec == 0 else max(1, _time_sec // 60)
 
     slippage = getattr(config, "SLIPPAGE_EXIT_PCT", 0.0)
 
@@ -117,8 +117,8 @@ def evaluate_trade_rtg(
             exit_bi = bi
             break
 
-        # 4. Time limit
-        if bi >= time_limit_bars:
+        # 4. Time limit (0 = disabled)
+        if time_limit_bars > 0 and bi >= time_limit_bars:
             exit_price = bar_close
             reason = "time_limit"
             exit_bi = bi
