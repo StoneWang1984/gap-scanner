@@ -44,17 +44,17 @@ LEVERAGED_ETF_SUFFIXES = ("BULL", "BEAR")
 LEVERAGED_ETF_PREFIXES = ()
 
 # ── RTG candidate selection ──────────────────────────────────────────
-MAX_CANDIDATES = 8  # Top 8 by RVOL — more trades = more compounding
+MAX_CANDIDATES = 5  # Top 5 by RVOL — focus on quality, not quantity
 RVOL_LOOKBACK_DAYS = 20  # 20-day average volume for RVOL calculation
 RTG_ONLY = True  # Only trade RTG signals — GapGo has 34% win rate (removed)
 
 # ── RVOL-weighted position sizing ────────────────────────────────────
 # (rvol_min, equity_pct) — higher RVOL = bigger conviction = bigger size
-# Breakthrough: 80% on best signal (top day traders go 100%)
+# Concentrate on A+ setups: top traders put 50%+ on the best idea
 RVOL_SIZING_TIERS = [
-    (10.0, 0.80),   # RVOL > 10× → 80% of equity (full conviction)
-    (5.0,  0.50),   # RVOL 5-10× → 50% of equity
-    (0.0,  0.30),   # RVOL < 5× → 30% of equity
+    (10.0, 0.50),   # RVOL > 10× → 50% of equity (A+ setup, concentrated)
+    (5.0,  0.35),   # RVOL 5-10× → 35% of equity
+    (0.0,  0.20),   # RVOL < 5× → 20% of equity (marginal setup)
 ]
 
 # ── RVOL-adaptive exit tiers ─────────────────────────────────────────
@@ -66,14 +66,23 @@ RVOL_EXIT_TIERS = [
     (0.0,  0.03, 0.15, 0.03, 0.02),  # Low: 3% stop, 15% target, trail +3%/2%
 ]
 
-# ── Re-entry after profitable exit ───────────────────────────────────
+# ── Re-entry rules (strict — re-entry is the #1 P&L killer) ──────────
+# Backtest proof: first entry P&L +$37.70 (83% WR), re-entry P&L -$39.50 (35% WR)
+# Rule 1: Max 1 re-entry per stock (not unlimited)
+# Rule 2: Stop-loss exit = setup FAILED → no re-entry
+# Rule 3: Re-entry price must be < 115% of open_price (opening drive still intact)
+# Rule 4: Re-entry price must have pulled back ≥3% from day's high (not chasing)
+# Rule 5: Trail-stop cooldown: 120 seconds
 RTG_REENTRY_ALLOWED = True
-RTG_REENTRY_MAX = 99            # Unlimited re-entry per stock per day
+RTG_REENTRY_MAX = 1             # Max 1 re-entry per stock per day
 RTG_REENTRY_SIZE_PCT = 0.50     # Re-entry at 50% of original position size
+REENTRY_MAX_PRICE_VS_OPEN = 1.15  # Don't re-enter if price > 115% of open
+REENTRY_MIN_PULLBACK = 0.03       # Must pull back 3% from high to re-enter
+REENTRY_COOLDOWN_SEC = 120        # 2 min cooldown after any exit
 
 # ── Entry parameters ─────────────────────────────────────────────────
-ENTRY_WINDOW_START = "09:30"  # Start at open (v1.0 was 09:31)
-ENTRY_WINDOW_END = "15:30"    # Extended to afternoon (was 12:00)
+ENTRY_WINDOW_START = "09:30"  # Start at open
+ENTRY_WINDOW_END = "10:30"    # Gap momentum completes by 10:30 — no afternoon entries
 
 # Signal A: Red-to-Green (THE signal — 75% win rate in backtest)
 RTG_VOLUME_MULT = 1.5       # Lower threshold catches earlier signals (was 2.0)
@@ -97,9 +106,9 @@ RTG_TRAIL_PCT = 0.02          # 2% trailing stop
 INITIAL_CAPITAL = 390.04      # Current account equity
 MIN_POSITION_SIZE = 40        # Min $40 per position (fractional shares)
 MAX_POSITION_SIZE = 9999      # No hard cap — RVOL tiers control sizing
-MAX_POSITIONS = 3             # Max 3 concurrent positions
-MAX_DAILY_TRADES = 12         # More trades: 8 candidates + re-entries
-MAX_DAILY_LOSS_PCT = 0.05     # 5% daily loss circuit breaker
+MAX_POSITIONS = 2             # Max 2 concurrent — concentrate on best setups
+MAX_DAILY_TRADES = 8          # 5 candidates + max 3 re-entries
+MAX_DAILY_LOSS_PCT = 0.04     # 4% daily loss circuit breaker (tighter)
 EQUITY_POSITION_RATIO = 1.0
 
 # ── Market hours ─────────────────────────────────────────────────────

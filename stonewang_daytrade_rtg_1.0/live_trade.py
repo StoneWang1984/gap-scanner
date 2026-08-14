@@ -226,9 +226,23 @@ def restart_ws_stream(symbols):
     _stream_state["running"] = False
     if _ws_stream:
         try:
-            _ws_stream.stop()
-        except Exception:
-            pass
+            # Non-blocking stop: run in thread with 5s timeout to avoid freezing main loop
+            stop_result = []
+            def _do_stop():
+                try:
+                    _ws_stream.stop()
+                    stop_result.append(True)
+                except Exception:
+                    stop_result.append(False)
+            stop_thread = threading.Thread(target=_do_stop, daemon=True)
+            stop_thread.start()
+            stop_thread.join(timeout=5)
+            if stop_thread.is_alive():
+                log("WebSocket stop timed out after 5s, proceeding anyway")
+            elif stop_result and not stop_result[0]:
+                log("WebSocket stop failed (non-fatal)")
+        except Exception as e:
+            log(f"WebSocket stop error (non-fatal): {e}")
     time.sleep(2)
     start_ws_stream(symbols)
 
@@ -379,10 +393,19 @@ def scan_gaps(target_date):
 
     with ThreadPoolExecutor(max_workers=6) as pool:
         futures = {pool.submit(_scan_one, idx, batch): idx for idx, batch in batches}
-        for future in as_completed(futures):
-            df = future.result()
-            if not df.empty:
-                all_results.append(df)
+        try:
+            for future in as_completed(futures, timeout=300):
+                try:
+                    df = future.result(timeout=30)
+                    if not df.empty:
+                        all_results.append(df)
+                except Exception as e:
+                    log(f"  Scan batch error: {e}")
+        except TimeoutError:
+            log(f"  Scan timed out after 300s, got {len(all_results)}/{total_batches} batches")
+            # Cancel remaining futures
+            for f in futures:
+                f.cancel()
 
     if not all_results:
         log("No gap stocks found")
@@ -515,7 +538,32 @@ def run_trading_day(target_date):
         equity = config.INITIAL_CAPITAL
     log(f"Account equity: ${equity:,.2f}")
 
-    candidates = scan_gaps(target_date)
+    # Fast restart: if we have existing positions and previous state, skip scan and restore immediately
+    existing_alpaca_positions = []
+    try:
+        existing_alpaca_positions = trading_client.get_all_positions()
+    except Exception:
+        pass
+    prev_state_for_restart = {}
+    try:
+        with open(_state_file) as f:
+            prev_state_for_restart = json.load(f)
+    except Exception:
+        pass
+
+    candidates = []
+    if existing_alpaca_positions and prev_state_for_restart.get("candidates"):
+        candidates = prev_state_for_restart["candidates"]
+        log(f"Fast restart: {len(existing_alpaca_positions)} positions + {len(candidates)} candidates from state, skipping scan")
+
+    if not candidates:
+        candidates = scan_gaps(target_date)
+    if not candidates:
+        # Try restoring candidates from previous state (survive restart during trading hours)
+        prev_cands = prev_state_for_restart.get("candidates", [])
+        if prev_cands:
+            log(f"Scan found 0 candidates, restoring {len(prev_cands)} from previous state")
+            candidates = prev_cands
     if not candidates:
         # Smart retry: every 2 minutes until 09:35, then give up
         retry_until = dt.datetime.combine(target_date.date(), dt.time(9, 35), tzinfo=_EST)
@@ -678,8 +726,9 @@ def run_trading_day(target_date):
                 daily_trades += 1
                 positions.remove(pos)
                 _last_exit_ts[pos.symbol] = time.time()
-                entry_checked.discard(pos.symbol)  # Allow re-entry
-                # Stop-loss exit: add cooldown to prevent immediate re-entry into same drop
+                entry_checked.discard(pos.symbol)
+                # Stop-loss = setup failed → block re-entry permanently
+                # Trail-stop = move captured → allow 1 re-entry with strict conditions
                 if reason == "stop_loss":
                     _stop_exit_ts[pos.symbol] = time.time()
                 log(f"EXIT {pos.symbol} {reason} ${fill:.4f}, P&L=${pnl:+,.2f}")
@@ -703,15 +752,25 @@ def run_trading_day(target_date):
                 tier_counts[tier_key] = tier_counts.get(tier_key, 0) + 1
 
             for c in candidates:
+                # Re-check position limit inside loop after each entry
+                if len(positions) >= config.MAX_POSITIONS:
+                    break
                 sym = c["symbol"]
                 rvol = c.get("rvol", 0)
                 if any(p.symbol == sym for p in positions):
                     continue
-                # Stop-loss cooldown: don't re-enter within 60 seconds of a stop exit
-                if sym in _stop_exit_ts and time.time() - _stop_exit_ts[sym] < 60:
-                    continue
-                # Re-entry: only check bars after last exit time
+                # Re-entry checks (before RTG signal detection)
                 is_reentry = sym in _last_exit_ts
+                # Stop-loss exit = setup FAILED → no re-entry
+                if is_reentry and sym in _stop_exit_ts:
+                    continue
+                # Re-entry count limit
+                if is_reentry and entry_count.get(sym, 0) > config.RTG_REENTRY_MAX:
+                    continue
+                # Re-entry cooldown (after any exit)
+                reentry_cd = getattr(config, "REENTRY_COOLDOWN_SEC", 120)
+                if is_reentry and time.time() - _last_exit_ts.get(sym, 0) < reentry_cd:
+                    continue
                 after_time = _last_exit_ts.get(sym) if is_reentry else None
                 if config.MAX_DAILY_TRADES > 0 and daily_trades >= config.MAX_DAILY_TRADES:
                     break
@@ -728,6 +787,18 @@ def run_trading_day(target_date):
                 entry_price, confirmed, signal_type = check_rtg_entry(sym, open_price, bars, after_time=after_time, min_volume=min_vol)
                 if not confirmed or entry_price <= 0:
                     continue
+                # Re-entry price guards (after RTG signal confirmed)
+                if is_reentry:
+                    # Don't chase: re-entry price must be < 115% of open
+                    max_reentry_price = open_price * getattr(config, "REENTRY_MAX_PRICE_VS_OPEN", 1.15)
+                    if entry_price > max_reentry_price:
+                        continue
+                    # Must pull back ≥3% from day high (not buying at top)
+                    min_pullback = getattr(config, "REENTRY_MIN_PULLBACK", 0.03)
+                    if bars:
+                        day_high = max(b["high"] for b in bars)
+                        if entry_price > day_high * (1 - min_pullback):
+                            continue
                 # RVOL-weighted sizing, split evenly among same-tier candidates
                 same_tier = tier_counts.get(_get_rvol_tier(rvol)[0], 1)
                 slot = max(config.MIN_POSITION_SIZE, get_rvol_sizing(rvol, equity, same_tier_count=same_tier))
@@ -763,13 +834,19 @@ def run_trading_day(target_date):
                     f"[RVOL={rvol:.1f}× stop={stop_p:.0%} tgt={target_p:.0%}]")
 
         # WS health — restart if not running OR no bars for 60s
+        # Add 30s cooldown between restarts to avoid tight loop
         ws_stale = time.time() - _stream_state["last_bar_ts"] > 60
-        if not _stream_state["running"] or ws_stale:
+        ws_needs_restart = not _stream_state["running"] or ws_stale
+        if ws_needs_restart and time.time() - _stream_state.get("last_restart_ts", 0) > 30:
             if not _stream_state["running"]:
                 log("WebSocket: not running, restarting...")
             else:
                 log("WebSocket: no bars for 60s, restarting...")
-            restart_ws_stream(syms)
+            _stream_state["last_restart_ts"] = time.time()
+            try:
+                restart_ws_stream(syms)
+            except Exception as e:
+                log(f"WebSocket restart failed (will retry next cycle): {e}")
 
         # Save state
         state.update({
@@ -854,7 +931,8 @@ def main():
     log(f"Entry: RTG (vol >= {config.RTG_VOLUME_MULT}x prior) / GapGo DISABLED")
     log(f"Exit: adaptive by RVOL tier | time {config.RTG_TIME_LIMIT_SEC}s")
     log(f"Window: {config.ENTRY_WINDOW_START}-{config.ENTRY_WINDOW_END} EST")
-    log(f"Sizing: RVOL-weighted (80/50/30) | max {config.MAX_POSITIONS} concurrent | re-entry {'ON' if getattr(config, 'RTG_REENTRY_ALLOWED', False) else 'OFF'}")
+    sizing_str = "/".join(f"{p:.0%}" for _, p in config.RVOL_SIZING_TIERS)
+    log(f"Sizing: RVOL-weighted ({sizing_str}) | max {config.MAX_POSITIONS} concurrent | re-entry max {config.RTG_REENTRY_MAX}")
     log("=" * 60)
 
     if not test_connectivity():

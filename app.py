@@ -216,7 +216,7 @@ elif tab == "策略概览":
         - RVOL≥10× 最低量: **{max(config.RTG_MIN_VOLUME // 3, 5000):,}** | RVOL≥5×: **{max(config.RTG_MIN_VOLUME // 2, 10000):,}**
         - 入场价: open_price × 1.001 (比信号bar收盘更优)
         - 入场时间: **{config.ENTRY_WINDOW_START} ~ {config.ENTRY_WINDOW_END} EST**
-        - 再入场: **{'无限制' if config.RTG_REENTRY_MAX >= 99 else '允许 (max ' + str(config.RTG_REENTRY_MAX) + '次)'}**
+        - 再入场: **最多{config.RTG_REENTRY_MAX}次** | 止损后禁止 | 价格<{config.REENTRY_MAX_PRICE_VS_OPEN:.0%}×open | 回调≥{config.REENTRY_MIN_PULLBACK:.0%}
         """)
 
         st.subheader("出场规则 (RVOL自适应)")
@@ -240,11 +240,12 @@ elif tab == "策略概览":
     st.subheader("rtg_1.0 设计理念")
     st.markdown("""
     - **Red-to-Green Volume Breakout**: 跳空股跌破开盘后收回(open_price) + 成交量放大 → 入场
-    - **RVOL加权仓位(同档均分)**: 同档候选股均分档位权益，避免购买力冲突
+    - **开盘冲量是唯一边**: 入场窗口09:30-10:30，gap momentum在此完成
+    - **RVOL加权仓位(同档均分)**: 集中火力在A+setup，同档均分避免购买力冲突
     - **RVOL自适应最低量**: 高RVOL(≥10×)放宽至10000，避免过滤低流动性高RVOL股
     - **自适应退出**: 高RVOL宽止损(7%)+大目标(50%)，低RVOL紧止损(3%)+小目标(15%)
     - **追踪止损3%/2%**: +3%激活追踪，2% trailing — 锁住利润同时让赢家奔跑
-    - **无限再入场**: 止盈退出后若再次出现RTG信号可无限次再入场
+    - **严格re-entry**: 最多1次，止损后禁止，价格<115%×open，回调≥3%才允许
     - **SIP数据源**: 覆盖100%成交量
     """)
 

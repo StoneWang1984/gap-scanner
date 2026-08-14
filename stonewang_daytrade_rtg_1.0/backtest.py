@@ -297,12 +297,12 @@ def find_rtg_entry_1min(bars_1m, open_price, min_volume=None):
                 and prev_vol > 0
                 and bar_vol >= config.RTG_VOLUME_MULT * prev_vol
                 and bar_vol >= min_volume):
-            # Entry at open_price level (not signal bar close) for better price
-            if getattr(config, "RTG_ENTRY_AT_OPEN", True):
-                entry = round(open_price * 1.001, 4)  # open_price + 0.1% buffer
-            else:
-                entry = round(bar_close, 4)
-            return entry, i, True, "rtg"
+            # First entry: at open_price + 0.1% (better price, matches live)
+            # Re-entry: at signal bar close (market price at time of signal)
+            # Caller decides based on entry_count which price to use
+            entry_at_open = round(open_price * 1.001, 4)
+            entry_at_close = round(bar_close * 1.001, 4)
+            return entry_at_open, entry_at_close, i, True, "rtg"
 
         # Signal B: Gap-and-Go (2-bar breakout)
         # Prior bar bullish (close > open)
@@ -313,9 +313,11 @@ def find_rtg_entry_1min(bars_1m, open_price, min_volume=None):
                 and prev_vol >= config.GAPGO_MIN_FIRST_BAR_VOL
                 and bar_high > prev_high
                 and bar_vol >= config.GAPGO_MIN_BREAKOUT_VOL):
-            return round(prev_high, 4), i, True, "gapgo"
+            entry_at_open = round(prev_high, 4)
+            entry_at_close = round(bar_high, 4)
+            return entry_at_open, entry_at_close, i, True, "gapgo"
 
-    return 0.0, -1, False, ""
+    return 0.0, 0.0, -1, False, ""
 
 
 def _get_rvol_tier(rvol):
@@ -469,6 +471,7 @@ def run_backtest(end_date=None, n_days=None):
             # Bar-by-bar simulation: scan for RTG, enter, exit, continue scanning
             search_start = 0
             last_exit_reason = None
+            _stop_cooldown_bar = 0
             while True:
                 if bt_max_daily_trades > 0 and daily_trades >= bt_max_daily_trades:
                     break
@@ -481,14 +484,42 @@ def run_backtest(end_date=None, n_days=None):
                 # Find next RTG signal after search_start
                 if search_start >= len(bars_1m):
                     break
-                entry_price, entry_bar_idx, confirmed, signal_type = find_rtg_entry_1min(
+                entry_at_open, entry_at_close, entry_bar_idx, confirmed, signal_type = find_rtg_entry_1min(
                     bars_1m.iloc[search_start:], open_price, min_volume=min_vol)
-                if not confirmed or entry_price <= 0:
+                if not confirmed or entry_at_open <= 0:
                     break  # No more RTG signals for this symbol
 
-                # Stop-loss cooldown: skip if last exit was stop_loss within 1 bar
-                if last_exit_reason == "stop_loss":
-                    pass  # In backtest, just allow it (no real time cooldown)
+                # Use open_price entry for first entry, close price for re-entry
+                entries_for_sym_pre = entry_count.get(symbol, 0)
+                is_reentry_bt = entries_for_sym_pre > 0
+                entry_price = entry_at_open if not is_reentry_bt else entry_at_close
+
+                # Re-entry rules (match live_trade.py)
+                if is_reentry_bt:
+                    # Stop-loss = setup failed → no re-entry
+                    if last_exit_reason == "stop_loss":
+                        break
+                    # Max re-entries per stock
+                    if entries_for_sym_pre > getattr(config, "RTG_REENTRY_MAX", 1):
+                        break
+                    # Don't chase: re-entry price must be < 115% of open
+                    max_re = open_price * getattr(config, "REENTRY_MAX_PRICE_VS_OPEN", 1.15)
+                    if entry_price > max_re:
+                        search_start = search_start + max(entry_bar_idx, 0) + 1
+                        continue
+                    # Must pull back >=3% from day high
+                    min_pb = getattr(config, "REENTRY_MIN_PULLBACK", 0.03)
+                    abs_bar = search_start + max(entry_bar_idx, 0)
+                    if abs_bar < len(all_bars_1m):
+                        day_h = max(b["high"] for b in all_bars_1m[:abs_bar + 1])
+                        if entry_price > day_h * (1 - min_pb):
+                            search_start = abs_bar + 1
+                            continue
+
+                # Stop-loss cooldown: skip 3 bars after stop_loss exit
+                if last_exit_reason == "stop_loss" and entry_bar_idx < _stop_cooldown_bar:
+                    search_start = _stop_cooldown_bar
+                    continue
 
                 if bt_max_daily_trades > 0 and daily_trades >= bt_max_daily_trades:
                     break
@@ -498,7 +529,7 @@ def run_backtest(end_date=None, n_days=None):
                 # Adjust entry_bar_idx to absolute position
                 entry_bar_idx = search_start + entry_bar_idx
 
-                entries_for_sym = entry_count.get(symbol, 0)
+                entries_for_sym = entries_for_sym_pre
                 is_reentry = entries_for_sym > 0
                 entry_price_actual = round(entry_price * (1 + entry_slippage), 4)
 
@@ -554,13 +585,13 @@ def run_backtest(end_date=None, n_days=None):
                 events.append({"ts": exit_ts, "type": "sell", "price": result.exit_price,
                                "label": f"{result.exit_reason.upper()} {shares}sh"})
 
-                # After stop_loss exit, don't re-enter this symbol
-                if result.exit_reason == "stop_loss":
-                    break
-
-                # Continue searching after exit bar
+                # After exit, set cooldown and continue
                 search_start = exit_bar + 1
                 last_exit_reason = result.exit_reason
+                if result.exit_reason == "stop_loss":
+                    _stop_cooldown_bar = exit_bar + 3  # 3-bar cooldown after stop
+                else:
+                    _stop_cooldown_bar = 0
 
             # Save chart data for this symbol
             if events:
