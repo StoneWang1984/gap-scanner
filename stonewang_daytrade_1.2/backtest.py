@@ -451,9 +451,9 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
             if entry_ts.tzinfo is None:
                 entry_ts = entry_ts.tz_localize('UTC')
             entry_ts = entry_ts.tz_convert('America/New_York')
-            cutoff = pd.Timestamp(f"{date_key} 10:00", tz="America/New_York")
+            cutoff = pd.Timestamp(f"{date_key} 10:30", tz="America/New_York")
             if entry_ts > cutoff:
-                print(f"  {symbol}: entry after 10:00, skipping")
+                print(f"  {symbol}: entry after 10:30, skipping")
                 continue
 
             # ATR (still use 5-min bars for ATR calculation)
@@ -705,7 +705,7 @@ def run_backtest(end_date=None, n_days=config.BACKTEST_DAYS) -> list[TradeResult
                 reentry_exit_bar = reentry_idx + 1 + reentry_result.exit_bar_idx
                 bars_after_exit = bars_after_exit[reentry_exit_bar + 1:]
 
-                if reentry_result.exit_reason == "reentry_force_close":
+                if reentry_result.exit_reason in ("reentry_force_close", "reentry_stop"):
                     break
 
     print(f"\n{'='*60}")

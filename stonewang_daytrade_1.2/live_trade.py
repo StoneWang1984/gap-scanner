@@ -2395,7 +2395,7 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
     _stream_state.start(stream_symbols)
 
     # ── Main loop ──
-    cutoff_time = dt.time(10, 0)
+    cutoff_time = dt.time(10, 30)
     reentry_cutoff_time = dt.time(int(REENTRY_CUTOFF[:2]), int(REENTRY_CUTOFF[3:]))
     force_close_started = {}
 
