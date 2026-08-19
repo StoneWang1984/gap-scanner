@@ -1,0 +1,20 @@
+stonewang_daytrade_1.1.1
+
+Released: 2026-08-19
+Based on: stonewang_daytrade_1.1
+
+Fixes over 1.1:
+- RED/YELLOW/RESET/GREEN ANSI color constants not defined in live_trade_stone_1.1.py
+  caused NameError crash when place_protective_stop escalated to emergency market sell
+  (crash on 2026-08-18 with ENRD trailing stop failure)
+
+Core files:
+- live_trade.py   — 实盘交易主程序 (1.1.1 hotfix: ANSI color constants)
+- config.py       — 配置文件 (no changes from 1.1)
+- backtest.py     — 回测引擎
+- strategy.py     — 策略评估
+- scanner.py      — 股票扫描筛选
+- config_base.py  — 回测配置
+- stock_simulator.py — 5场景模拟器
+- rejection_simulator.py — 拒绝模拟器
+- CLAUDE.md       — 项目文档
