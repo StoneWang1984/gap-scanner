@@ -115,6 +115,9 @@ PULLBACK_STOP_THRESHOLD = 0.15
 # Stop trading for the day if cumulative PnL (realized + unrealized) exceeds this % of equity
 MAX_DAILY_LOSS_PCT = 0.05
 
+# Symbols to exclude from trading (managed externally, e.g. manual OCO orders)
+EXCLUDE_SYMBOLS = {"AEI", "LITZ", "VOGX", "WEAV"}
+
 # Position management
 MAX_POSITIONS_PER_DAY = 5  # max 5 positions held simultaneously
 MAX_CANDIDATES = 20        # monitor up to 20 candidates, buy whichever confirms

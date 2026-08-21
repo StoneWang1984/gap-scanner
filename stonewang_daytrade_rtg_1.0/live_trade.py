@@ -54,6 +54,7 @@ _LEV_PREFIXES = (
 )
 
 _ALPACA_PAPER = getattr(config, "ALPACA_PAPER", False)
+EXCLUDE_SYMBOLS = getattr(config, "EXCLUDE_SYMBOLS", set())
 trading_client = TradingClient(config.ALPACA_API_KEY, config.ALPACA_SECRET_KEY, paper=_ALPACA_PAPER)
 data_client = StockHistoricalDataClient(config.ALPACA_API_KEY, config.ALPACA_SECRET_KEY)
 
@@ -281,7 +282,19 @@ def wait_order_filled(order_id, timeout=30):
 def place_sell_market(symbol, shares):
     if config.DRY_RUN:
         log(f"[DRY] SELL {symbol} {shares}sh")
-        return shares, 0.0
+        return shares, 0.00
+    # Cancel open sell orders for this symbol to release locked shares
+    try:
+        orders = trading_client.get_orders()
+        for o in orders:
+            if o.symbol == symbol and o.side == OrderSide.SELL and o.status == OrderStatus.OPEN:
+                try:
+                    trading_client.cancel_order_by_id(o.id)
+                except Exception:
+                    pass
+        time.sleep(1)
+    except Exception:
+        pass
     try:
         req = MarketOrderRequest(symbol=symbol, qty=shares, side=OrderSide.SELL, time_in_force=TimeInForce.DAY)
         order = trading_client.submit_order(req)
@@ -293,6 +306,19 @@ def place_sell_market(symbol, shares):
 
 
 def force_sell_position(symbol, shares):
+    # Cancel all open orders for this symbol first to release locked shares
+    try:
+        orders = trading_client.get_orders()
+        for o in orders:
+            if o.symbol == symbol and o.side == OrderSide.SELL and o.status == OrderStatus.OPEN:
+                try:
+                    trading_client.cancel_order_by_id(o.id)
+                    log(f"  Cancelled order {o.id} for {symbol} to release locked shares")
+                except Exception:
+                    pass
+        time.sleep(1)  # Wait for cancellations to take effect
+    except Exception:
+        pass
     try:
         trading_client.close_position(symbol_or_asset_id=symbol)
         # Wait for fill confirmation (up to 30s)
@@ -375,6 +401,11 @@ def scan_gaps(target_date):
     symbols = get_tradable_symbols()
     symbols = [s for s in symbols if not is_leveraged_etf(s)]
     log(f"After leveraged ETF filter: {len(symbols)} symbols")
+
+    if EXCLUDE_SYMBOLS:
+        before = len(symbols)
+        symbols = [s for s in symbols if s not in EXCLUDE_SYMBOLS]
+        log(f"After EXCLUDE_SYMBOLS filter: {len(symbols)} symbols (removed {before - len(symbols)})")
 
     # Parallel scan: 6 concurrent batch requests
     batch_size = 200
@@ -584,6 +615,7 @@ def run_trading_day(target_date):
 
     positions = []
     entry_checked = set()  # Stocks that successfully entered or were confirmed no-signal
+    entry_count = {}  # symbol -> count of entries (for re-entry)
 
     # Restore existing Alpaca positions (survive restart)
     try:
@@ -597,6 +629,9 @@ def run_trading_day(target_date):
         prev_positions = {p["symbol"]: p for p in prev_state.get("positions", [])}
         for ep in existing_positions:
             sym = ep.symbol
+            if sym in EXCLUDE_SYMBOLS:
+                log(f"Skip {sym} — in EXCLUDE_SYMBOLS (managed externally)")
+                continue
             sp = prev_positions.get(sym, {})
             cand = next((c for c in candidates if c["symbol"] == sym), None)
             rvol = sp.get("rvol", cand.get("rvol", 0) if cand else 0)
@@ -634,12 +669,12 @@ def run_trading_day(target_date):
     trades_detail = []
     daily_loss = 0.0
     max_daily_loss = equity * config.MAX_DAILY_LOSS_PCT
-    entry_count = {}  # symbol -> count of entries (for re-entry)
     _last_exit_ts = {}  # symbol -> timestamp of last exit
     _stop_exit_ts = {}  # symbol -> timestamp of stop_loss exit (cooldown)
 
     force_close_dt = dt.datetime.combine(target_date.date(), _parse_time(config.FORCE_CLOSE_TIME), tzinfo=_EST)
     entry_end_dt = dt.datetime.combine(target_date.date(), _parse_time(config.ENTRY_WINDOW_END), tzinfo=_EST)
+    entry_start_dt = dt.datetime.combine(target_date.date(), _parse_time(config.ENTRY_WINDOW_START), tzinfo=_EST)
     market_close_dt = dt.datetime.combine(target_date.date(), _parse_time(config.MARKET_CLOSE), tzinfo=_EST)
 
     state = {"version": config.VERSION_SHORT, "data_feed": config.DATA_FEED,
@@ -653,6 +688,7 @@ def run_trading_day(target_date):
 
         if now >= force_close_dt:
             log("Force close time reached!")
+            # Close tracked positions
             for pos in positions[:]:
                 sold, fill = force_sell_position(pos.symbol, pos.shares)
                 if sold > 0:
@@ -663,6 +699,16 @@ def run_trading_day(target_date):
                     daily_trades += 1
                     positions.remove(pos)
                     log(f";Force closed {pos.symbol}, P&L=${pnl:+,.2f}")
+            # Also close any orphan positions in Alpaca not in tracked list
+            try:
+                alpaca_pos = trading_client.get_all_positions()
+                tracked_syms = {p.symbol for p in positions}
+                for ap in alpaca_pos:
+                    if ap.symbol not in tracked_syms and ap.symbol not in EXCLUDE_SYMBOLS:
+                        log(f"Force close orphan: {ap.symbol} {int(float(ap.qty))}sh")
+                        force_sell_position(ap.symbol, int(float(ap.qty)))
+            except Exception as e:
+                log(f"Orphan close error: {e}")
             break
 
         if max_daily_loss > 0:
@@ -742,7 +788,7 @@ def run_trading_day(target_date):
                 log(f"EXIT {pos.symbol} {reason} ${fill:.4f}, P&L=${pnl:+,.2f}")
 
         # Entry monitoring
-        if now < entry_end_dt and len(positions) < config.MAX_POSITIONS:
+        if entry_start_dt <= now < entry_end_dt and len(positions) < config.MAX_POSITIONS:
             # Read live buying power from Alpaca before sizing
             live_bp = 0
             try:
@@ -776,6 +822,10 @@ def run_trading_day(target_date):
                     continue
                 # Re-entry count limit
                 if is_reentry and entry_count.get(sym, 0) > config.RTG_REENTRY_MAX:
+                    continue
+                # Skip excluded symbols
+                if sym in EXCLUDE_SYMBOLS:
+                    entry_checked.add(sym)
                     continue
                 # Re-entry cooldown (after any exit)
                 reentry_cd = getattr(config, "REENTRY_COOLDOWN_SEC", 120)

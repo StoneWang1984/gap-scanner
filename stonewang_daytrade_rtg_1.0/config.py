@@ -44,7 +44,7 @@ LEVERAGED_ETF_SUFFIXES = ("BULL", "BEAR")
 LEVERAGED_ETF_PREFIXES = ()
 
 # ── RTG candidate selection ──────────────────────────────────────────
-MAX_CANDIDATES = 5  # Top 5 by RVOL — focus on quality, not quantity
+MAX_CANDIDATES = 40  # Top 40 by RVOL — wide monitoring for full-day trading
 RVOL_LOOKBACK_DAYS = 20  # 20-day average volume for RVOL calculation
 RTG_ONLY = True  # Only trade RTG signals — GapGo has 34% win rate (removed)
 
@@ -80,7 +80,7 @@ REENTRY_COOLDOWN_SEC = 120        # (unused)
 
 # ── Entry parameters ─────────────────────────────────────────────────
 ENTRY_WINDOW_START = "09:30"  # Start at open
-ENTRY_WINDOW_END = "10:30"    # Gap momentum completes by 10:30 — no afternoon entries
+ENTRY_WINDOW_END = "15:59"    # Full trading day — entries allowed until 15:59
 
 # Signal A: Red-to-Green (THE signal — 75% win rate in backtest)
 RTG_VOLUME_MULT = 1.5       # Lower threshold catches earlier signals (was 2.0)
@@ -104,15 +104,16 @@ RTG_TRAIL_PCT = 0.02          # 2% trailing stop
 INITIAL_CAPITAL = 390.04      # Current account equity
 MIN_POSITION_SIZE = 40        # Min $40 per position (fractional shares)
 MAX_POSITION_SIZE = 9999      # No hard cap — RVOL tiers control sizing
-MAX_POSITIONS = 2             # Max 2 concurrent — concentrate on best setups
-MAX_DAILY_TRADES = 8          # 5 candidates + max 3 re-entries
+MAX_POSITIONS = 8             # Max 8 concurrent positions
+EXCLUDE_SYMBOLS = {"AEI", "LITZ", "VOGX", "WEAV"}  # Managed by external OCO orders
+MAX_DAILY_TRADES = 0          # 0 = no limit
 MAX_DAILY_LOSS_PCT = 0.04     # 4% daily loss circuit breaker (tighter)
 EQUITY_POSITION_RATIO = 1.0
 
 # ── Market hours ─────────────────────────────────────────────────────
 MARKET_OPEN = "09:30"
 MARKET_CLOSE = "16:00"
-FORCE_CLOSE_TIME = "15:50"   # EOD force close
+FORCE_CLOSE_TIME = "15:59"   # EOD force close
 
 # ── Live trading ─────────────────────────────────────────────────────
 USE_WEBSOCKET = True

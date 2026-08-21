@@ -115,6 +115,7 @@ OCO_STOP_BUFFER_PCT = getattr(config, "OCO_STOP_BUFFER_PCT", 0.02)  # OCO stop =
 # ── 0.4.10: Leveraged ETF detection ─────────────────────────────────
 _LEV_PATTERN = re.compile(r'(2X|3X|BULL|BEAR)$', re.IGNORECASE)
 _LEV_SUFFIXES = getattr(config, "LEVERAGED_ETF_SUFFIXES", ("BULL", "BEAR"))
+EXCLUDE_SYMBOLS = getattr(config, "EXCLUDE_SYMBOLS", set())
 
 
 def is_leveraged_etf(symbol: str) -> bool:
@@ -390,7 +391,7 @@ def get_trailing_pct(pos) -> float:
 # ── State export ────────────────────────────────────────────────────
 def save_state(positions, candidates, daily_trades, daily_stopped,
                entry_checked, day_highs, accumulator, events_log,
-               invariant_violation=False):
+               invariant_violation=False, trades_detail=None):
     all_syms = set([c["symbol"] for c in candidates] + [p.symbol for p in positions])
     state = {
         "updated": dt.datetime.now().isoformat(),
@@ -439,6 +440,7 @@ def save_state(positions, candidates, daily_trades, daily_stopped,
         "day_highs": {k: round(v, 4) for k, v in day_highs.items()},
         "bar_counts": {sym: accumulator.bar_count(sym) for sym in all_syms},
         "events": events_log[-50:],
+        "trades_detail": trades_detail or [],
     }
     state_path = os.path.join(_parent_dir, "live_state.json")
     with open(state_path, "w") as f:
@@ -743,6 +745,12 @@ def scan_gaps():
     # 0.4.10: Filter out leveraged ETFs
     symbols = [s for s in symbols if not is_leveraged_etf(s)]
     log(f"After leveraged ETF filter: {len(symbols)} symbols")
+
+    # Filter out excluded symbols
+    if EXCLUDE_SYMBOLS:
+        before = len(symbols)
+        symbols = [s for s in symbols if s not in EXCLUDE_SYMBOLS]
+        log(f"After EXCLUDE_SYMBOLS filter: {len(symbols)} symbols (removed {before - len(symbols)})")
 
     today = dt.date.today()
     yesterday = today - pd.Timedelta(days=5)
@@ -2237,6 +2245,10 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
             # Skip if already tracked
             if sym in [p.symbol for p in positions]:
                 continue
+            # Skip if in EXCLUDE_SYMBOLS (managed externally)
+            if sym in EXCLUDE_SYMBOLS:
+                log(f"RECOVER: Skip {sym} — in EXCLUDE_SYMBOLS (managed externally)")
+                continue
             log(f"RECOVER: Found orphan position {sym} | {qty} shares @ ${avg_entry:.4f} (current ${cur_price:.4f})")
 
             # Find matching candidate for open_price
@@ -3063,7 +3075,8 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
             positions = [p for p in positions if p.remaining_shares > 0]
             save_state(positions, candidates, daily_trades, daily_stopped,
                        entry_checked, day_highs, accumulator, events_log,
-                       invariant_violation=_invariant_violation)
+                       invariant_violation=_invariant_violation,
+                       trades_detail=trades_detail)
             save_chart_data(accumulator, positions, chart_events, str(now_est.date()))
             time.sleep(30)
             continue
@@ -3529,6 +3542,11 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
                     entry_checked.add(symbol)
                     continue
 
+                # Skip excluded symbols
+                if symbol in EXCLUDE_SYMBOLS:
+                    entry_checked.add(symbol)
+                    continue
+
                 entry_price, confirmed = check_entry_1min(symbol, cand["open_price"], accumulator)
                 if not confirmed or entry_price <= 0:
                     log(f"  {symbol}: no entry confirmation yet (1min bars={len(accumulator.get_1min_bars(symbol))})")
@@ -3814,7 +3832,8 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
         # ── Save state ──
         save_state(positions, candidates, daily_trades, daily_stopped,
                    entry_checked, day_highs, accumulator, events_log,
-                   invariant_violation=_invariant_violation)
+                   invariant_violation=_invariant_violation,
+                   trades_detail=trades_detail)
         save_chart_data(accumulator, positions, chart_events, str(now_est.date()))
 
         # ── Status log ──
@@ -3861,7 +3880,8 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str,
     events_log.append(f"EOD equity=${equity:,.2f} trades={daily_trades}")
     save_state(positions, candidates, daily_trades, daily_stopped,
                entry_checked, day_highs, accumulator, events_log,
-               invariant_violation=_invariant_violation)
+               invariant_violation=_invariant_violation,
+               trades_detail=trades_detail)
     save_chart_data(accumulator, positions, chart_events, str(dt.datetime.now(tz=ZoneInfo("America/New_York")).date()))
 
     # Stop WebSocket stream on exit
