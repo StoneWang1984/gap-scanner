@@ -671,6 +671,7 @@ def run_trading_day(target_date):
     max_daily_loss = equity * config.MAX_DAILY_LOSS_PCT
     _last_exit_ts = {}  # symbol -> timestamp of last exit
     _stop_exit_ts = {}  # symbol -> timestamp of stop_loss exit (cooldown)
+    _sell_stuck_until = {}  # symbol -> timestamp until which sell retries are throttled
 
     force_close_dt = dt.datetime.combine(target_date.date(), _parse_time(config.FORCE_CLOSE_TIME), tzinfo=_EST)
     entry_end_dt = dt.datetime.combine(target_date.date(), _parse_time(config.ENTRY_WINDOW_END), tzinfo=_EST)
@@ -731,6 +732,9 @@ def run_trading_day(target_date):
 
         # Exit monitoring
         for pos in positions[:]:
+            # Skip if sell is throttled (locked shares)
+            if _sell_stuck_until.get(pos.symbol, 0) > time.time():
+                continue
             bars = _accumulator.get_1min_bars(pos.symbol)
             if not bars:
                 continue
@@ -764,12 +768,16 @@ def run_trading_day(target_date):
                 continue
 
             sold, fill = place_sell_market(pos.symbol, pos.shares)
-            # Retry once if sell failed
+            # Retry once if sell failed (cancel locked orders first)
             if sold <= 0:
                 log(f"SELL failed for {pos.symbol}, retrying in 2s...")
                 time.sleep(2)
                 sold, fill = place_sell_market(pos.symbol, pos.shares)
-            if sold > 0:
+            # If still failed, throttle retries to avoid blocking the main loop
+            if sold <= 0:
+                _sell_stuck_until[pos.symbol] = time.time() + 60  # skip for 60s
+                log(f"SELL stuck for {pos.symbol} (locked shares), throttling 60s")
+                continue
                 if fill <= 0:
                     fill = cur_price
                 pnl = round((fill - pos.entry_price) * sold, 2)
