@@ -77,6 +77,18 @@ def is_leveraged_etf(symbol: str) -> bool:
     return False
 
 
+_CRYPTO_ETF_NAMES = {"BITX", "BITU", "XRPI", "UXRP", "XRPC", "XRPZ", "BTF", "BTFG",
+                      "XRP", "ETHW", "SOLX", "DEFI", "BKCH", "CRPT", "STCE"}
+_CRYPTO_ETF_PREFIXES = ("XRP", "BTC", "BIT", "ETH", "SOL", "DOGE", "LTC", "ADA")
+
+def is_crypto_etf(symbol: str) -> bool:
+    if symbol in _CRYPTO_ETF_NAMES:
+        return True
+    if any(symbol.startswith(k) and len(symbol) <= 6 for k in _CRYPTO_ETF_PREFIXES):
+        return True
+    return False
+
+
 def get_trading_days(client, end_date, n_days):
     start = end_date - pd.Timedelta(days=n_days * 2 + 10)
     request = StockBarsRequest(
@@ -395,6 +407,9 @@ def run_backtest(end_date=None, n_days=None):
 
     symbols = [s for s in symbols if not is_leveraged_etf(s)]
     print(f"After leveraged ETF filter: {len(symbols)} symbols")
+
+    symbols = [s for s in symbols if not is_crypto_etf(s)]
+    print(f"After crypto ETF filter: {len(symbols)} symbols")
 
     print("\nBulk scanning for gaps (with RVOL)...")
     gap_data = bulk_scan_gaps(client, trading_days, symbols)

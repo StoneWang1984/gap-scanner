@@ -70,6 +70,19 @@ def is_leveraged_etf(symbol):
     return any(symbol.startswith(p) for p in _LEV_PREFIXES)
 
 
+# Crypto ETF filter — crypto ETFs gap but then flatline, causing force_close losses
+_CRYPTO_ETF_NAMES = {"BITX", "BITU", "XRPI", "UXRP", "XRPC", "XRPZ", "BTF", "BTFG",
+                      "XRP", "ETHW", "SOLX", "DEFI", "BKCH", "CRPT", "STCE"}
+_CRYPTO_ETF_PREFIXES = ("XRP", "BTC", "BIT", "ETH", "SOL", "DOGE", "LTC", "ADA")
+
+def is_crypto_etf(symbol):
+    if symbol in _CRYPTO_ETF_NAMES:
+        return True
+    if any(symbol.startswith(k) and len(symbol) <= 6 for k in _CRYPTO_ETF_PREFIXES):
+        return True
+    return False
+
+
 def _get_rvol_tier(rvol):
     tiers = getattr(config, "RVOL_SIZING_TIERS", [(10.0, 0.50), (5.0, 0.30), (0.0, 0.15)])
     for rvol_min, pct in tiers:
@@ -402,6 +415,9 @@ def scan_gaps(target_date):
     symbols = [s for s in symbols if not is_leveraged_etf(s)]
     log(f"After leveraged ETF filter: {len(symbols)} symbols")
 
+    symbols = [s for s in symbols if not is_crypto_etf(s)]
+    log(f"After crypto ETF filter: {len(symbols)} symbols")
+
     if EXCLUDE_SYMBOLS:
         before = len(symbols)
         symbols = [s for s in symbols if s not in EXCLUDE_SYMBOLS]
@@ -569,7 +585,7 @@ def run_trading_day(target_date):
         equity = config.INITIAL_CAPITAL
     log(f"Account equity: ${equity:,.2f}")
 
-    # Fast restart: if we have existing positions and previous state, skip scan and restore immediately
+    # Always do fresh scan — previous day's candidates are stale
     existing_alpaca_positions = []
     try:
         existing_alpaca_positions = trading_client.get_all_positions()
@@ -583,18 +599,13 @@ def run_trading_day(target_date):
         pass
 
     candidates = []
-    if existing_alpaca_positions and prev_state_for_restart.get("candidates"):
-        candidates = prev_state_for_restart["candidates"]
-        log(f"Fast restart: {len(existing_alpaca_positions)} positions + {len(candidates)} candidates from state, skipping scan")
+    candidates = scan_gaps(target_date)
+    if not candidates:
+        # Fallback: restore candidates from previous state if scan finds nothing
+        if prev_state_for_restart.get("candidates"):
+            candidates = prev_state_for_restart["candidates"]
+            log(f"Scan found 0 candidates, using {len(candidates)} from previous state")
 
-    if not candidates:
-        candidates = scan_gaps(target_date)
-    if not candidates:
-        # Try restoring candidates from previous state (survive restart during trading hours)
-        prev_cands = prev_state_for_restart.get("candidates", [])
-        if prev_cands:
-            log(f"Scan found 0 candidates, restoring {len(prev_cands)} from previous state")
-            candidates = prev_cands
     if not candidates:
         # Smart retry: every 2 minutes until 09:35, then give up
         retry_until = dt.datetime.combine(target_date.date(), dt.time(9, 35), tzinfo=_EST)
@@ -833,6 +844,10 @@ def run_trading_day(target_date):
                     continue
                 # Skip excluded symbols
                 if sym in EXCLUDE_SYMBOLS:
+                    entry_checked.add(sym)
+                    continue
+                # Skip crypto ETFs
+                if is_crypto_etf(sym):
                     entry_checked.add(sym)
                     continue
                 # Re-entry cooldown (after any exit)
