@@ -1,4 +1,4 @@
-"""Stone 1.2 策略 — Streamlit Web UI (交易显示 + 回测)"""
+"""10out 1.0 策略 — Streamlit Web UI (交易显示 + 回测)"""
 
 import json
 import time
@@ -8,8 +8,7 @@ import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
 
-# Use stonewang_daytrade_1.2 config and modules
-VERSION_DIR = Path("/Users/stonewang2014/gap-scanner/stonewang_daytrade_rtg_1.0")
+VERSION_DIR = Path("/Users/stonewang2014/gap-scanner/stonewang_daytrade_10out_1.0")
 STATE_FILE = Path("/Users/stonewang2014/gap-scanner/live_state.json")
 import importlib.util, sys
 _spec = importlib.util.spec_from_file_location("config", VERSION_DIR / "config.py")
@@ -17,12 +16,12 @@ config = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(config)
 sys.modules["config"] = config
 
-st.set_page_config(page_title="RTG 1.0 交易", page_icon="📊", layout="wide")
+st.set_page_config(page_title="10out 1.0 交易", page_icon="📊", layout="wide")
 
 # ── Sidebar ──────────────────────────────────────────────────────
 
-st.sidebar.title("RTG 1.0 交易")
-st.sidebar.caption("Red-to-Green · RVOL Adaptive · 1hr Window")
+st.sidebar.title("10out 1.0 交易")
+st.sidebar.caption("RTG + 10:00 Exit · 3% Stop · RVOL Sizing")
 
 tab = st.sidebar.radio("导航", ["实盘交易", "策略概览", "交易详情"])
 
@@ -110,7 +109,6 @@ if tab == "实盘交易":
                 row["信号"] = sp.get("signal_type", "rtg")
                 row["RVOL"] = f"{sp.get('rvol', 0):.1f}×"
                 row["止损%"] = f"{sp.get('stop_pct', 0):.0%}"
-                row["目标%"] = f"{sp.get('target_pct', 0):.0%}"
 
             pos_rows.append(row)
 
@@ -125,7 +123,6 @@ if tab == "实盘交易":
                 "入场价": f"${p.get('entry_price', 0):.4f}",
                 "RVOL": f"{p.get('rvol', 0):.1f}×",
                 "止损%": f"{p.get('stop_pct', 0):.0%}",
-                "目标%": f"{p.get('target_pct', 0):.0%}",
             })
         st.dataframe(pd.DataFrame(pos_rows), hide_index=True, use_container_width=True)
     else:
@@ -151,9 +148,6 @@ if tab == "实盘交易":
     st.divider()
     st.subheader("今日交易汇总")
     if state and state.get("trades_detail"):
-        st.divider()
-        st.subheader("今日交易汇总")
-
         from collections import OrderedDict
         stock_trades = OrderedDict()
         for t in state["trades_detail"]:
@@ -171,8 +165,8 @@ if tab == "实盘交易":
             entry_price = trades[0].get("entry", 0)
             exit_price = trades[-1].get("exit", 0)
             trade_type = trades[0].get("type", "first")
-            final_reason = trades[-1].get("exit_reason", "")
-            all_reasons = [t.get("exit_reason", "") for t in trades]
+            final_reason = trades[-1].get("exit_reason", "") or trades[-1].get("reason", "")
+            all_reasons = [t.get("exit_reason", "") or t.get("reason", "") for t in trades]
             entry_cost = entry_price * total_shares if entry_price > 0 else 0
             pnl_pct = (total_pnl_sym / entry_cost) if entry_cost > 0 else 0
 
@@ -203,6 +197,7 @@ if tab == "实盘交易":
         trade_rows = []
         for t in state["trades_detail"]:
             pnl_val = t.get("pnl", 0)
+            reason = t.get("exit_reason", "") or t.get("reason", "")
             trade_rows.append({
                 "股票": t["symbol"],
                 "类型": t.get("type", "first"),
@@ -210,7 +205,7 @@ if tab == "实盘交易":
                 "出场": f"${t.get('exit', 0):.4f}",
                 "股数": t.get("shares", 0),
                 "盈亏": f"${pnl_val:+,.2f}",
-                "退出原因": t.get("exit_reason", "").replace("_", " ").title(),
+                "退出原因": reason.replace("_", " ").title(),
             })
 
         st.dataframe(pd.DataFrame(trade_rows), hide_index=True, use_container_width=True)
@@ -232,7 +227,7 @@ if tab == "实盘交易":
 # ══════════════════════════════════════════════════════════════════
 
 elif tab == "策略概览":
-    st.title("Stone 1.2 策略概览")
+    st.title("10out 1.0 策略概览")
 
     col1, col2 = st.columns(2)
 
@@ -244,6 +239,7 @@ elif tab == "策略概览":
         - 最低成交额 > **${config.MIN_DOLLAR_VOLUME:,.0f}**
         - 价格区间 **${config.PRICE_MIN}** ~ **${config.PRICE_MAX}**
         - 杠杆ETF过滤: **启用**
+        - Crypto ETF过滤: **启用**
         - 候选股: **Top {config.MAX_CANDIDATES} by RVOL**
         """)
 
@@ -252,47 +248,38 @@ elif tab == "策略概览":
         st.markdown(f"""
         - 初始资金: **${config.INITIAL_CAPITAL:,.2f}**
         - 每仓: **${config.MIN_POSITION_SIZE}** ~ **${config.MAX_POSITION_SIZE}**
-        - 最大同时持仓: **{config.MAX_POSITIONS_PER_DAY}** 只
+        - 最大同时持仓: **{config.MAX_POSITIONS}** 只
         - 每日最大交易: **{max_daily}** 笔
-        - 候选股: **Top {config.MAX_CANDIDATES}**
         """)
 
     with col2:
-        st.subheader("入场规则 (1-min Pullback)")
+        st.subheader("入场规则 (RTG Signal)")
+        sizing_str = " / ".join(f"RVOL>{r:.0f}×→{p:.0%}" for r, p in config.RVOL_SIZING_TIERS)
         st.markdown(f"""
-        - 1分钟K线折返确认: 跌破open_price → 3根bar确认底部 → 市价入场
-        - 入场窗口: **9:31 ~ 10:30 EST** (1小时)
-        - 入场价 < open_price (ENTRY_BELOW_OPEN过滤)
-        - 再入场: 止损后禁止 | 回调≥{config.REENTRY_MIN_PULLBACK:.0%}才允许
+        - RTG信号: close > open_price AND vol >= {config.RTG_VOLUME_MULT}x prior AND vol >= {config.RTG_MIN_VOLUME:,}
+        - 入场窗口: **{config.ENTRY_WINDOW_START} ~ {config.ENTRY_WINDOW_END} EST** (30分钟)
+        - 入场价: open_price + 0.1%
+        - 再入场: **禁止** (开盘驱动是唯一edge)
+        - RVOL仓位: {sizing_str}
         """)
 
-        st.subheader("出场规则 (6-tier Ladder)")
-        tiers = config.PROFIT_RETRACEMENT_TIERS
-        caps = config.TARGET_CAP_TIERS
-        trails = config.TRAILING_STOP_PCTS
-        tier_lines = []
-        for i in range(len(tiers)):
-            tier_lines.append(f"  T{i+1}: {tiers[i]:.0%}回撤 / {caps[i]:.0%}封顶 / trail {trails[i]:.1%}")
-        tier_str = "\n".join(tier_lines)
+        st.subheader("出场规则 (10:00 Exit)")
         st.markdown(f"""
-        - 6档阶梯卖出 (每档1/8仓位, 共75%):
-        {tier_str}
-        - ATR止损: ×{config.STOP_LOSS_ATR_MULT} (封顶{config.STOP_LOSS_MAX_PCT:.0%})
-        - 时间限制: **{config.FIRST_TRADE_TIME_LIMIT_BARS * 5}分钟** (无T1成交→breakeven退出)
-        - EOD强制平仓: **{config.FORCE_CLOSE_TIME}** EST
+        - **10:00 EST 市价卖出**: 所有持仓在10:00清仓
+        - 硬止损: **{config.STOP_LOSS_PCT:.0%}** (固定，不按RVOL调整)
+        - 无trailing stop, 无target
         - 日损失熔断: **{config.MAX_DAILY_LOSS_PCT:.0%}**
         """)
 
     st.divider()
-    st.subheader("Stone 1.2 设计理念")
-    st.markdown("""
-    - **Gap Pullback**: 跳空低开股跌破开盘价后确认底部折返 → 市价入场
-    - **6-tier OCO Ladder Sell**: T1 polling成交后预挂OCO单(T2-T6)，消除5秒轮询延迟
-    - **ATR自适应止损**: ATR×2初始止损，封顶10%最大亏损
-    - **Progressive Trailing Stop**: 2%→5%逐档放宽，锁住利润同时让赢家奔跑
-    - **Re-entry半仓**: 首笔退出后可二次入场(半仓)，1% trailing stop，止损后禁止
-    - **日损失熔断5%**: 累计PnL超5% equity当日停交易
-    - **SIP数据源**: 覆盖100%成交量
+    st.subheader("10out 1.0 设计理念")
+    st.markdown(f"""
+    - **RTG Entry**: 跳空高开股在09:30-09:59出现Red-to-Green信号(量价突破)→市价入场
+    - **10:00 Exit**: 开盘30分钟是gap股日内最强驱动力，10:00出场锁定利润，避免午后回撤
+    - **Fixed 3% Stop**: 止损固定3%，避免高RVOL档5-7%过大止损导致深亏
+    - **No Trail/Target**: 30分钟内trailing stop容易被first pullback扫出，time-based exit更可靠
+    - **RVOL Sizing**: 保持RVOL加权仓位，高RVOL集中仓位捕捉大机会
+    - **1月回测**: +227% ($377→$1,234), 56.9% WR, 盈亏比 2.1:1
     """)
 
 # ══════════════════════════════════════════════════════════════════
