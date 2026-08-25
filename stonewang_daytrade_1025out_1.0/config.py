@@ -1,4 +1,4 @@
-"""Config — stonewang_daytrade_10out_1.0: RTG + 10:25 Exit.
+"""Config — stonewang_daytrade_1025out_1.0: RTG + 10:25 Exit.
 
 Strategy:
   - Pre-market scan for gap-up stocks (gap > 10%), rank by RVOL, select top 40
@@ -59,7 +59,7 @@ RVOL_SIZING_TIERS = [
 # ── Exit parameters (10out strategy) ─────────────────────────────────
 STOP_LOSS_PCT = 0.03       # 3% hard stop loss (fixed)
 EXIT_TIME = "10:25"         # Market sell all positions at 10:25 EST
-# No trailing stop, no target — 10:00 exit captures opening drive
+# No trailing stop, no target — 10:25 exit captures opening drive
 
 # ── Entry parameters ─────────────────────────────────────────────────
 ENTRY_WINDOW_START = "09:30"
@@ -117,5 +117,5 @@ FORCE_CLOSE_LIMIT_TIMEOUT = 60
 BACKTEST_DAYS = 30
 
 # ── Version ──────────────────────────────────────────────────────────
-VERSION = "stonewang_daytrade_10out_1.0"
-VERSION_SHORT = "10out_1.0"
+VERSION = "stonewang_daytrade_1025out_1.0"
+VERSION_SHORT = "1025out_1.0"

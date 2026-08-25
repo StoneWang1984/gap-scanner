@@ -1,4 +1,4 @@
-"""10out 1.0 策略 — Streamlit Web UI (交易显示 + 回测)"""
+"""1025out 1.0 策略 — Streamlit Web UI (交易显示 + 回测)"""
 
 import json
 import time
@@ -8,7 +8,7 @@ import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
 
-VERSION_DIR = Path("/Users/stonewang2014/gap-scanner/stonewang_daytrade_10out_1.0")
+VERSION_DIR = Path("/Users/stonewang2014/gap-scanner/stonewang_daytrade_1025out_1.0")
 STATE_FILE = Path("/Users/stonewang2014/gap-scanner/live_state.json")
 import importlib.util, sys
 _spec = importlib.util.spec_from_file_location("config", VERSION_DIR / "config.py")
@@ -20,7 +20,7 @@ st.set_page_config(page_title="10out 1.0 交易", page_icon="📊", layout="wide
 
 # ── Sidebar ──────────────────────────────────────────────────────
 
-st.sidebar.title("10out 1.0 交易")
+st.sidebar.title("1025out 1.0 交易")
 st.sidebar.caption("RTG + 10:25 Exit · 3% Stop · RVOL Sizing")
 
 tab = st.sidebar.radio("导航", ["实盘交易", "策略概览", "交易详情"])
@@ -227,7 +227,7 @@ if tab == "实盘交易":
 # ══════════════════════════════════════════════════════════════════
 
 elif tab == "策略概览":
-    st.title("10out 1.0 策略概览")
+    st.title("1025out 1.0 策略概览")
 
     col1, col2 = st.columns(2)
 
@@ -272,7 +272,7 @@ elif tab == "策略概览":
         """)
 
     st.divider()
-    st.subheader("10out 1.0 设计理念")
+    st.subheader("1025out 1.0 设计理念")
     st.markdown(f"""
     - **RTG Entry**: 跳空高开股在09:30-09:59出现Red-to-Green信号(量价突破)→市价入场
     - **10:25 Exit**: 开盘55分钟是gap股日内最强驱动力，10:25出场锁定利润，避免午后回撤

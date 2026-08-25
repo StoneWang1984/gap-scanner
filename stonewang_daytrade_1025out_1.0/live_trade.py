@@ -1,4 +1,4 @@
-"""stonewang_daytrade_10out_1.0 — RTG + 10:25 Exit Live Trading.
+"""stonewang_daytrade_1025out_1.0 — RTG + 10:25 Exit Live Trading.
 
 Strategy:
   - Pre-market scan for gap-up stocks, rank by RVOL, select top 40
@@ -649,7 +649,7 @@ def run_trading_day(target_date):
     entry_start_dt = dt.datetime.combine(target_date.date(), _parse_time(config.ENTRY_WINDOW_START), tzinfo=_EST)
     market_close_dt = dt.datetime.combine(target_date.date(), _parse_time(config.MARKET_CLOSE), tzinfo=_EST)
 
-    # 10:00 exit time
+    # 10:25 exit time
     exit_h, exit_m = (int(x) for x in config.EXIT_TIME.split(":"))
     exit_time = dt.time(exit_h, exit_m)
 
@@ -669,11 +669,11 @@ def run_trading_day(target_date):
                 if sold > 0:
                     pnl = (fill - pos.entry_price) * sold if fill > 0 else 0
                     trades_detail.append({"symbol": pos.symbol, "entry": pos.entry_price, "exit": fill,
-                                          "shares": sold, "pnl": round(pnl, 2), "reason": "10am_exit",
+                                          "shares": sold, "pnl": round(pnl, 2), "reason": "10:25_exit",
                                           "trade_type": pos.signal_type})
                     daily_trades += 1
                     positions.remove(pos)
-                    log(f"10AM EXIT {pos.symbol}, P&L=${pnl:+,.2f}")
+                    log(f"10:25 EXIT {pos.symbol}, P&L=${pnl:+,.2f}")
             # Also close any orphan positions in Alpaca not in tracked list
             try:
                 alpaca_pos = trading_client.get_all_positions()
@@ -701,7 +701,7 @@ def run_trading_day(target_date):
                 state["daily_stopped"] = True
                 break
 
-        # Exit monitoring: 3% stop loss or 10:00 time-based exit
+        # Exit monitoring: 3% stop loss or 10:25 time-based exit
         for pos in positions[:]:
             if _sell_stuck_until.get(pos.symbol, 0) > time.time():
                 continue
@@ -715,7 +715,7 @@ def run_trading_day(target_date):
             if bar_high > pos.highest:
                 pos.highest = bar_high
 
-            # Get bar timestamp for 10:00 check
+            # Get bar timestamp for 10:25 check
             bar_ts = latest.get("timestamp")
             bar_time = None
             if bar_ts is not None:
@@ -727,9 +727,9 @@ def run_trading_day(target_date):
             # 1. Stop loss check (3% hard stop)
             if bar_low <= stop_price:
                 reason = "stop_loss"
-            # 2. 10:00 time-based exit
+            # 2. 10:25 time-based exit
             elif bar_time is not None and bar_time >= exit_time:
-                reason = "10am_exit"
+                reason = "10:25_exit"
 
             if reason is None:
                 continue
@@ -880,7 +880,7 @@ def run_trading_day(target_date):
         save_state(state)
         time.sleep(config.POLL_INTERVAL)
 
-    # End of day (for 10out, this is after 10:00)
+    # End of day (for 1025out, this is after 10:25)
     log("=" * 60)
     log("Trading day complete!")
     final_equity = equity + daily_loss
@@ -940,11 +940,11 @@ def test_connectivity():
 
 def main():
     global _log_file
-    _log_file = open(os.path.join(_ver_dir, "live_10out.log"), "a")
+    _log_file = open(os.path.join(_ver_dir, "live_1025out.log"), "a")
 
     log(f"Using {config.DATA_FEED.upper()} data feed")
     log("=" * 60)
-    log(f"stonewang 10out 1.0 Live Trading — RTG + {config.EXIT_TIME} Exit")
+    log(f"stonewang 1025out 1.0 Live Trading — RTG + {config.EXIT_TIME} Exit")
     log(f"Entry: RTG (vol >= {config.RTG_VOLUME_MULT}x prior) in {config.ENTRY_WINDOW_START}-{config.ENTRY_WINDOW_END}")
     log(f"Exit: {config.EXIT_TIME} market sell or {config.STOP_LOSS_PCT:.0%} stop loss")
     sizing_str = "/".join(f"{p:.0%}" for _, p in config.RVOL_SIZING_TIERS)

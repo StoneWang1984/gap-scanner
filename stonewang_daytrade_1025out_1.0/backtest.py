@@ -1,4 +1,4 @@
-"""Backtesting engine — stonewang_daytrade_10out_1.0: RTG + 10:00 Exit.
+"""Backtesting engine — stonewang_daytrade_1025out_1.0: RTG + 10:25 Exit.
 
 Entry detection (1-min bars, approximates live WebSocket bar stream):
   Signal A (Red-to-Green):
@@ -7,10 +7,10 @@ Entry detection (1-min bars, approximates live WebSocket bar stream):
     - bar[i].volume >= RTG_MIN_VOLUME (liquidity floor)
   Signal B (Gap-and-Go): DISABLED
 
-Entry window: 09:30 - 09:59 EST (30 minutes before 10:00 exit)
+Entry window: 09:30 - 10:24 EST (before 10:25 exit)
 One trade per symbol per day (no re-entry).
 
-Exit: 10:00 EST market sell or 3% hard stop loss.
+Exit: 10:25 EST market sell or 3% hard stop loss.
 """
 
 import json
@@ -379,7 +379,7 @@ def run_backtest(end_date=None, n_days=None):
         print("No trading days found.")
         return []
 
-    print(f"[10out_1.0] Backtesting {len(trading_days)} trading days: "
+    print(f"[1025out_1.0] Backtesting {len(trading_days)} trading days: "
           f"{trading_days[0].date()} to {trading_days[-1].date()}")
     print(f"Capital: ${config.INITIAL_CAPITAL:,.2f} | RVOL-weighted sizing | "
           f"Max concurrent: {config.MAX_POSITIONS} | Max daily trades: {config.MAX_DAILY_TRADES}")
@@ -557,7 +557,7 @@ def run_backtest(end_date=None, n_days=None):
                 remaining_list = all_bars_1m[entry_bar_idx + 1:]
                 force_close_price = remaining_list[-1]["close"] if remaining_list else entry_price_actual
 
-                # 10out exit: 3% stop loss or 10:00 time-based exit
+                # 1025out exit: 3% stop loss or 10:25 time-based exit
                 exit_price = 0.0
                 exit_reason = "force_close"
                 exit_bar_idx = len(remaining_list) - 1
@@ -574,10 +574,10 @@ def run_backtest(end_date=None, n_days=None):
                         exit_reason = "stop_loss"
                         exit_bar_idx = bi
                         break
-                    # 10:00 time exit
+                    # 10:25 time exit
                     if rb_h > exit_h or (rb_h == exit_h and rb_m >= exit_m):
                         exit_price = bar_close
-                        exit_reason = "10am_exit"
+                        exit_reason = "10:25_exit"
                         exit_bar_idx = bi
                         break
                 if exit_price == 0.0:
@@ -642,7 +642,7 @@ def run_backtest(end_date=None, n_days=None):
                 }
 
     print(f"\n{'=' * 70}")
-    print(f"[10out_1.0] Backtest complete. Final equity: ${equity:,.2f}")
+    print(f"[1025out_1.0] Backtest complete. Final equity: ${equity:,.2f}")
     print(f"Total trades: {len(all_trades)}")
     if all_trades:
         wins = [t for t in all_trades if t.pnl > 0]
