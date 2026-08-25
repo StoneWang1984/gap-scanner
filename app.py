@@ -21,7 +21,7 @@ st.set_page_config(page_title="10out 1.0 交易", page_icon="📊", layout="wide
 # ── Sidebar ──────────────────────────────────────────────────────
 
 st.sidebar.title("10out 1.0 交易")
-st.sidebar.caption("RTG + 10:00 Exit · 3% Stop · RVOL Sizing")
+st.sidebar.caption("RTG + 10:20 Exit · 3% Stop · RVOL Sizing")
 
 tab = st.sidebar.radio("导航", ["实盘交易", "策略概览", "交易详情"])
 
@@ -265,7 +265,7 @@ elif tab == "策略概览":
 
         st.subheader("出场规则 (10:00 Exit)")
         st.markdown(f"""
-        - **10:00 EST 市价卖出**: 所有持仓在10:00清仓
+        - **10:20 EST 市价卖出**: 所有持仓在10:20清仓
         - 硬止损: **{config.STOP_LOSS_PCT:.0%}** (固定，不按RVOL调整)
         - 无trailing stop, 无target
         - 日损失熔断: **{config.MAX_DAILY_LOSS_PCT:.0%}**
@@ -275,11 +275,11 @@ elif tab == "策略概览":
     st.subheader("10out 1.0 设计理念")
     st.markdown(f"""
     - **RTG Entry**: 跳空高开股在09:30-09:59出现Red-to-Green信号(量价突破)→市价入场
-    - **10:00 Exit**: 开盘30分钟是gap股日内最强驱动力，10:00出场锁定利润，避免午后回撤
+    - **10:20 Exit**: 开盘50分钟是gap股日内最强驱动力，10:20出场锁定利润，避免午后回撤
     - **Fixed 3% Stop**: 止损固定3%，避免高RVOL档5-7%过大止损导致深亏
     - **No Trail/Target**: 30分钟内trailing stop容易被first pullback扫出，time-based exit更可靠
     - **RVOL Sizing**: 保持RVOL加权仓位，高RVOL集中仓位捕捉大机会
-    - **1月回测**: +227% ($377→$1,234), 56.9% WR, 盈亏比 2.1:1
+    - **1月回测**: +385% ($377→$1,831), 55.7% WR, 盈亏比 2.4:1
     """)
 
 # ══════════════════════════════════════════════════════════════════

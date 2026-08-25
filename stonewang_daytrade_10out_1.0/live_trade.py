@@ -1,13 +1,13 @@
-"""stonewang_daytrade_10out_1.0 — RTG + 10:00 Exit Live Trading.
+"""stonewang_daytrade_10out_1.0 — RTG + 10:20 Exit Live Trading.
 
 Strategy:
   - Pre-market scan for gap-up stocks, rank by RVOL, select top 40
-  - Entry: RTG signal (close > open + vol >= 1.5x prior) in 09:30-09:59
-  - Exit: 10:00 EST market sell (time-based) or 3% hard stop loss
-  - No trailing stop, no target — 10:00 exit captures opening drive
+  - Entry: RTG signal (close > open + vol >= 1.5x prior) in 09:30-10:19
+  - Exit: 10:20 EST market sell (time-based) or 3% hard stop loss
+  - No trailing stop, no target — 10:20 exit captures opening drive
   - Position: RVOL-weighted, max 8 concurrent
 
-Backtest (1 month): +227% ($377→$1,234), 56.9% WR, 2.1:1 reward/risk
+Backtest (1 month): +385% ($377→$1,831), 55.7% WR, 2.4:1 reward/risk
 """
 
 import re
@@ -663,7 +663,7 @@ def run_trading_day(target_date):
             break
 
         if now >= force_close_dt:
-            log("10:00 exit time reached — closing all positions!")
+            log("Exit time reached — closing all positions!")
             for pos in positions[:]:
                 sold, fill = force_sell_position(pos.symbol, pos.shares)
                 if sold > 0:
@@ -944,7 +944,7 @@ def main():
 
     log(f"Using {config.DATA_FEED.upper()} data feed")
     log("=" * 60)
-    log(f"stonewang 10out 1.0 Live Trading — RTG + 10:00 Exit")
+    log(f"stonewang 10out 1.0 Live Trading — RTG + {config.EXIT_TIME} Exit")
     log(f"Entry: RTG (vol >= {config.RTG_VOLUME_MULT}x prior) in {config.ENTRY_WINDOW_START}-{config.ENTRY_WINDOW_END}")
     log(f"Exit: {config.EXIT_TIME} market sell or {config.STOP_LOSS_PCT:.0%} stop loss")
     sizing_str = "/".join(f"{p:.0%}" for _, p in config.RVOL_SIZING_TIERS)

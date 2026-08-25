@@ -1,16 +1,16 @@
-"""Config — stonewang_daytrade_10out_1.0: RTG + 10:00 Exit.
+"""Config — stonewang_daytrade_10out_1.0: RTG + 10:20 Exit.
 
 Strategy:
   - Pre-market scan for gap-up stocks (gap > 10%), rank by RVOL, select top 40
-  - Entry: RTG signal (close > open_price + vol >= 1.5x prior) in 09:30-09:59
-  - Exit: 10:00 EST market sell (time-based) or 3% hard stop loss
-  - No trailing stop, no target — 10:00 exit captures opening drive
+  - Entry: RTG signal (close > open_price + vol >= 1.5x prior) in 09:30-10:19
+  - Exit: 10:20 EST market sell (time-based) or 3% hard stop loss
+  - No trailing stop, no target — 10:20 exit captures opening drive
   - Position size: RVOL-weighted, max 8 concurrent
 
 Backtest (1 month, 22 trading days):
-  - Final equity: $1,233.89 (+227.0%)
-  - Win rate: 56.9% (95W / 72L)
-  - Avg win: +$14.01 | Avg loss: -$6.59 | Ratio: 2.1:1
+  - Final equity: $1,830.53 (+385.2%)
+  - Win rate: 55.7% (93W / 74L)
+  - Avg win: +$23.29 | Avg loss: -$9.64 | Ratio: 2.4:1
 """
 
 import os
@@ -58,12 +58,12 @@ RVOL_SIZING_TIERS = [
 
 # ── Exit parameters (10out strategy) ─────────────────────────────────
 STOP_LOSS_PCT = 0.03       # 3% hard stop loss (fixed)
-EXIT_TIME = "10:00"         # Market sell all positions at 10:00 EST
+EXIT_TIME = "10:20"         # Market sell all positions at 10:20 EST
 # No trailing stop, no target — 10:00 exit captures opening drive
 
 # ── Entry parameters ─────────────────────────────────────────────────
 ENTRY_WINDOW_START = "09:30"
-ENTRY_WINDOW_END = "09:59"  # Only enter before 10:00 (since we sell at 10:00)
+ENTRY_WINDOW_END = "10:19"  # Only enter before 10:20 (since we sell at 10:20)
 
 # Signal A: Red-to-Green
 RTG_VOLUME_MULT = 1.5
@@ -96,7 +96,7 @@ EQUITY_POSITION_RATIO = 1.0
 # ── Market hours ─────────────────────────────────────────────────────
 MARKET_OPEN = "09:30"
 MARKET_CLOSE = "16:00"
-FORCE_CLOSE_TIME = "10:00"    # Force close at 10:00 (strategy exit time)
+FORCE_CLOSE_TIME = "10:20"    # Force close at 10:20 (strategy exit time)
 
 # ── Live trading ─────────────────────────────────────────────────────
 USE_WEBSOCKET = True
