@@ -667,8 +667,17 @@ def run_trading_day(target_date):
             for pos in positions[:]:
                 sold, fill = force_sell_position(pos.symbol, pos.shares)
                 if sold > 0:
+                    if fill <= 0:
+                        try:
+                            snap = trading_client.get_open_position(pos.symbol)
+                            fill = float(snap.current_price) if snap else 0
+                        except Exception:
+                            pass
+                    if fill <= 0:
+                        bars_tmp = _accumulator.get_1min_bars(pos.symbol)
+                        fill = bars_tmp[-1]["close"] if bars_tmp else 0
                     pnl = (fill - pos.entry_price) * sold if fill > 0 else 0
-                    trades_detail.append({"symbol": pos.symbol, "entry": pos.entry_price, "exit": fill,
+                    trades_detail.append({"symbol": pos.symbol, "entry": pos.entry_price, "exit": round(fill, 4),
                                           "shares": sold, "pnl": round(pnl, 2), "reason": "10:25_exit",
                                           "trade_type": pos.signal_type})
                     daily_trades += 1

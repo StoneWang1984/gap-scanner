@@ -501,7 +501,7 @@ def run_backtest(end_date=None, n_days=None):
                 # Use open_price entry for first entry, close price for re-entry
                 entries_for_sym_pre = entry_count.get(symbol, 0)
                 is_reentry_bt = entries_for_sym_pre > 0
-                entry_price = entry_at_open if not is_reentry_bt else entry_at_close
+                entry_price = entry_at_close
 
                 # Re-entry rules (match live_trade.py)
                 if is_reentry_bt:
