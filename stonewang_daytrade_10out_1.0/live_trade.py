@@ -1,13 +1,13 @@
-"""stonewang_daytrade_10out_1.0 — RTG + 10:20 Exit Live Trading.
+"""stonewang_daytrade_10out_1.0 — RTG + 10:25 Exit Live Trading.
 
 Strategy:
   - Pre-market scan for gap-up stocks, rank by RVOL, select top 40
-  - Entry: RTG signal (close > open + vol >= 1.5x prior) in 09:30-10:19
-  - Exit: 10:20 EST market sell (time-based) or 3% hard stop loss
-  - No trailing stop, no target — 10:20 exit captures opening drive
+  - Entry: RTG signal (close > open + vol >= 1.5x prior) in 09:30-10:24
+  - Exit: 10:25 EST market sell (time-based) or 3% hard stop loss
+  - No trailing stop, no target — 10:25 exit captures opening drive
   - Position: RVOL-weighted, max 8 concurrent
 
-Backtest (1 month): +385% ($377→$1,831), 55.7% WR, 2.4:1 reward/risk
+Backtest (3 months): +11,557% ($377→$43,980), 46.6% WR, 3.7:1 reward/risk
 """
 
 import re

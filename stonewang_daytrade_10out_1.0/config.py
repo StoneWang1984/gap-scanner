@@ -1,16 +1,16 @@
-"""Config — stonewang_daytrade_10out_1.0: RTG + 10:20 Exit.
+"""Config — stonewang_daytrade_10out_1.0: RTG + 10:25 Exit.
 
 Strategy:
   - Pre-market scan for gap-up stocks (gap > 10%), rank by RVOL, select top 40
-  - Entry: RTG signal (close > open_price + vol >= 1.5x prior) in 09:30-10:19
-  - Exit: 10:20 EST market sell (time-based) or 3% hard stop loss
-  - No trailing stop, no target — 10:20 exit captures opening drive
+  - Entry: RTG signal (close > open_price + vol >= 1.5x prior) in 09:30-10:24
+  - Exit: 10:25 EST market sell (time-based) or 3% hard stop loss
+  - No trailing stop, no target — 10:25 exit captures opening drive
   - Position size: RVOL-weighted, max 8 concurrent
 
-Backtest (1 month, 22 trading days):
-  - Final equity: $1,830.53 (+385.2%)
-  - Win rate: 55.7% (93W / 74L)
-  - Avg win: +$23.29 | Avg loss: -$9.64 | Ratio: 2.4:1
+Backtest (3 months, 66 trading days):
+  - Final equity: $43,980 (+11,557%)
+  - Win rate: 46.6% (229W / 262L)
+  - Avg win: +$277.00 | Avg loss: -$75.69 | Ratio: 3.7:1
 """
 
 import os
@@ -58,12 +58,12 @@ RVOL_SIZING_TIERS = [
 
 # ── Exit parameters (10out strategy) ─────────────────────────────────
 STOP_LOSS_PCT = 0.03       # 3% hard stop loss (fixed)
-EXIT_TIME = "10:20"         # Market sell all positions at 10:20 EST
+EXIT_TIME = "10:25"         # Market sell all positions at 10:25 EST
 # No trailing stop, no target — 10:00 exit captures opening drive
 
 # ── Entry parameters ─────────────────────────────────────────────────
 ENTRY_WINDOW_START = "09:30"
-ENTRY_WINDOW_END = "10:19"  # Only enter before 10:20 (since we sell at 10:20)
+ENTRY_WINDOW_END = "10:24"  # Only enter before 10:25 (since we sell at 10:25)
 
 # Signal A: Red-to-Green
 RTG_VOLUME_MULT = 1.5
@@ -96,7 +96,7 @@ EQUITY_POSITION_RATIO = 1.0
 # ── Market hours ─────────────────────────────────────────────────────
 MARKET_OPEN = "09:30"
 MARKET_CLOSE = "16:00"
-FORCE_CLOSE_TIME = "10:20"    # Force close at 10:20 (strategy exit time)
+FORCE_CLOSE_TIME = "10:25"    # Force close at 10:25 (strategy exit time)
 
 # ── Live trading ─────────────────────────────────────────────────────
 USE_WEBSOCKET = True
