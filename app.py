@@ -1,4 +1,4 @@
-"""Top2 1.0 策略 — Streamlit Web UI (交易显示 + 回测)"""
+"""RTG 1.0 策略 — Streamlit Web UI (交易显示 + 回测)"""
 
 import json
 import time
@@ -8,7 +8,7 @@ import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
 
-VERSION_DIR = Path("/Users/stonewang2014/gap-scanner/stonewang_daytrade_top2_1.0")
+VERSION_DIR = Path("/Users/stonewang2014/gap-scanner/stonewang_daytrade_rtg_1.0")
 STATE_FILE = Path("/Users/stonewang2014/gap-scanner/live_state.json")
 import importlib.util, sys
 _spec = importlib.util.spec_from_file_location("config", VERSION_DIR / "config.py")
@@ -16,12 +16,12 @@ config = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(config)
 sys.modules["config"] = config
 
-st.set_page_config(page_title="Top2 1.0 交易", page_icon="📊", layout="wide")
+st.set_page_config(page_title="RTG 1.0 交易", page_icon="📊", layout="wide")
 
 # ── Sidebar ──────────────────────────────────────────────────────
 
-st.sidebar.title("Top2 1.0 交易")
-st.sidebar.caption("Top-2 Ranking + Open Entry + 5-Bar Add + Trailing Stop")
+st.sidebar.title("RTG 1.0 交易")
+st.sidebar.caption("RTG Signal + RVOL Tiers + Trailing Stop")
 
 tab = st.sidebar.radio("导航", ["实盘交易", "策略概览", "交易详情"])
 
@@ -227,7 +227,7 @@ if tab == "实盘交易":
 # ══════════════════════════════════════════════════════════════════
 
 elif tab == "策略概览":
-    st.title("Top2 1.0 策略概览")
+    st.title("RTG 1.0 策略概览")
 
     col1, col2 = st.columns(2)
 
@@ -253,33 +253,31 @@ elif tab == "策略概览":
         """)
 
     with col2:
-        st.subheader("入场规则 (Top-2 + Open Entry)")
+        st.subheader("入场规则 (RTG Signal)")
         sizing_str = " / ".join(f"RVOL>{r:.0f}×→{p:.0%}" for r, p in config.RVOL_SIZING_TIERS)
         st.markdown(f"""
-        - **Phase 1**: 09:30 开盘买入 Top-{config.TOP_N} 候选股 (base {config.OPEN_ENTRY_BASE_PCT:.0%})
-        - **Phase 2**: 09:35 5-bar filter → pass: add {config.OPEN_ENTRY_ADD_PCT:.0%}, fail: hold base only
-        - 5-bar filter: bar1 bullish + first5chg > {config.FRIK5BAR_MIN_5MIN_CHG:.0%} + gap < {config.FRIK5BAR_MAX_GAP:.0%}
-        - 排名依据: **{config.RANK_BY}**
+        - RTG信号: close > open_price AND vol >= {config.RTG_VOLUME_MULT}x prior AND vol >= {config.RTG_MIN_VOLUME:,}
+        - 入场窗口: **{config.ENTRY_WINDOW_START} ~ {config.ENTRY_WINDOW_END} EST** (全天)
+        - 入场价: open_price + 0.1%
         - RVOL仓位: {sizing_str}
         """)
 
-        st.subheader("出场规则 (Trailing Stop)")
+        st.subheader("出场规则 (RVOL-tiered)")
+        exit_str = " / ".join(f"RVOL>{r:.0f}×→stop{s:.0%}/tgt{t:.0%}/trail{tr:.0%}" for r, s, t, tr in config.RVOL_EXIT_TIERS)
         st.markdown(f"""
-        - 确认仓位: 止损 **{config.STOP_LOSS_PCT:.0%}** + trailing {config.TRAIL_PCT:.0%} (after +{config.TRAIL_START:.0%})
-        - Base仓位: 止损 **{config.BASE_STOP_PCT:.0%}** + 10:25 出场
-        - **让赢家奔跑**: 确认仓位无固定10:25出场
+        - 出场层级: {exit_str}
         - 强制平仓: **{config.FORCE_CLOSE_TIME} EST**
         - 日损失熔断: **{config.MAX_DAILY_LOSS_PCT:.0%}**
         """)
 
     st.divider()
-    st.subheader("Top2 1.0 设计理念")
+    st.subheader("RTG 1.0 设计理念")
     st.markdown(f"""
-    - **Top-2 Ranking**: 用前5分钟动量(first5chg)排名，选最强的2只，而不是RVOL排名买全部
-    - **Open Entry**: 09:30开盘直接买入30%基础仓，不错过开盘冲高
-    - **5-Bar Add**: 09:35确认5-bar filter后加仓70%，失败则只持base(5%止损+10:25出场)
-    - **Trailing Stop**: +3%利润后启动2% trailing，让赢家跑到15:50
-    - **回测(3月)**: +278.4%, 180 trades, 60.0% WR, R/R 4.8:1
+    - **RTG Signal**: 跳空高开股出现Red-to-Green(量价突破)→市价入场，过滤假突破
+    - **RVOL-tiered Exit**: 高RVOL宽止损(7%)+高目标(50%)，低RVOL窄止损(3%)+低目标(15%)
+    - **Trailing Stop**: 每档RVOL有独立trailing，利润到目标后自动收窄锁定收益
+    - **全天入场**: 不限10:25，RTG信号随时可触发
+    - **1月回测**: +170.7%, 402 trades, 76.9% WR, R/R 1.0:1
     """)
 
 # ══════════════════════════════════════════════════════════════════
