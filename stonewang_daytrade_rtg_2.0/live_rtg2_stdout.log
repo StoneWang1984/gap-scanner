@@ -1,14 +1,14 @@
-[11:27:52] Using SIP data feed
-[11:27:52] ============================================================
-[11:27:52] stonewang RTG 2.0 Live Trading -- Profit Protection + Progressive Trailing
-[11:27:52] Entry: RTG (vol >= 1.5x prior) / GapGo DISABLED
-[11:27:52] Exit: adaptive by RVOL tier | time 0s
-[11:27:52] Window: 09:30-15:59 EST
-[11:27:52] Sizing: RVOL-weighted (50%/35%/20%) | max 8 concurrent | re-entry max 0
-[11:27:52] ============================================================
-[11:27:52] Testing data connectivity...
-[11:27:54]   SPY bar received, OK!
-[11:27:54] Connectivity OK!
-[11:27:54] Starting trading day: 2026-08-27 (close 16:00, force_close 15:59)
-[11:27:55] Account equity: $369.03
-[11:27:56] Scanning for gap stocks on 2026-08-27...
+[11:38:27] Using SIP data feed
+[11:38:27] ============================================================
+[11:38:27] stonewang RTG 2.0 Live Trading -- Profit Protection + Progressive Trailing
+[11:38:27] Entry: RTG (vol >= 1.5x prior) / GapGo DISABLED
+[11:38:27] Exit: adaptive by RVOL tier | time 0s
+[11:38:27] Window: 09:30-15:59 EST
+[11:38:27] Sizing: RVOL-weighted (50%/35%/20%) | max 8 concurrent | re-entry max 0
+[11:38:27] ============================================================
+[11:38:27] Testing data connectivity...
+[11:38:28]   SPY bar received, OK!
+[11:38:28] Connectivity OK!
+[11:38:28] Starting trading day: 2026-08-27 (close 16:00, force_close 15:59)
+[11:38:29] Account equity: $370.14
+[11:38:31] Scanning for gap stocks on 2026-08-27...

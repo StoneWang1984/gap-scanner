@@ -79,3 +79,131 @@
 [11:27:54] Starting trading day: 2026-08-27 (close 16:00, force_close 15:59)
 [11:27:55] Account equity: $369.03
 [11:27:56] Scanning for gap stocks on 2026-08-27...
+[11:29:22] After leveraged ETF filter: 13057 symbols
+[11:29:22] After crypto ETF filter: 12987 symbols
+[11:29:22] After EXCLUDE_SYMBOLS filter: 12983 symbols (removed 4)
+[11:29:29]   Scan progress: 10/65 batches
+[11:29:34]   Scan progress: 20/65 batches
+[11:29:40]   Scan progress: 30/65 batches
+[11:29:46]   Scan progress: 40/65 batches
+[11:29:51]   Scan progress: 50/65 batches
+[11:29:56]   Scan progress: 60/65 batches
+[11:30:00]   Scan progress: 65/65 batches
+[11:30:01] Fetched 20d avg volume for 21/21 symbols
+[11:30:01] Top 21 candidates by RVOL: ['WNW', 'MIMI', 'SMTG', 'PSNYW', 'BBUL', 'DAIC', 'LTRX', 'WYFL', 'CELU', 'CRMG', 'BRNX', 'AIQU', 'INFH', 'AMKL', 'AXTL', 'OUSL', 'VNCE', 'TE', 'AXTX', 'GEMG', 'YJ']
+[11:30:01]   WNW: gap +31.0%, RVOL=17.9×, open=$3.2500
+[11:30:01]   MIMI: gap +27.8%, RVOL=12.8×, open=$2.3000
+[11:30:01]   SMTG: gap +12.4%, RVOL=6.7×, open=$8.8000
+[11:30:01]   PSNYW: gap +14.1%, RVOL=6.6×, open=$6.1400
+[11:30:01]   BBUL: gap +13.3%, RVOL=4.7×, open=$12.3000
+[11:30:01]   DAIC: gap +13.8%, RVOL=3.4×, open=$5.8600
+[11:30:01]   LTRX: gap +17.9%, RVOL=2.9×, open=$6.6750
+[11:30:01]   WYFL: gap +10.1%, RVOL=2.3×, open=$5.8000
+[11:30:01]   CELU: gap +26.1%, RVOL=1.8×, open=$1.1100
+[11:30:01]   CRMG: gap +23.7%, RVOL=1.6×, open=$8.3000
+[11:30:01]   BRNX: gap +10.5%, RVOL=1.4×, open=$6.8950
+[11:30:01]   AIQU: gap +10.7%, RVOL=0.7×, open=$18.5000
+[11:30:01]   INFH: gap +11.6%, RVOL=0.6×, open=$10.1600
+[11:30:01]   AMKL: gap +17.0%, RVOL=0.6×, open=$7.0800
+[11:30:01]   AXTL: gap +15.2%, RVOL=0.6×, open=$3.1400
+[11:30:01]   OUSL: gap +11.7%, RVOL=0.5×, open=$14.5900
+[11:30:01]   VNCE: gap +18.3%, RVOL=0.5×, open=$7.5000
+[11:30:01]   TE: gap +11.9%, RVOL=0.5×, open=$5.0450
+[11:30:01]   AXTX: gap +15.2%, RVOL=0.4×, open=$8.1100
+[11:30:01]   GEMG: gap +11.0%, RVOL=0.3×, open=$9.4000
+[11:30:01]   YJ: gap +15.2%, RVOL=0.1×, open=$3.1800
+[11:30:16] WebSocket stream started for 21 symbols
+[11:30:17] BUY order submitted: WNW 29sh, id=5c58ad16-2443-494a-b09e-130f95db1fdf
+[11:30:18] ENTRY WNW [rtg] 29sh @ $3.1303 [RVOL=17.9× stop=7% tgt=50%]
+[11:30:18] BUY order submitted: MIMI 34sh, id=ff531900-c9af-405b-8fe8-ce2e1bb30a06
+[11:30:18] ENTRY MIMI [rtg] 34sh @ $2.7100 [RVOL=12.8× stop=7% tgt=50%]
+[11:30:18] BUY order submitted: DAIC 8sh, id=e114e284-25c3-4d7a-a06a-9c1301c2726a
+[11:30:19] ENTRY DAIC [rtg] 8sh @ $4.7675 [RVOL=3.4× stop=3% tgt=15%]
+[11:30:20] BUY order submitted: CELU 19sh, id=887f0268-9e8d-43c7-8bbf-3d283f9aba6f
+[11:30:20] ENTRY CELU [rtg] 19sh @ $2.0550 [RVOL=1.8× stop=3% tgt=15%]
+[11:30:21] BUY order submitted: CRMG 4sh, id=10700fcc-0c75-4cbb-a4f1-025699432b26
+[11:30:21] ENTRY CRMG [rtg] 4sh @ $9.3450 [RVOL=1.6× stop=3% tgt=15%]
+[11:30:21] BUY order submitted: BRNX 5sh, id=669cc5f7-1e26-43f1-a191-c2b98260b27c
+[11:30:22] ENTRY BRNX [rtg] 5sh @ $7.8387 [RVOL=1.4× stop=3% tgt=15%]
+[11:30:22] BUY order submitted: VNCE 4sh, id=aaf4e3b6-9507-4fea-9c9d-8e96f5c28c12
+[11:30:22] ENTRY VNCE [rtg] 4sh @ $7.5450 [RVOL=0.5× stop=3% tgt=15%]
+[11:31:57] BUY order submitted: YJ 12sh, id=84e5d2bc-fe0d-45b7-998d-eb32b87cc5ab
+[11:31:57] ENTRY YJ [rtg] 12sh @ $3.0700 [RVOL=0.1× stop=3% tgt=15%]
+[11:32:01] SELL market failed: BRNX 5sh. - {"code":40310000,"message":"account is not allowed to short"}
+[11:32:01]   Retrying BRNX via close_position()...
+[11:32:02] SELL close_position also failed: BRNX - {"code":40410000,"message":"position not found: BRNX"}
+[11:32:02] SELL failed for BRNX, retrying in 2s...
+[11:32:05] SELL market failed: BRNX 5sh. - {"code":40310000,"message":"account is not allowed to short"}
+[11:32:05]   Retrying BRNX via close_position()...
+[11:32:05] SELL close_position also failed: BRNX - {"code":40410000,"message":"position not found: BRNX"}
+[11:32:05] SELL stuck for BRNX (locked shares), throttling 60s
+[11:32:45] SELL market failed: CELU 19sh. - {"code":40310000,"message":"account is not allowed to short"}
+[11:32:45]   Retrying CELU via close_position()...
+[11:32:45] SELL close_position also failed: CELU - {"code":40410000,"message":"position not found: CELU"}
+[11:32:45] SELL failed for CELU, retrying in 2s...
+[11:32:49] SELL market failed: CELU 19sh. - {"code":40310000,"message":"account is not allowed to short"}
+[11:32:49]   Retrying CELU via close_position()...
+[11:32:49] SELL close_position also failed: CELU - {"code":40410000,"message":"position not found: CELU"}
+[11:32:49] SELL stuck for CELU (locked shares), throttling 60s
+[11:33:51] SELL market failed: CELU 19sh. - {"code":40310000,"message":"account is not allowed to short"}
+[11:33:51]   Retrying CELU via close_position()...
+[11:33:51] SELL close_position also failed: CELU - {"code":40410000,"message":"position not found: CELU"}
+[11:33:51] SELL failed for CELU, retrying in 2s...
+[11:33:55] SELL market failed: CELU 19sh. - {"code":40310000,"message":"account is not allowed to short"}
+[11:33:55]   Retrying CELU via close_position()...
+[11:33:55] SELL close_position also failed: CELU - {"code":40410000,"message":"position not found: CELU"}
+[11:33:55] SELL stuck for CELU (locked shares), throttling 60s
+[11:34:58] SELL market failed: CELU 19sh. - {"code":40310000,"message":"account is not allowed to short"}
+[11:34:58]   Retrying CELU via close_position()...
+[11:34:58] SELL close_position also failed: CELU - {"code":40410000,"message":"position not found: CELU"}
+[11:34:58] SELL failed for CELU, retrying in 2s...
+[11:35:02] SELL market failed: CELU 19sh. - {"code":40310000,"message":"account is not allowed to short"}
+[11:35:02]   Retrying CELU via close_position()...
+[11:35:02] SELL close_position also failed: CELU - {"code":40410000,"message":"position not found: CELU"}
+[11:35:02] SELL stuck for CELU (locked shares), throttling 60s
+[11:36:04] SELL market failed: CELU 19sh. - {"code":40310000,"message":"account is not allowed to short"}
+[11:36:04]   Retrying CELU via close_position()...
+[11:36:04] SELL close_position also failed: CELU - {"code":40410000,"message":"position not found: CELU"}
+[11:36:04] SELL failed for CELU, retrying in 2s...
+[11:36:07] SELL market failed: CELU 19sh. - {"code":40310000,"message":"account is not allowed to short"}
+[11:36:07]   Retrying CELU via close_position()...
+[11:36:08] SELL close_position also failed: CELU - {"code":40410000,"message":"position not found: CELU"}
+[11:36:08] SELL stuck for CELU (locked shares), throttling 60s
+[11:37:10] SELL market failed: CELU 19sh. - {"code":40310000,"message":"account is not allowed to short"}
+[11:37:10]   Retrying CELU via close_position()...
+[11:37:10] SELL close_position also failed: CELU - {"code":40410000,"message":"position not found: CELU"}
+[11:37:10] SELL failed for CELU, retrying in 2s...
+[11:37:14] SELL market failed: CELU 19sh. - {"code":40310000,"message":"account is not allowed to short"}
+[11:37:14]   Retrying CELU via close_position()...
+[11:37:14] SELL close_position also failed: CELU - {"code":40410000,"message":"position not found: CELU"}
+[11:37:14] SELL stuck for CELU (locked shares), throttling 60s
+[11:37:38] Profit protection! Max profit was $+6.67, now $+5.47 < 85%
+[11:37:41] Profit protect close WNW, P&L=$+0.00
+[11:37:44] Profit protect close MIMI, P&L=$+0.00
+[11:37:48] Profit protect close DAIC, P&L=$+0.00
+[11:37:49] Force close failed: CELU - {"code":40410000,"message":"position not found: CELU"}
+[11:37:52] Profit protect close CRMG, P&L=$+0.00
+[11:37:54] Force close failed: BRNX - {"code":40410000,"message":"position not found: BRNX"}
+[11:37:57] Profit protect close VNCE, P&L=$+0.00
+[11:37:59] Profit protect close YJ, P&L=$+0.00
+[11:37:59] ============================================================
+[11:37:59] Trading day complete!
+[11:37:59] Equity: $367.44 | Daily P&L: $+0.00 | Trades: 14
+[11:37:59] ============================================================
+[11:37:59] Daily report saved
+[11:37:59] Next trading day: 2026-08-28. Sleeping until 9:15...
+[11:37:59] Next event in 1297 min, sleeping...
+[11:38:27] Using SIP data feed
+[11:38:27] ============================================================
+[11:38:27] stonewang RTG 2.0 Live Trading -- Profit Protection + Progressive Trailing
+[11:38:27] Entry: RTG (vol >= 1.5x prior) / GapGo DISABLED
+[11:38:27] Exit: adaptive by RVOL tier | time 0s
+[11:38:27] Window: 09:30-15:59 EST
+[11:38:27] Sizing: RVOL-weighted (50%/35%/20%) | max 8 concurrent | re-entry max 0
+[11:38:27] ============================================================
+[11:38:27] Testing data connectivity...
+[11:38:28]   SPY bar received, OK!
+[11:38:28] Connectivity OK!
+[11:38:28] Starting trading day: 2026-08-27 (close 16:00, force_close 15:59)
+[11:38:29] Account equity: $370.14
+[11:38:31] Scanning for gap stocks on 2026-08-27...

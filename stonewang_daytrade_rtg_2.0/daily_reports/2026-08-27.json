@@ -1,10 +1,10 @@
 {
   "date": "2026-08-27",
   "version": "rtg_2.0",
-  "account_equity_start": 369.3,
-  "account_equity_end": 369.3,
+  "account_equity_start": 367.44,
+  "account_equity_end": 367.44,
   "daily_pnl": 0.0,
-  "daily_trades": 7,
+  "daily_trades": 14,
   "candidates": [
     {
       "symbol": "WNW",
@@ -156,17 +156,26 @@
   ],
   "trades": [
     {
-      "symbol": "CRMG",
-      "entry": 9.3199,
+      "symbol": "WNW",
+      "entry": 3.1303,
       "exit": 0.0,
-      "shares": 4,
+      "shares": 29,
+      "pnl": 0,
+      "reason": "profit_protect",
+      "trade_type": "rtg"
+    },
+    {
+      "symbol": "MIMI",
+      "entry": 2.71,
+      "exit": 0.0,
+      "shares": 34,
       "pnl": 0,
       "reason": "profit_protect",
       "trade_type": "rtg"
     },
     {
       "symbol": "DAIC",
-      "entry": 4.7958,
+      "entry": 4.7675,
       "exit": 0.0,
       "shares": 8,
       "pnl": 0,
@@ -174,17 +183,26 @@
       "trade_type": "rtg"
     },
     {
-      "symbol": "CELU",
-      "entry": 2.0668,
+      "symbol": "CRMG",
+      "entry": 9.345,
       "exit": 0.0,
-      "shares": 19,
+      "shares": 4,
+      "pnl": 0,
+      "reason": "profit_protect",
+      "trade_type": "rtg"
+    },
+    {
+      "symbol": "VNCE",
+      "entry": 7.545,
+      "exit": 0.0,
+      "shares": 4,
       "pnl": 0,
       "reason": "profit_protect",
       "trade_type": "rtg"
     },
     {
       "symbol": "YJ",
-      "entry": 3.11,
+      "entry": 3.07,
       "exit": 0.0,
       "shares": 12,
       "pnl": 0,

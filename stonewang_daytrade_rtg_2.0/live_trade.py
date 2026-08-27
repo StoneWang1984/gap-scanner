@@ -292,6 +292,8 @@ def wait_order_filled(order_id, timeout=30):
 
 
 def place_sell_market(symbol, shares):
+    """Submit sell order and return (filled, price) synchronously for force_close only.
+    For normal exits, use place_sell_async() instead."""
     if config.DRY_RUN:
         log(f"[DRY] SELL {symbol} {shares}sh")
         return shares, 0.00
@@ -304,7 +306,7 @@ def place_sell_market(symbol, shares):
                     trading_client.cancel_order_by_id(o.id)
                 except Exception:
                     pass
-        time.sleep(1)
+        time.sleep(0.5)
     except Exception:
         pass
     try:
@@ -341,6 +343,68 @@ def place_sell_market(symbol, shares):
         except Exception as e2:
             log(f"SELL close_position also failed: {symbol} - {e2}")
             return 0, 0.0
+
+
+def place_sell_async(symbol, shares):
+    """Submit sell order without waiting for fill. Returns order_id or None.
+    Caller should check fill status via check_sell_filled() in next loop iteration."""
+    if config.DRY_RUN:
+        log(f"[DRY] SELL {symbol} {shares}sh")
+        return "dry_run"
+    # Cancel open sell orders for this symbol first
+    try:
+        orders = trading_client.get_orders()
+        for o in orders:
+            if o.symbol == symbol and o.side == OrderSide.SELL and o.status == OrderStatus.OPEN:
+                try:
+                    trading_client.cancel_order_by_id(o.id)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    try:
+        req = MarketOrderRequest(symbol=symbol, qty=shares, side=OrderSide.SELL, time_in_force=TimeInForce.DAY)
+        order = trading_client.submit_order(req)
+        log(f"SELL submitted: {symbol} {shares}sh, order_id={order.id}")
+        return str(order.id)
+    except Exception as e:
+        log(f"SELL market failed: {symbol} {shares}sh. - {e}")
+        # Fallback: close_position (async, fire and forget)
+        try:
+            trading_client.close_position(symbol_or_asset_id=symbol)
+            log(f"  close_position() submitted for {symbol}")
+            return f"close_{symbol}"
+        except Exception as e2:
+            log(f"SELL close_position also failed: {symbol} - {e2}")
+            return None
+
+
+def check_sell_filled(order_id, symbol, shares):
+    """Check if a previously submitted sell order has filled.
+    Returns (filled_qty, fill_price) or (0, 0) if still pending."""
+    if order_id == "dry_run":
+        return shares, 0.0
+    if order_id and order_id.startswith("close_"):
+        # close_position was used — check if position still exists
+        try:
+            pos = trading_client.get_open_position(symbol)
+            remaining = int(float(pos.qty))
+            sold = shares - remaining
+            if sold > 0:
+                return sold, float(pos.current_price)
+            return 0, 0.0
+        except Exception:
+            # Position not found = fully closed
+            return shares, 0.0
+    try:
+        order = trading_client.get_order_by_id(str(order_id))
+        if order.status in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
+            return int(float(order.filled_qty)), float(order.filled_avg_price or 0)
+        if order.status in (OrderStatus.CANCELED, OrderStatus.REJECTED, OrderStatus.EXPIRED):
+            return -1, 0.0  # -1 signals order failed
+        return 0, 0.0  # Still pending
+    except Exception:
+        return 0, 0.0
 
 
 def force_sell_position(symbol, shares):
@@ -655,6 +719,7 @@ def run_trading_day(target_date):
     _last_exit_ts = {}  # symbol -> timestamp of last exit
     _stop_exit_ts = {}  # symbol -> timestamp of stop_loss exit (cooldown)
     _sell_stuck_until = {}  # symbol -> timestamp until which sell retries are throttled
+    _pending_sells = {}    # symbol -> {order_id, reason, submit_time} for async sell tracking
 
     # Restore existing Alpaca positions (survive restart)
     try:
@@ -719,10 +784,35 @@ def run_trading_day(target_date):
              "ws_connected": True, "daily_trades": 0, "candidates": candidates,
              "positions": [], "trades_detail": []}
 
+    # Periodic rescan timer (every 30 min, discover new gap stocks intraday)
+    _last_rescan_ts = time.time()
+    _rescan_interval = 1800  # 30 minutes
+
     while True:
         now = dt.datetime.now(_EST)
         if now >= market_close_dt:
             break
+
+        # Periodic rescan: discover new gap stocks every 30 min
+        if time.time() - _last_rescan_ts >= _rescan_interval:
+            _last_rescan_ts = time.time()
+            try:
+                new_candidates = scan_gaps(target_date)
+                if new_candidates:
+                    old_syms = {c["symbol"] for c in candidates}
+                    added = [c for c in new_candidates if c["symbol"] not in old_syms]
+                    if added:
+                        candidates.extend(added)
+                        new_syms = [c["symbol"] for c in added]
+                        extra = f" ({len(new_syms)-5} more)" if len(new_syms) > 5 else ""
+                        log(f"Rescan: added {len(added)} new candidates: {new_syms[:5]}{extra}")
+                        backfill_1min_bars(new_syms, target_date)
+                        all_syms = [c["symbol"] for c in candidates]
+                        restart_ws_stream(all_syms)
+                    else:
+                        log(f"Rescan: no new candidates ({len(candidates)} total)")
+            except Exception as e:
+                log(f"Rescan error: {e}")
 
         if now >= force_close_dt:
             log("Force close time reached!")
@@ -797,6 +887,40 @@ def run_trading_day(target_date):
                 break
 
         # Exit monitoring
+        # Check pending async sells from previous iterations
+        for pos in positions[:]:
+            pending = _pending_sells.get(pos.symbol)
+            if pending:
+                order_id, reason, submit_time = pending["order_id"], pending["reason"], pending["submit_time"]
+                # Timeout: if sell not filled in 60s, retry
+                if time.time() - submit_time > 60:
+                    log(f"SELL timeout for {pos.symbol}, retrying...")
+                    _pending_sells.pop(pos.symbol, None)
+                    # Will be re-triggered in exit monitoring below
+                    continue
+                filled, fill_price = check_sell_filled(order_id, pos.symbol, pos.shares)
+                if filled > 0:
+                    if fill_price <= 0:
+                        bars = _accumulator.get_1min_bars(pos.symbol)
+                        fill_price = float(bars[-1]["close"]) if bars else pos.entry_price
+                    pnl = round((fill_price - pos.entry_price) * filled, 2)
+                    trades_detail.append({"symbol": pos.symbol, "entry": pos.entry_price,
+                                          "exit": round(fill_price, 4), "shares": filled, "pnl": pnl,
+                                          "reason": reason, "trade_type": pos.signal_type})
+                    daily_loss += pnl
+                    daily_trades += 1
+                    positions.remove(pos)
+                    _last_exit_ts[pos.symbol] = time.time()
+                    entry_checked.discard(pos.symbol)
+                    if reason == "stop_loss":
+                        _stop_exit_ts[pos.symbol] = time.time()
+                    _pending_sells.pop(pos.symbol, None)
+                    log(f"EXIT {pos.symbol} {reason} ${fill_price:.4f}, P&L=${pnl:+,.2f}")
+                elif filled < 0:
+                    # Order failed/cancelled — retry
+                    _pending_sells.pop(pos.symbol, None)
+                    log(f"SELL order failed for {pos.symbol}, will retry next cycle")
+
         for pos in positions[:]:
             # Skip if sell is throttled (locked shares)
             if _sell_stuck_until.get(pos.symbol, 0) > time.time():
@@ -841,33 +965,18 @@ def run_trading_day(target_date):
             if reason is None:
                 continue
 
-            sold, fill = place_sell_market(pos.symbol, pos.shares)
-            # Retry once if sell failed (cancel locked orders first)
-            if sold <= 0:
-                log(f"SELL failed for {pos.symbol}, retrying in 2s...")
-                time.sleep(2)
-                sold, fill = place_sell_market(pos.symbol, pos.shares)
-            # If still failed, throttle retries to avoid blocking the main loop
-            if sold <= 0:
-                _sell_stuck_until[pos.symbol] = time.time() + 60  # skip for 60s
+            # Async sell: submit order and record, check fill next iteration
+            if pos.symbol in _pending_sells:
+                continue  # Already have a pending sell for this symbol
+            order_id = place_sell_async(pos.symbol, pos.shares)
+            if order_id:
+                _pending_sells[pos.symbol] = {"order_id": order_id, "reason": reason, "submit_time": time.time()}
+                log(f"Async SELL submitted for {pos.symbol} ({reason}), order={order_id}")
+            else:
+                # Sell submission failed, throttle
+                _sell_stuck_until[pos.symbol] = time.time() + 60
                 log(f"SELL stuck for {pos.symbol} (locked shares), throttling 60s")
                 continue
-                if fill <= 0:
-                    fill = cur_price
-                pnl = round((fill - pos.entry_price) * sold, 2)
-                trades_detail.append({"symbol": pos.symbol, "entry": pos.entry_price,
-                                      "exit": round(fill, 4), "shares": sold, "pnl": pnl,
-                                      "reason": reason, "trade_type": pos.signal_type})
-                daily_loss += pnl
-                daily_trades += 1
-                positions.remove(pos)
-                _last_exit_ts[pos.symbol] = time.time()
-                entry_checked.discard(pos.symbol)
-                # Stop-loss = setup failed → block re-entry permanently
-                # Trail-stop = move captured → allow 1 re-entry with strict conditions
-                if reason == "stop_loss":
-                    _stop_exit_ts[pos.symbol] = time.time()
-                log(f"EXIT {pos.symbol} {reason} ${fill:.4f}, P&L=${pnl:+,.2f}")
 
         # Entry monitoring
         if entry_start_dt <= now < entry_end_dt and len(positions) < config.MAX_POSITIONS:
