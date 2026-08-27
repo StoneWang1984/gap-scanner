@@ -1,4 +1,4 @@
-"""RTG 1.0 策略 — Streamlit Web UI (交易显示 + 回测)"""
+"""RTG 2.0 策略 — Streamlit Web UI (交易显示 + 回测)"""
 
 import json
 import time
@@ -8,7 +8,7 @@ import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
 
-VERSION_DIR = Path("/Users/stonewang2014/gap-scanner/stonewang_daytrade_rtg_1.0")
+VERSION_DIR = Path("/Users/stonewang2014/gap-scanner/stonewang_daytrade_rtg_2.0")
 STATE_FILE = Path("/Users/stonewang2014/gap-scanner/live_state.json")
 import importlib.util, sys
 _spec = importlib.util.spec_from_file_location("config", VERSION_DIR / "config.py")
@@ -16,12 +16,12 @@ config = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(config)
 sys.modules["config"] = config
 
-st.set_page_config(page_title="RTG 1.0 交易", page_icon="📊", layout="wide")
+st.set_page_config(page_title="RTG 2.0 交易", page_icon="📊", layout="wide")
 
 # ── Sidebar ──────────────────────────────────────────────────────
 
-st.sidebar.title("RTG 1.0 交易")
-st.sidebar.caption("RTG Signal + RVOL Tiers + Trailing Stop")
+st.sidebar.title("RTG 2.0 交易")
+st.sidebar.caption("RTG + Profit Protection + Progressive Trailing")
 
 tab = st.sidebar.radio("导航", ["实盘交易", "策略概览", "交易详情"])
 
@@ -227,7 +227,7 @@ if tab == "实盘交易":
 # ══════════════════════════════════════════════════════════════════
 
 elif tab == "策略概览":
-    st.title("RTG 1.0 策略概览")
+    st.title("RTG 2.0 策略概览")
 
     col1, col2 = st.columns(2)
 
@@ -241,6 +241,7 @@ elif tab == "策略概览":
         - 杠杆ETF过滤: **启用**
         - Crypto ETF过滤: **启用**
         - 候选股: **Top {config.MAX_CANDIDATES} by RVOL**
+        - 盘中重扫: **每30分钟** (发现新gap股)
         """)
 
         st.subheader("仓位管理")
@@ -262,22 +263,28 @@ elif tab == "策略概览":
         - RVOL仓位: {sizing_str}
         """)
 
-        st.subheader("出场规则 (RVOL-tiered)")
+        st.subheader("出场规则 (RVOL-tiered + Progressive)")
         exit_str = " / ".join(f"RVOL>{r:.0f}×→stop{s:.0%}/tgt{t:.0%}/trail{tr:.0%}" for r, s, t, tr in config.RVOL_EXIT_TIERS)
+        trail_str = " / ".join(f"利润>{p:.0%}→trail{t:.1%}" for p, t in config.PROGRESSIVE_TRAIL_TIERS)
         st.markdown(f"""
         - 出场层级: {exit_str}
+        - 渐进Trailing: {trail_str}
         - 强制平仓: **{config.FORCE_CLOSE_TIME} EST**
         - 日损失熔断: **{config.MAX_DAILY_LOSS_PCT:.0%}**
         """)
 
     st.divider()
-    st.subheader("RTG 1.0 设计理念")
+    st.subheader("RTG 2.0 设计理念")
+    protect_ratio = int(config.DAILY_PROFIT_PROTECT_RATIO * 100)
+    protect_min = config.DAILY_PROFIT_PROTECT_MIN
     st.markdown(f"""
     - **RTG Signal**: 跳空高开股出现Red-to-Green(量价突破)→市价入场，过滤假突破
     - **RVOL-tiered Exit**: 高RVOL宽止损(7%)+高目标(50%)，低RVOL窄止损(3%)+低目标(15%)
-    - **Trailing Stop**: 每档RVOL有独立trailing，利润到目标后自动收窄锁定收益
+    - **Progressive Trailing**: 利润越大trailing越紧(5%→1.5%, 10%→1%, 15%→0.5%)，锁定收益
+    - **利润保护**: 今日利润降至最高利润的{protect_ratio}%时全仓强平(最低${protect_min}起效)
+    - **盘中重扫**: 每30分钟重新扫描，发现新gap股即时加入监控
+    - **异步卖出**: 卖单异步提交，8仓平仓<10秒(避免串行阻塞4分钟)
     - **全天入场**: 不限10:25，RTG信号随时可触发
-    - **1月回测**: +170.7%, 402 trades, 76.9% WR, R/R 1.0:1
     """)
 
 # ══════════════════════════════════════════════════════════════════
