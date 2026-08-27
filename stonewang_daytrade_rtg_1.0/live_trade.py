@@ -653,6 +653,9 @@ def run_trading_day(target_date):
     positions = []
     entry_checked = set()  # Stocks that successfully entered or were confirmed no-signal
     entry_count = {}  # symbol -> count of entries (for re-entry)
+    _last_exit_ts = {}  # symbol -> timestamp of last exit
+    _stop_exit_ts = {}  # symbol -> timestamp of stop_loss exit (cooldown)
+    _sell_stuck_until = {}  # symbol -> timestamp until which sell retries are throttled
 
     # Restore existing Alpaca positions (survive restart)
     try:
@@ -706,9 +709,6 @@ def run_trading_day(target_date):
     trades_detail = []
     daily_loss = 0.0
     max_daily_loss = equity * config.MAX_DAILY_LOSS_PCT
-    _last_exit_ts = {}  # symbol -> timestamp of last exit
-    _stop_exit_ts = {}  # symbol -> timestamp of stop_loss exit (cooldown)
-    _sell_stuck_until = {}  # symbol -> timestamp until which sell retries are throttled
 
     force_close_dt = dt.datetime.combine(target_date.date(), _parse_time(config.FORCE_CLOSE_TIME), tzinfo=_EST)
     entry_end_dt = dt.datetime.combine(target_date.date(), _parse_time(config.ENTRY_WINDOW_END), tzinfo=_EST)
