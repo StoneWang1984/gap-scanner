@@ -1,0 +1,195 @@
+{
+  "date": "2026-08-27",
+  "version": "rtg_2.0",
+  "account_equity_start": 369.3,
+  "account_equity_end": 369.3,
+  "daily_pnl": 0.0,
+  "daily_trades": 7,
+  "candidates": [
+    {
+      "symbol": "WNW",
+      "open_price": 3.25,
+      "prev_close": 2.48,
+      "gap_pct": 0.310483870967742,
+      "rvol": 17.904313918435406
+    },
+    {
+      "symbol": "MIMI",
+      "open_price": 2.3,
+      "prev_close": 1.8,
+      "gap_pct": 0.2777777777777777,
+      "rvol": 12.838211346737388
+    },
+    {
+      "symbol": "SMTG",
+      "open_price": 8.8,
+      "prev_close": 7.83,
+      "gap_pct": 0.1238825031928481,
+      "rvol": 6.746520733872343
+    },
+    {
+      "symbol": "PSNYW",
+      "open_price": 6.14,
+      "prev_close": 5.38,
+      "gap_pct": 0.1412639405204461,
+      "rvol": 6.645790786429697
+    },
+    {
+      "symbol": "BBUL",
+      "open_price": 12.3,
+      "prev_close": 10.8597,
+      "gap_pct": 0.13262797314842967,
+      "rvol": 4.743329054537606
+    },
+    {
+      "symbol": "DAIC",
+      "open_price": 5.86,
+      "prev_close": 5.15,
+      "gap_pct": 0.13786407766990294,
+      "rvol": 3.3512362220175573
+    },
+    {
+      "symbol": "LTRX",
+      "open_price": 6.675,
+      "prev_close": 5.66,
+      "gap_pct": 0.17932862190812715,
+      "rvol": 2.8843280212221063
+    },
+    {
+      "symbol": "WYFL",
+      "open_price": 5.8,
+      "prev_close": 5.27,
+      "gap_pct": 0.10056925996204935,
+      "rvol": 2.2982200889884297
+    },
+    {
+      "symbol": "CELU",
+      "open_price": 1.11,
+      "prev_close": 0.8804,
+      "gap_pct": 0.26079054975011373,
+      "rvol": 1.8037720196297113
+    },
+    {
+      "symbol": "CRMG",
+      "open_price": 8.3,
+      "prev_close": 6.71,
+      "gap_pct": 0.2369597615499257,
+      "rvol": 1.6472737106401474
+    },
+    {
+      "symbol": "BRNX",
+      "open_price": 6.895,
+      "prev_close": 6.24,
+      "gap_pct": 0.10496794871794868,
+      "rvol": 1.3742021065314303
+    },
+    {
+      "symbol": "AIQU",
+      "open_price": 18.5,
+      "prev_close": 16.7138,
+      "gap_pct": 0.10686977228398087,
+      "rvol": 0.7336880238480357
+    },
+    {
+      "symbol": "INFH",
+      "open_price": 10.16,
+      "prev_close": 9.105,
+      "gap_pct": 0.11587040087863798,
+      "rvol": 0.6351081287390248
+    },
+    {
+      "symbol": "AMKL",
+      "open_price": 7.08,
+      "prev_close": 6.05,
+      "gap_pct": 0.1702479338842975,
+      "rvol": 0.6310882767432385
+    },
+    {
+      "symbol": "AXTL",
+      "open_price": 3.14,
+      "prev_close": 2.725,
+      "gap_pct": 0.15229357798165144,
+      "rvol": 0.5628140633063298
+    },
+    {
+      "symbol": "OUSL",
+      "open_price": 14.59,
+      "prev_close": 13.06,
+      "gap_pct": 0.11715160796324642,
+      "rvol": 0.5348881113493772
+    },
+    {
+      "symbol": "VNCE",
+      "open_price": 7.5,
+      "prev_close": 6.34,
+      "gap_pct": 0.18296529968454256,
+      "rvol": 0.5259952176057532
+    },
+    {
+      "symbol": "TE",
+      "open_price": 5.045,
+      "prev_close": 4.51,
+      "gap_pct": 0.11862527716186255,
+      "rvol": 0.4637106379260077
+    },
+    {
+      "symbol": "AXTX",
+      "open_price": 8.11,
+      "prev_close": 7.04,
+      "gap_pct": 0.15198863636363624,
+      "rvol": 0.43548555859552174
+    },
+    {
+      "symbol": "GEMG",
+      "open_price": 9.4,
+      "prev_close": 8.4678,
+      "gap_pct": 0.11008762606580214,
+      "rvol": 0.32867851024031963
+    },
+    {
+      "symbol": "YJ",
+      "open_price": 3.18,
+      "prev_close": 2.76,
+      "gap_pct": 0.1521739130434785,
+      "rvol": 0.06053812122304244
+    }
+  ],
+  "trades": [
+    {
+      "symbol": "CRMG",
+      "entry": 9.3199,
+      "exit": 0.0,
+      "shares": 4,
+      "pnl": 0,
+      "reason": "profit_protect",
+      "trade_type": "rtg"
+    },
+    {
+      "symbol": "DAIC",
+      "entry": 4.7958,
+      "exit": 0.0,
+      "shares": 8,
+      "pnl": 0,
+      "reason": "profit_protect",
+      "trade_type": "rtg"
+    },
+    {
+      "symbol": "CELU",
+      "entry": 2.0668,
+      "exit": 0.0,
+      "shares": 19,
+      "pnl": 0,
+      "reason": "profit_protect",
+      "trade_type": "rtg"
+    },
+    {
+      "symbol": "YJ",
+      "entry": 3.11,
+      "exit": 0.0,
+      "shares": 12,
+      "pnl": 0,
+      "reason": "profit_protect",
+      "trade_type": "rtg"
+    }
+  ]
+}

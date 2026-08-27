@@ -1,0 +1,81 @@
+[11:22:42] Using SIP data feed
+[11:22:42] ============================================================
+[11:22:42] stonewang RTG 2.0 Live Trading -- Profit Protection + Progressive Trailing
+[11:22:42] Entry: RTG (vol >= 1.5x prior) / GapGo DISABLED
+[11:22:42] Exit: adaptive by RVOL tier | time 0s
+[11:22:42] Window: 09:30-15:59 EST
+[11:22:42] Sizing: RVOL-weighted (50%/35%/20%) | max 8 concurrent | re-entry max 0
+[11:22:42] ============================================================
+[11:22:42] Testing data connectivity...
+[11:22:43]   SPY bar received, OK!
+[11:22:43] Connectivity OK!
+[11:22:43] Starting trading day: 2026-08-27 (close 16:00, force_close 15:59)
+[11:22:45] Account equity: $369.55
+[11:22:45] Scanning for gap stocks on 2026-08-27...
+[11:25:15] After leveraged ETF filter: 13057 symbols
+[11:25:15] After crypto ETF filter: 12987 symbols
+[11:25:15] After EXCLUDE_SYMBOLS filter: 12983 symbols (removed 4)
+[11:25:27]   Scan progress: 10/65 batches
+[11:25:33]   Scan progress: 20/65 batches
+[11:25:40]   Scan progress: 30/65 batches
+[11:25:46]   Scan progress: 40/65 batches
+[11:25:53]   Scan progress: 50/65 batches
+[11:25:59]   Scan progress: 60/65 batches
+[11:26:05]   Scan progress: 65/65 batches
+[11:26:06] Fetched 20d avg volume for 21/21 symbols
+[11:26:06] Top 21 candidates by RVOL: ['WNW', 'MIMI', 'SMTG', 'PSNYW', 'BBUL', 'DAIC', 'LTRX', 'WYFL', 'CELU', 'CRMG', 'BRNX', 'AIQU', 'INFH', 'AMKL', 'AXTL', 'OUSL', 'VNCE', 'TE', 'AXTX', 'GEMG', 'YJ']
+[11:26:06]   WNW: gap +31.0%, RVOL=17.9×, open=$3.2500
+[11:26:06]   MIMI: gap +27.8%, RVOL=12.8×, open=$2.3000
+[11:26:06]   SMTG: gap +12.4%, RVOL=6.7×, open=$8.8000
+[11:26:06]   PSNYW: gap +14.1%, RVOL=6.6×, open=$6.1400
+[11:26:06]   BBUL: gap +13.3%, RVOL=4.7×, open=$12.3000
+[11:26:06]   DAIC: gap +13.8%, RVOL=3.4×, open=$5.8600
+[11:26:06]   LTRX: gap +17.9%, RVOL=2.9×, open=$6.6750
+[11:26:06]   WYFL: gap +10.1%, RVOL=2.3×, open=$5.8000
+[11:26:06]   CELU: gap +26.1%, RVOL=1.8×, open=$1.1100
+[11:26:06]   CRMG: gap +23.7%, RVOL=1.6×, open=$8.3000
+[11:26:06]   BRNX: gap +10.5%, RVOL=1.4×, open=$6.8950
+[11:26:06]   AIQU: gap +10.7%, RVOL=0.7×, open=$18.5000
+[11:26:06]   INFH: gap +11.6%, RVOL=0.6×, open=$10.1600
+[11:26:06]   AMKL: gap +17.0%, RVOL=0.6×, open=$7.0800
+[11:26:06]   AXTL: gap +15.2%, RVOL=0.6×, open=$3.1400
+[11:26:06]   OUSL: gap +11.7%, RVOL=0.5×, open=$14.5900
+[11:26:06]   VNCE: gap +18.3%, RVOL=0.5×, open=$7.5000
+[11:26:06]   TE: gap +11.9%, RVOL=0.5×, open=$5.0450
+[11:26:06]   AXTX: gap +15.2%, RVOL=0.4×, open=$8.1100
+[11:26:06]   GEMG: gap +11.0%, RVOL=0.3×, open=$9.4000
+[11:26:06]   YJ: gap +15.2%, RVOL=0.1×, open=$3.1800
+[11:26:20] WebSocket stream started for 21 symbols
+[11:26:20] Restored 1 existing positions: ['CRMG']
+[11:26:21] BUY order submitted: DAIC 8sh, id=8b676f26-a276-48ce-b66c-b9046c2ea57d
+[11:26:21] ENTRY DAIC [rtg] 8sh @ $4.7958 [RVOL=3.4× stop=3% tgt=15%]
+[11:26:21] BUY order submitted: CELU 19sh, id=777ab129-ed34-4d81-a946-1da0b7e7d0d8
+[11:26:22] ENTRY CELU [rtg] 19sh @ $2.0668 [RVOL=1.8× stop=3% tgt=15%]
+[11:26:22] BUY order submitted: YJ 12sh, id=d64069bc-32d0-44cd-b108-2b3355471c18
+[11:26:22] ENTRY YJ [rtg] 12sh @ $3.1100 [RVOL=0.1× stop=3% tgt=15%]
+[11:26:32] Profit protection! Max profit was $+1.23, now $+0.97 < 85%
+[11:26:35] Profit protect close CRMG, P&L=$+0.00
+[11:26:37] Profit protect close DAIC, P&L=$+0.00
+[11:26:40] Profit protect close CELU, P&L=$+0.00
+[11:26:43] Profit protect close YJ, P&L=$+0.00
+[11:26:43] ============================================================
+[11:26:43] Trading day complete!
+[11:26:43] Equity: $369.30 | Daily P&L: $+0.00 | Trades: 7
+[11:26:43] ============================================================
+[11:26:43] Daily report saved
+[11:26:43] Next trading day: 2026-08-28. Sleeping until 9:15...
+[11:26:43] Next event in 1308 min, sleeping...
+[11:27:52] Using SIP data feed
+[11:27:52] ============================================================
+[11:27:52] stonewang RTG 2.0 Live Trading -- Profit Protection + Progressive Trailing
+[11:27:52] Entry: RTG (vol >= 1.5x prior) / GapGo DISABLED
+[11:27:52] Exit: adaptive by RVOL tier | time 0s
+[11:27:52] Window: 09:30-15:59 EST
+[11:27:52] Sizing: RVOL-weighted (50%/35%/20%) | max 8 concurrent | re-entry max 0
+[11:27:52] ============================================================
+[11:27:52] Testing data connectivity...
+[11:27:54]   SPY bar received, OK!
+[11:27:54] Connectivity OK!
+[11:27:54] Starting trading day: 2026-08-27 (close 16:00, force_close 15:59)
+[11:27:55] Account equity: $369.03
+[11:27:56] Scanning for gap stocks on 2026-08-27...
