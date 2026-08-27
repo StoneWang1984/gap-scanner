@@ -1,0 +1,754 @@
+[12:48:40] Using SIP data feed
+[12:48:40] ============================================================
+[12:48:40] stonewang RTG 3.0 Live Trading — Cycle-based All-in with 1% Trailing Stop
+[12:48:40] Entry: RTG (vol >= 1.5x prior) / GapGo DISABLED
+[12:48:40] Exit: 1% trailing stop (fixed) | 3% hard stop backstop
+[12:48:40] Window: 09:30-15:55 EST
+[12:48:40] Sizing: ALL-IN (95% of BP) | 1 position max
+[12:48:40] Scan: every 300s | Min RVOL: 3.0×
+[12:48:40] ============================================================
+[12:48:40] Testing data connectivity...
+[12:48:42]   SPY bar received, OK!
+[12:48:42] Connectivity OK!
+[12:48:42] Starting rtg_3.0 trading day: 2026-08-27
+[12:48:45] Account equity: $374.36
+[12:48:46] Cycle schedule: 78 cycles, every 300s
+[12:48:46]   First: 09:30, Last: 15:55
+[12:48:46] ═══ Cycle 0 at 09:30:00 ═══
+[12:48:46] Scanning for gap stocks on 2026-08-27...
+[12:48:53] After leveraged ETF filter: 13057 symbols
+[12:48:53] After crypto ETF filter: 12987 symbols
+[12:48:53] After EXCLUDE_SYMBOLS filter: 12983 symbols (removed 4)
+[12:49:04]   Scan progress: 10/65 batches
+[12:49:10]   Scan progress: 20/65 batches
+[12:49:17]   Scan progress: 30/65 batches
+[12:49:24]   Scan progress: 40/65 batches
+[12:49:31]   Scan progress: 50/65 batches
+[12:49:38]   Scan progress: 60/65 batches
+[12:49:42]   Scan progress: 65/65 batches
+[12:49:44] Fetched 20d avg volume for 21/21 symbols
+[12:49:44] Top 21 candidates by RVOL: ['WNW', 'MIMI', 'SMTG', 'PSNYW', 'BBUL', 'DAIC', 'LTRX', 'WYFL', 'CELU', 'CRMG', 'BRNX', 'AIQU', 'INFH', 'AMKL', 'AXTL', 'OUSL', 'VNCE', 'TE', 'AXTX', 'GEMG', 'YJ']
+[12:49:44]   WNW: gap +31.0%, RVOL=17.9×, open=$3.2500
+[12:49:44]   MIMI: gap +27.8%, RVOL=12.8×, open=$2.3000
+[12:49:44]   SMTG: gap +12.4%, RVOL=6.7×, open=$8.8000
+[12:49:44]   PSNYW: gap +14.1%, RVOL=6.6×, open=$6.1400
+[12:49:44]   BBUL: gap +13.3%, RVOL=4.7×, open=$12.3000
+[12:49:44]   DAIC: gap +13.8%, RVOL=3.4×, open=$5.8600
+[12:49:44]   LTRX: gap +17.9%, RVOL=2.9×, open=$6.6750
+[12:49:44]   WYFL: gap +10.1%, RVOL=2.3×, open=$5.8000
+[12:49:44]   CELU: gap +26.1%, RVOL=1.8×, open=$1.1100
+[12:49:44]   CRMG: gap +23.7%, RVOL=1.6×, open=$8.3000
+[12:49:44]   BRNX: gap +10.5%, RVOL=1.4×, open=$6.8950
+[12:49:44]   AIQU: gap +10.7%, RVOL=0.7×, open=$18.5000
+[12:49:44]   INFH: gap +11.6%, RVOL=0.6×, open=$10.1600
+[12:49:44]   AMKL: gap +17.0%, RVOL=0.6×, open=$7.0800
+[12:49:44]   AXTL: gap +15.2%, RVOL=0.6×, open=$3.1400
+[12:49:44]   OUSL: gap +11.7%, RVOL=0.5×, open=$14.5900
+[12:49:44]   VNCE: gap +18.3%, RVOL=0.5×, open=$7.5000
+[12:49:44]   TE: gap +11.9%, RVOL=0.5×, open=$5.0450
+[12:49:44]   AXTX: gap +15.2%, RVOL=0.4×, open=$8.1100
+[12:49:44]   GEMG: gap +11.0%, RVOL=0.3×, open=$9.4000
+[12:49:44]   YJ: gap +15.2%, RVOL=0.1×, open=$3.1800
+[12:49:44] Top candidate: WNW (RVOL=17.9×, gap=+31.0%)
+[12:49:44] Watching WNW for RTG signal (RVOL=17.9×)
+[12:49:46] WebSocket stream started for 1 symbols
+[12:49:50] No RTG signal for WNW
+[12:49:50] Watching MIMI for RTG signal (RVOL=12.8×)
+[12:49:52] WebSocket stream started for 1 symbols
+[12:49:55] No RTG signal for MIMI
+[12:49:55] Watching SMTG for RTG signal (RVOL=6.7×)
+[12:49:57] WebSocket stream started for 1 symbols
+[12:50:00] No RTG signal for SMTG
+[12:50:00] No entry this cycle
+[12:50:00] ═══ Cycle 1 at 09:35:00 ═══
+[12:50:00] Scanning for gap stocks on 2026-08-27...
+[12:50:11] After leveraged ETF filter: 13057 symbols
+[12:50:11] After crypto ETF filter: 12987 symbols
+[12:50:11] After EXCLUDE_SYMBOLS filter: 12983 symbols (removed 4)
+[12:50:21]   Scan progress: 10/65 batches
+[12:50:30]   Scan progress: 20/65 batches
+[12:50:36]   Scan progress: 30/65 batches
+[12:50:43]   Scan progress: 40/65 batches
+[12:50:49]   Scan progress: 50/65 batches
+[12:50:56]   Scan progress: 60/65 batches
+[12:50:58]   Scan progress: 65/65 batches
+[12:51:00] Fetched 20d avg volume for 21/21 symbols
+[12:51:00] Top 21 candidates by RVOL: ['WNW', 'MIMI', 'SMTG', 'PSNYW', 'BBUL', 'DAIC', 'LTRX', 'WYFL', 'CELU', 'CRMG', 'BRNX', 'AIQU', 'INFH', 'AMKL', 'AXTL', 'OUSL', 'VNCE', 'TE', 'AXTX', 'GEMG', 'YJ']
+[12:51:00]   WNW: gap +31.0%, RVOL=17.9×, open=$3.2500
+[12:51:00]   MIMI: gap +27.8%, RVOL=12.8×, open=$2.3000
+[12:51:00]   SMTG: gap +12.4%, RVOL=6.7×, open=$8.8000
+[12:51:00]   PSNYW: gap +14.1%, RVOL=6.6×, open=$6.1400
+[12:51:00]   BBUL: gap +13.3%, RVOL=4.7×, open=$12.3000
+[12:51:00]   DAIC: gap +13.8%, RVOL=3.4×, open=$5.8600
+[12:51:00]   LTRX: gap +17.9%, RVOL=2.9×, open=$6.6750
+[12:51:00]   WYFL: gap +10.1%, RVOL=2.3×, open=$5.8000
+[12:51:00]   CELU: gap +26.1%, RVOL=1.8×, open=$1.1100
+[12:51:00]   CRMG: gap +23.7%, RVOL=1.6×, open=$8.3000
+[12:51:00]   BRNX: gap +10.5%, RVOL=1.4×, open=$6.8950
+[12:51:00]   AIQU: gap +10.7%, RVOL=0.7×, open=$18.5000
+[12:51:00]   INFH: gap +11.6%, RVOL=0.6×, open=$10.1600
+[12:51:00]   AMKL: gap +17.0%, RVOL=0.6×, open=$7.0800
+[12:51:00]   AXTL: gap +15.2%, RVOL=0.6×, open=$3.1400
+[12:51:00]   OUSL: gap +11.7%, RVOL=0.5×, open=$14.5900
+[12:51:00]   VNCE: gap +18.3%, RVOL=0.5×, open=$7.5000
+[12:51:00]   TE: gap +11.9%, RVOL=0.5×, open=$5.0450
+[12:51:00]   AXTX: gap +15.2%, RVOL=0.4×, open=$8.1100
+[12:51:00]   GEMG: gap +11.0%, RVOL=0.3×, open=$9.4000
+[12:51:00]   YJ: gap +15.2%, RVOL=0.1×, open=$3.1800
+[12:51:00] Top candidate: WNW (RVOL=17.9×, gap=+31.0%)
+[12:51:00] Watching WNW for RTG signal (RVOL=17.9×)
+[12:51:02] WebSocket stream started for 1 symbols
+[12:51:05] No RTG signal for WNW
+[12:51:05] Watching MIMI for RTG signal (RVOL=12.8×)
+[12:51:07] WebSocket stream started for 1 symbols
+[12:51:10] No RTG signal for MIMI
+[12:51:10] Watching SMTG for RTG signal (RVOL=6.7×)
+[12:51:12] WebSocket stream started for 1 symbols
+[12:51:15] No RTG signal for SMTG
+[12:51:15] No entry this cycle
+[12:51:15] ═══ Cycle 2 at 09:40:00 ═══
+[12:51:15] Scanning for gap stocks on 2026-08-27...
+[12:51:21] After leveraged ETF filter: 13057 symbols
+[12:51:21] After crypto ETF filter: 12987 symbols
+[12:51:21] After EXCLUDE_SYMBOLS filter: 12983 symbols (removed 4)
+[12:51:28]   Scan progress: 10/65 batches
+[12:51:33]   Scan progress: 20/65 batches
+[12:51:38]   Scan progress: 30/65 batches
+[12:51:44]   Scan progress: 40/65 batches
+[12:51:48]   Scan progress: 50/65 batches
+[12:51:54]   Scan progress: 60/65 batches
+[12:51:56]   Scan progress: 65/65 batches
+[12:51:58] Fetched 20d avg volume for 21/21 symbols
+[12:51:58] Top 21 candidates by RVOL: ['WNW', 'MIMI', 'SMTG', 'PSNYW', 'BBUL', 'DAIC', 'LTRX', 'WYFL', 'CELU', 'CRMG', 'BRNX', 'AIQU', 'INFH', 'AMKL', 'AXTL', 'OUSL', 'VNCE', 'TE', 'AXTX', 'GEMG', 'YJ']
+[12:51:58]   WNW: gap +31.0%, RVOL=17.9×, open=$3.2500
+[12:51:58]   MIMI: gap +27.8%, RVOL=12.8×, open=$2.3000
+[12:51:58]   SMTG: gap +12.4%, RVOL=6.7×, open=$8.8000
+[12:51:58]   PSNYW: gap +14.1%, RVOL=6.6×, open=$6.1400
+[12:51:58]   BBUL: gap +13.3%, RVOL=4.7×, open=$12.3000
+[12:51:58]   DAIC: gap +13.8%, RVOL=3.4×, open=$5.8600
+[12:51:58]   LTRX: gap +17.9%, RVOL=2.9×, open=$6.6750
+[12:51:58]   WYFL: gap +10.1%, RVOL=2.3×, open=$5.8000
+[12:51:58]   CELU: gap +26.1%, RVOL=1.8×, open=$1.1100
+[12:51:58]   CRMG: gap +23.7%, RVOL=1.6×, open=$8.3000
+[12:51:58]   BRNX: gap +10.5%, RVOL=1.4×, open=$6.8950
+[12:51:58]   AIQU: gap +10.7%, RVOL=0.7×, open=$18.5000
+[12:51:58]   INFH: gap +11.6%, RVOL=0.6×, open=$10.1600
+[12:51:58]   AMKL: gap +17.0%, RVOL=0.6×, open=$7.0800
+[12:51:58]   AXTL: gap +15.2%, RVOL=0.6×, open=$3.1400
+[12:51:58]   OUSL: gap +11.7%, RVOL=0.5×, open=$14.5900
+[12:51:58]   VNCE: gap +18.3%, RVOL=0.5×, open=$7.5000
+[12:51:58]   TE: gap +11.9%, RVOL=0.5×, open=$5.0450
+[12:51:58]   AXTX: gap +15.2%, RVOL=0.4×, open=$8.1100
+[12:51:58]   GEMG: gap +11.0%, RVOL=0.3×, open=$9.4000
+[12:51:58]   YJ: gap +15.2%, RVOL=0.1×, open=$3.1800
+[12:51:58] Top candidate: WNW (RVOL=17.9×, gap=+31.0%)
+[12:51:58] Watching WNW for RTG signal (RVOL=17.9×)
+[12:52:00] WebSocket stream started for 1 symbols
+[12:52:03] No RTG signal for WNW
+[12:52:03] Watching MIMI for RTG signal (RVOL=12.8×)
+[12:52:05] WebSocket stream started for 1 symbols
+[12:52:08] No RTG signal for MIMI
+[12:52:08] Watching SMTG for RTG signal (RVOL=6.7×)
+[12:52:10] WebSocket stream started for 1 symbols
+[12:52:12] No RTG signal for SMTG
+[12:52:12] No entry this cycle
+[12:52:12] ═══ Cycle 3 at 09:45:00 ═══
+[12:52:12] Scanning for gap stocks on 2026-08-27...
+[12:52:17] After leveraged ETF filter: 13057 symbols
+[12:52:17] After crypto ETF filter: 12987 symbols
+[12:52:17] After EXCLUDE_SYMBOLS filter: 12983 symbols (removed 4)
+[12:52:24]   Scan progress: 10/65 batches
+[12:52:30]   Scan progress: 20/65 batches
+[12:52:36]   Scan progress: 30/65 batches
+[12:52:41]   Scan progress: 40/65 batches
+[12:52:44]   Scan progress: 50/65 batches
+[12:52:49]   Scan progress: 60/65 batches
+[12:52:50]   Scan progress: 65/65 batches
+[12:52:52] Fetched 20d avg volume for 21/21 symbols
+[12:52:52] Top 21 candidates by RVOL: ['WNW', 'MIMI', 'SMTG', 'PSNYW', 'BBUL', 'DAIC', 'LTRX', 'WYFL', 'CELU', 'CRMG', 'BRNX', 'AIQU', 'INFH', 'AMKL', 'AXTL', 'OUSL', 'VNCE', 'TE', 'AXTX', 'GEMG', 'YJ']
+[12:52:52]   WNW: gap +31.0%, RVOL=17.9×, open=$3.2500
+[12:52:52]   MIMI: gap +27.8%, RVOL=12.8×, open=$2.3000
+[12:52:52]   SMTG: gap +12.4%, RVOL=6.7×, open=$8.8000
+[12:52:52]   PSNYW: gap +14.1%, RVOL=6.6×, open=$6.1400
+[12:52:52]   BBUL: gap +13.3%, RVOL=4.7×, open=$12.3000
+[12:52:52]   DAIC: gap +13.8%, RVOL=3.4×, open=$5.8600
+[12:52:52]   LTRX: gap +17.9%, RVOL=2.9×, open=$6.6750
+[12:52:52]   WYFL: gap +10.1%, RVOL=2.3×, open=$5.8000
+[12:52:52]   CELU: gap +26.1%, RVOL=1.8×, open=$1.1100
+[12:52:52]   CRMG: gap +23.7%, RVOL=1.6×, open=$8.3000
+[12:52:52]   BRNX: gap +10.5%, RVOL=1.4×, open=$6.8950
+[12:52:52]   AIQU: gap +10.7%, RVOL=0.7×, open=$18.5000
+[12:52:52]   INFH: gap +11.6%, RVOL=0.6×, open=$10.1600
+[12:52:52]   AMKL: gap +17.0%, RVOL=0.6×, open=$7.0800
+[12:52:52]   AXTL: gap +15.2%, RVOL=0.6×, open=$3.1400
+[12:52:52]   OUSL: gap +11.7%, RVOL=0.5×, open=$14.5900
+[12:52:52]   VNCE: gap +18.3%, RVOL=0.5×, open=$7.5000
+[12:52:52]   TE: gap +11.9%, RVOL=0.5×, open=$5.0450
+[12:52:52]   AXTX: gap +15.2%, RVOL=0.4×, open=$8.1100
+[12:52:52]   GEMG: gap +11.0%, RVOL=0.3×, open=$9.4000
+[12:52:52]   YJ: gap +15.2%, RVOL=0.1×, open=$3.1800
+[12:52:52] Top candidate: WNW (RVOL=17.9×, gap=+31.0%)
+[12:52:52] Watching WNW for RTG signal (RVOL=17.9×)
+[12:52:54] WebSocket stream started for 1 symbols
+[12:52:56] No RTG signal for WNW
+[12:52:56] Watching MIMI for RTG signal (RVOL=12.8×)
+[12:52:58] WebSocket stream started for 1 symbols
+[12:53:01] No RTG signal for MIMI
+[12:53:01] Watching SMTG for RTG signal (RVOL=6.7×)
+[12:53:03] WebSocket stream started for 1 symbols
+[12:53:06] No RTG signal for SMTG
+[12:53:06] No entry this cycle
+[12:53:06] ═══ Cycle 4 at 09:50:00 ═══
+[12:53:06] Scanning for gap stocks on 2026-08-27...
+[12:53:12] After leveraged ETF filter: 13057 symbols
+[12:53:12] After crypto ETF filter: 12987 symbols
+[12:53:12] After EXCLUDE_SYMBOLS filter: 12983 symbols (removed 4)
+[12:53:18]   Scan progress: 10/65 batches
+[12:53:23]   Scan progress: 20/65 batches
+[12:53:27]   Scan progress: 30/65 batches
+[12:53:31]   Scan progress: 40/65 batches
+[12:53:34]   Scan progress: 50/65 batches
+[12:53:39]   Scan progress: 60/65 batches
+[12:53:42]   Scan progress: 65/65 batches
+[12:53:43] Fetched 20d avg volume for 21/21 symbols
+[12:53:43] Top 21 candidates by RVOL: ['WNW', 'MIMI', 'SMTG', 'PSNYW', 'BBUL', 'DAIC', 'LTRX', 'WYFL', 'CELU', 'CRMG', 'BRNX', 'AIQU', 'INFH', 'AMKL', 'AXTL', 'OUSL', 'VNCE', 'TE', 'AXTX', 'GEMG', 'YJ']
+[12:53:43]   WNW: gap +31.0%, RVOL=17.9×, open=$3.2500
+[12:53:43]   MIMI: gap +27.8%, RVOL=12.8×, open=$2.3000
+[12:53:43]   SMTG: gap +12.4%, RVOL=6.7×, open=$8.8000
+[12:53:43]   PSNYW: gap +14.1%, RVOL=6.6×, open=$6.1400
+[12:53:43]   BBUL: gap +13.3%, RVOL=4.7×, open=$12.3000
+[12:53:43]   DAIC: gap +13.8%, RVOL=3.4×, open=$5.8600
+[12:53:43]   LTRX: gap +17.9%, RVOL=2.9×, open=$6.6750
+[12:53:43]   WYFL: gap +10.1%, RVOL=2.3×, open=$5.8000
+[12:53:43]   CELU: gap +26.1%, RVOL=1.8×, open=$1.1100
+[12:53:43]   CRMG: gap +23.7%, RVOL=1.6×, open=$8.3000
+[12:53:43]   BRNX: gap +10.5%, RVOL=1.4×, open=$6.8950
+[12:53:43]   AIQU: gap +10.7%, RVOL=0.7×, open=$18.5000
+[12:53:43]   INFH: gap +11.6%, RVOL=0.6×, open=$10.1600
+[12:53:43]   AMKL: gap +17.0%, RVOL=0.6×, open=$7.0800
+[12:53:43]   AXTL: gap +15.2%, RVOL=0.6×, open=$3.1400
+[12:53:43]   OUSL: gap +11.7%, RVOL=0.5×, open=$14.5900
+[12:53:43]   VNCE: gap +18.3%, RVOL=0.5×, open=$7.5000
+[12:53:43]   TE: gap +11.9%, RVOL=0.5×, open=$5.0450
+[12:53:43]   AXTX: gap +15.2%, RVOL=0.4×, open=$8.1100
+[12:53:43]   GEMG: gap +11.0%, RVOL=0.3×, open=$9.4000
+[12:53:43]   YJ: gap +15.2%, RVOL=0.1×, open=$3.1800
+[12:53:43] Top candidate: WNW (RVOL=17.9×, gap=+31.0%)
+[12:53:43] Watching WNW for RTG signal (RVOL=17.9×)
+[12:53:45] WebSocket stream started for 1 symbols
+[12:53:47] No RTG signal for WNW
+[12:53:47] Watching MIMI for RTG signal (RVOL=12.8×)
+[12:53:49] WebSocket stream started for 1 symbols
+[12:53:52] No RTG signal for MIMI
+[12:53:52] Watching SMTG for RTG signal (RVOL=6.7×)
+[12:53:54] WebSocket stream started for 1 symbols
+[12:53:57] No RTG signal for SMTG
+[12:53:57] No entry this cycle
+[12:53:57] ═══ Cycle 5 at 09:55:00 ═══
+[12:53:57] Scanning for gap stocks on 2026-08-27...
+[12:54:03] After leveraged ETF filter: 13057 symbols
+[12:54:03] After crypto ETF filter: 12987 symbols
+[12:54:03] After EXCLUDE_SYMBOLS filter: 12983 symbols (removed 4)
+[12:54:10]   Scan progress: 10/65 batches
+[12:54:16]   Scan progress: 20/65 batches
+[12:54:21]   Scan progress: 30/65 batches
+[12:54:26]   Scan progress: 40/65 batches
+[12:54:30]   Scan progress: 50/65 batches
+[12:54:35]   Scan progress: 60/65 batches
+[12:54:38]   Scan progress: 65/65 batches
+[12:54:39] Fetched 20d avg volume for 21/21 symbols
+[12:54:39] Top 21 candidates by RVOL: ['WNW', 'MIMI', 'SMTG', 'PSNYW', 'BBUL', 'DAIC', 'LTRX', 'WYFL', 'CELU', 'CRMG', 'BRNX', 'AIQU', 'INFH', 'AMKL', 'AXTL', 'OUSL', 'VNCE', 'TE', 'AXTX', 'GEMG', 'YJ']
+[12:54:39]   WNW: gap +31.0%, RVOL=17.9×, open=$3.2500
+[12:54:39]   MIMI: gap +27.8%, RVOL=12.8×, open=$2.3000
+[12:54:39]   SMTG: gap +12.4%, RVOL=6.7×, open=$8.8000
+[12:54:39]   PSNYW: gap +14.1%, RVOL=6.6×, open=$6.1400
+[12:54:39]   BBUL: gap +13.3%, RVOL=4.7×, open=$12.3000
+[12:54:39]   DAIC: gap +13.8%, RVOL=3.4×, open=$5.8600
+[12:54:39]   LTRX: gap +17.9%, RVOL=2.9×, open=$6.6750
+[12:54:39]   WYFL: gap +10.1%, RVOL=2.3×, open=$5.8000
+[12:54:39]   CELU: gap +26.1%, RVOL=1.8×, open=$1.1100
+[12:54:39]   CRMG: gap +23.7%, RVOL=1.6×, open=$8.3000
+[12:54:39]   BRNX: gap +10.5%, RVOL=1.4×, open=$6.8950
+[12:54:39]   AIQU: gap +10.7%, RVOL=0.7×, open=$18.5000
+[12:54:39]   INFH: gap +11.6%, RVOL=0.6×, open=$10.1600
+[12:54:39]   AMKL: gap +17.0%, RVOL=0.6×, open=$7.0800
+[12:54:39]   AXTL: gap +15.2%, RVOL=0.6×, open=$3.1400
+[12:54:39]   OUSL: gap +11.7%, RVOL=0.5×, open=$14.5900
+[12:54:39]   VNCE: gap +18.3%, RVOL=0.5×, open=$7.5000
+[12:54:39]   TE: gap +11.9%, RVOL=0.5×, open=$5.0450
+[12:54:39]   AXTX: gap +15.2%, RVOL=0.4×, open=$8.1100
+[12:54:39]   GEMG: gap +11.0%, RVOL=0.3×, open=$9.4000
+[12:54:39]   YJ: gap +15.2%, RVOL=0.1×, open=$3.1800
+[12:54:39] Top candidate: WNW (RVOL=17.9×, gap=+31.0%)
+[12:54:39] Watching WNW for RTG signal (RVOL=17.9×)
+[12:54:41] WebSocket stream started for 1 symbols
+[12:54:43] No RTG signal for WNW
+[12:54:43] Watching MIMI for RTG signal (RVOL=12.8×)
+[12:54:45] WebSocket stream started for 1 symbols
+[12:54:48] No RTG signal for MIMI
+[12:54:48] Watching SMTG for RTG signal (RVOL=6.7×)
+[12:54:50] WebSocket stream started for 1 symbols
+[12:54:53] No RTG signal for SMTG
+[12:54:53] No entry this cycle
+[12:54:53] ═══ Cycle 6 at 10:00:00 ═══
+[12:54:53] Scanning for gap stocks on 2026-08-27...
+[12:54:58] After leveraged ETF filter: 13057 symbols
+[12:54:58] After crypto ETF filter: 12987 symbols
+[12:54:58] After EXCLUDE_SYMBOLS filter: 12983 symbols (removed 4)
+[12:55:05]   Scan progress: 10/65 batches
+[12:55:12]   Scan progress: 20/65 batches
+[12:55:19]   Scan progress: 30/65 batches
+[12:55:25]   Scan progress: 40/65 batches
+[12:55:31]   Scan progress: 50/65 batches
+[12:55:35]   Scan progress: 60/65 batches
+[12:55:38]   Scan progress: 65/65 batches
+[12:55:39] Fetched 20d avg volume for 21/21 symbols
+[12:55:39] Top 21 candidates by RVOL: ['WNW', 'MIMI', 'SMTG', 'PSNYW', 'BBUL', 'DAIC', 'LTRX', 'WYFL', 'CELU', 'CRMG', 'BRNX', 'AIQU', 'INFH', 'AMKL', 'AXTL', 'OUSL', 'VNCE', 'TE', 'AXTX', 'GEMG', 'YJ']
+[12:55:39]   WNW: gap +31.0%, RVOL=17.9×, open=$3.2500
+[12:55:39]   MIMI: gap +27.8%, RVOL=12.8×, open=$2.3000
+[12:55:39]   SMTG: gap +12.4%, RVOL=6.7×, open=$8.8000
+[12:55:39]   PSNYW: gap +14.1%, RVOL=6.6×, open=$6.1400
+[12:55:39]   BBUL: gap +13.3%, RVOL=4.7×, open=$12.3000
+[12:55:39]   DAIC: gap +13.8%, RVOL=3.4×, open=$5.8600
+[12:55:39]   LTRX: gap +17.9%, RVOL=2.9×, open=$6.6750
+[12:55:39]   WYFL: gap +10.1%, RVOL=2.3×, open=$5.8000
+[12:55:39]   CELU: gap +26.1%, RVOL=1.8×, open=$1.1100
+[12:55:39]   CRMG: gap +23.7%, RVOL=1.6×, open=$8.3000
+[12:55:39]   BRNX: gap +10.5%, RVOL=1.4×, open=$6.8950
+[12:55:39]   AIQU: gap +10.7%, RVOL=0.7×, open=$18.5000
+[12:55:39]   INFH: gap +11.6%, RVOL=0.6×, open=$10.1600
+[12:55:39]   AMKL: gap +17.0%, RVOL=0.6×, open=$7.0800
+[12:55:39]   AXTL: gap +15.2%, RVOL=0.6×, open=$3.1400
+[12:55:39]   OUSL: gap +11.7%, RVOL=0.5×, open=$14.5900
+[12:55:39]   VNCE: gap +18.3%, RVOL=0.5×, open=$7.5000
+[12:55:39]   TE: gap +11.9%, RVOL=0.5×, open=$5.0450
+[12:55:39]   AXTX: gap +15.2%, RVOL=0.4×, open=$8.1100
+[12:55:39]   GEMG: gap +11.0%, RVOL=0.3×, open=$9.4000
+[12:55:39]   YJ: gap +15.2%, RVOL=0.1×, open=$3.1800
+[12:55:39] Top candidate: WNW (RVOL=17.9×, gap=+31.0%)
+[12:55:39] Watching WNW for RTG signal (RVOL=17.9×)
+[12:55:41] WebSocket stream started for 1 symbols
+[12:55:44] No RTG signal for WNW
+[12:55:44] Watching MIMI for RTG signal (RVOL=12.8×)
+[12:55:46] WebSocket stream started for 1 symbols
+[12:55:49] No RTG signal for MIMI
+[12:55:49] Watching SMTG for RTG signal (RVOL=6.7×)
+[12:55:51] WebSocket stream started for 1 symbols
+[12:55:53] No RTG signal for SMTG
+[12:55:53] No entry this cycle
+[12:55:53] ═══ Cycle 7 at 10:05:00 ═══
+[12:55:53] Scanning for gap stocks on 2026-08-27...
+[12:55:58] After leveraged ETF filter: 13057 symbols
+[12:55:58] After crypto ETF filter: 12987 symbols
+[12:55:58] After EXCLUDE_SYMBOLS filter: 12983 symbols (removed 4)
+[12:56:06]   Scan progress: 10/65 batches
+[12:56:12]   Scan progress: 20/65 batches
+[12:56:16]   Scan progress: 30/65 batches
+[12:56:21]   Scan progress: 40/65 batches
+[12:56:25]   Scan progress: 50/65 batches
+[12:56:30]   Scan progress: 60/65 batches
+[12:56:33]   Scan progress: 65/65 batches
+[12:56:34] Fetched 20d avg volume for 21/21 symbols
+[12:56:34] Top 21 candidates by RVOL: ['WNW', 'MIMI', 'SMTG', 'PSNYW', 'BBUL', 'DAIC', 'LTRX', 'WYFL', 'CELU', 'CRMG', 'BRNX', 'AIQU', 'INFH', 'AMKL', 'AXTL', 'OUSL', 'VNCE', 'TE', 'AXTX', 'GEMG', 'YJ']
+[12:56:34]   WNW: gap +31.0%, RVOL=17.9×, open=$3.2500
+[12:56:34]   MIMI: gap +27.8%, RVOL=12.8×, open=$2.3000
+[12:56:34]   SMTG: gap +12.4%, RVOL=6.7×, open=$8.8000
+[12:56:34]   PSNYW: gap +14.1%, RVOL=6.6×, open=$6.1400
+[12:56:34]   BBUL: gap +13.3%, RVOL=4.7×, open=$12.3000
+[12:56:34]   DAIC: gap +13.8%, RVOL=3.4×, open=$5.8600
+[12:56:34]   LTRX: gap +17.9%, RVOL=2.9×, open=$6.6750
+[12:56:34]   WYFL: gap +10.1%, RVOL=2.3×, open=$5.8000
+[12:56:34]   CELU: gap +26.1%, RVOL=1.8×, open=$1.1100
+[12:56:34]   CRMG: gap +23.7%, RVOL=1.6×, open=$8.3000
+[12:56:34]   BRNX: gap +10.5%, RVOL=1.4×, open=$6.8950
+[12:56:34]   AIQU: gap +10.7%, RVOL=0.7×, open=$18.5000
+[12:56:34]   INFH: gap +11.6%, RVOL=0.6×, open=$10.1600
+[12:56:34]   AMKL: gap +17.0%, RVOL=0.6×, open=$7.0800
+[12:56:34]   AXTL: gap +15.2%, RVOL=0.6×, open=$3.1400
+[12:56:34]   OUSL: gap +11.7%, RVOL=0.5×, open=$14.5900
+[12:56:34]   VNCE: gap +18.3%, RVOL=0.5×, open=$7.5000
+[12:56:34]   TE: gap +11.9%, RVOL=0.5×, open=$5.0450
+[12:56:34]   AXTX: gap +15.2%, RVOL=0.4×, open=$8.1100
+[12:56:34]   GEMG: gap +11.0%, RVOL=0.3×, open=$9.4000
+[12:56:34]   YJ: gap +15.2%, RVOL=0.1×, open=$3.1800
+[12:56:34] Top candidate: WNW (RVOL=17.9×, gap=+31.0%)
+[12:56:34] Watching WNW for RTG signal (RVOL=17.9×)
+[12:56:36] WebSocket stream started for 1 symbols
+[12:56:39] No RTG signal for WNW
+[12:56:39] Watching MIMI for RTG signal (RVOL=12.8×)
+[12:56:41] WebSocket stream started for 1 symbols
+[12:56:44] No RTG signal for MIMI
+[12:56:44] Watching SMTG for RTG signal (RVOL=6.7×)
+[12:56:46] WebSocket stream started for 1 symbols
+[12:56:49] No RTG signal for SMTG
+[12:56:49] No entry this cycle
+[12:56:49] ═══ Cycle 8 at 10:10:00 ═══
+[12:56:49] Scanning for gap stocks on 2026-08-27...
+[12:57:01] After leveraged ETF filter: 13057 symbols
+[12:57:01] After crypto ETF filter: 12987 symbols
+[12:57:01] After EXCLUDE_SYMBOLS filter: 12983 symbols (removed 4)
+[12:57:08]   Scan progress: 10/65 batches
+[12:57:13]   Scan progress: 20/65 batches
+[12:57:17]   Scan progress: 30/65 batches
+[12:57:23]   Scan progress: 40/65 batches
+[12:57:27]   Scan progress: 50/65 batches
+[12:57:32]   Scan progress: 60/65 batches
+[12:57:33]   Scan progress: 65/65 batches
+[12:57:34] Fetched 20d avg volume for 21/21 symbols
+[12:57:34] Top 21 candidates by RVOL: ['WNW', 'MIMI', 'SMTG', 'PSNYW', 'BBUL', 'DAIC', 'LTRX', 'WYFL', 'CELU', 'CRMG', 'BRNX', 'AIQU', 'INFH', 'AMKL', 'AXTL', 'OUSL', 'VNCE', 'TE', 'AXTX', 'GEMG', 'YJ']
+[12:57:34]   WNW: gap +31.0%, RVOL=17.9×, open=$3.2500
+[12:57:34]   MIMI: gap +27.8%, RVOL=12.8×, open=$2.3000
+[12:57:34]   SMTG: gap +12.4%, RVOL=6.7×, open=$8.8000
+[12:57:34]   PSNYW: gap +14.1%, RVOL=6.6×, open=$6.1400
+[12:57:34]   BBUL: gap +13.3%, RVOL=4.7×, open=$12.3000
+[12:57:34]   DAIC: gap +13.8%, RVOL=3.4×, open=$5.8600
+[12:57:34]   LTRX: gap +17.9%, RVOL=2.9×, open=$6.6750
+[12:57:34]   WYFL: gap +10.1%, RVOL=2.3×, open=$5.8000
+[12:57:34]   CELU: gap +26.1%, RVOL=1.8×, open=$1.1100
+[12:57:34]   CRMG: gap +23.7%, RVOL=1.6×, open=$8.3000
+[12:57:34]   BRNX: gap +10.5%, RVOL=1.4×, open=$6.8950
+[12:57:34]   AIQU: gap +10.7%, RVOL=0.7×, open=$18.5000
+[12:57:34]   INFH: gap +11.6%, RVOL=0.6×, open=$10.1600
+[12:57:34]   AMKL: gap +17.0%, RVOL=0.6×, open=$7.0800
+[12:57:34]   AXTL: gap +15.2%, RVOL=0.6×, open=$3.1400
+[12:57:34]   OUSL: gap +11.7%, RVOL=0.5×, open=$14.5900
+[12:57:34]   VNCE: gap +18.3%, RVOL=0.5×, open=$7.5000
+[12:57:34]   TE: gap +11.9%, RVOL=0.5×, open=$5.0450
+[12:57:34]   AXTX: gap +15.2%, RVOL=0.4×, open=$8.1100
+[12:57:34]   GEMG: gap +11.0%, RVOL=0.3×, open=$9.4000
+[12:57:34]   YJ: gap +15.2%, RVOL=0.1×, open=$3.1800
+[12:57:34] Top candidate: WNW (RVOL=17.9×, gap=+31.0%)
+[12:57:34] Watching WNW for RTG signal (RVOL=17.9×)
+[12:57:36] WebSocket stream started for 1 symbols
+[12:57:40] No RTG signal for WNW
+[12:57:40] Watching MIMI for RTG signal (RVOL=12.8×)
+[12:57:42] WebSocket stream started for 1 symbols
+[12:57:45] No RTG signal for MIMI
+[12:57:45] Watching SMTG for RTG signal (RVOL=6.7×)
+[12:57:47] WebSocket stream started for 1 symbols
+[12:57:49] No RTG signal for SMTG
+[12:57:49] No entry this cycle
+[12:57:49] ═══ Cycle 9 at 10:15:00 ═══
+[12:57:49] Scanning for gap stocks on 2026-08-27...
+[12:57:54] After leveraged ETF filter: 13057 symbols
+[12:57:54] After crypto ETF filter: 12987 symbols
+[12:57:54] After EXCLUDE_SYMBOLS filter: 12983 symbols (removed 4)
+[12:58:00]   Scan progress: 10/65 batches
+[12:58:04]   Scan progress: 20/65 batches
+[12:58:09]   Scan progress: 30/65 batches
+[12:58:14]   Scan progress: 40/65 batches
+[12:58:17]   Scan progress: 50/65 batches
+[12:58:23]   Scan progress: 60/65 batches
+[12:58:25]   Scan progress: 65/65 batches
+[12:58:27] Fetched 20d avg volume for 21/21 symbols
+[12:58:27] Top 21 candidates by RVOL: ['WNW', 'MIMI', 'SMTG', 'PSNYW', 'BBUL', 'DAIC', 'LTRX', 'WYFL', 'CELU', 'CRMG', 'BRNX', 'AIQU', 'INFH', 'AMKL', 'AXTL', 'OUSL', 'VNCE', 'TE', 'AXTX', 'GEMG', 'YJ']
+[12:58:27]   WNW: gap +31.0%, RVOL=17.9×, open=$3.2500
+[12:58:27]   MIMI: gap +27.8%, RVOL=12.8×, open=$2.3000
+[12:58:27]   SMTG: gap +12.4%, RVOL=6.7×, open=$8.8000
+[12:58:27]   PSNYW: gap +14.1%, RVOL=6.6×, open=$6.1400
+[12:58:27]   BBUL: gap +13.3%, RVOL=4.7×, open=$12.3000
+[12:58:27]   DAIC: gap +13.8%, RVOL=3.4×, open=$5.8600
+[12:58:27]   LTRX: gap +17.9%, RVOL=2.9×, open=$6.6750
+[12:58:27]   WYFL: gap +10.1%, RVOL=2.3×, open=$5.8000
+[12:58:27]   CELU: gap +26.1%, RVOL=1.8×, open=$1.1100
+[12:58:27]   CRMG: gap +23.7%, RVOL=1.6×, open=$8.3000
+[12:58:27]   BRNX: gap +10.5%, RVOL=1.4×, open=$6.8950
+[12:58:27]   AIQU: gap +10.7%, RVOL=0.7×, open=$18.5000
+[12:58:27]   INFH: gap +11.6%, RVOL=0.6×, open=$10.1600
+[12:58:27]   AMKL: gap +17.0%, RVOL=0.6×, open=$7.0800
+[12:58:27]   AXTL: gap +15.2%, RVOL=0.6×, open=$3.1400
+[12:58:27]   OUSL: gap +11.7%, RVOL=0.5×, open=$14.5900
+[12:58:27]   VNCE: gap +18.3%, RVOL=0.5×, open=$7.5000
+[12:58:27]   TE: gap +11.9%, RVOL=0.5×, open=$5.0450
+[12:58:27]   AXTX: gap +15.2%, RVOL=0.4×, open=$8.1100
+[12:58:27]   GEMG: gap +11.0%, RVOL=0.3×, open=$9.4000
+[12:58:27]   YJ: gap +15.2%, RVOL=0.1×, open=$3.1800
+[12:58:27] Top candidate: WNW (RVOL=17.9×, gap=+31.0%)
+[12:58:27] Watching WNW for RTG signal (RVOL=17.9×)
+[12:58:29] WebSocket stream started for 1 symbols
+[12:58:32] No RTG signal for WNW
+[12:58:32] Watching MIMI for RTG signal (RVOL=12.8×)
+[12:58:34] WebSocket stream started for 1 symbols
+[12:58:36] No RTG signal for MIMI
+[12:58:36] Watching SMTG for RTG signal (RVOL=6.7×)
+[12:58:38] WebSocket stream started for 1 symbols
+[12:58:41] No RTG signal for SMTG
+[12:58:41] No entry this cycle
+[12:58:41] ═══ Cycle 10 at 10:20:00 ═══
+[12:58:41] Scanning for gap stocks on 2026-08-27...
+[12:58:47] After leveraged ETF filter: 13057 symbols
+[12:58:47] After crypto ETF filter: 12987 symbols
+[12:58:47] After EXCLUDE_SYMBOLS filter: 12983 symbols (removed 4)
+[12:58:53]   Scan progress: 10/65 batches
+[12:58:59]   Scan progress: 20/65 batches
+[12:59:02]   Scan progress: 30/65 batches
+[12:59:08]   Scan progress: 40/65 batches
+[12:59:12]   Scan progress: 50/65 batches
+[12:59:16]   Scan progress: 60/65 batches
+[12:59:18]   Scan progress: 65/65 batches
+[12:59:19] Fetched 20d avg volume for 21/21 symbols
+[12:59:19] Top 21 candidates by RVOL: ['WNW', 'MIMI', 'SMTG', 'PSNYW', 'BBUL', 'DAIC', 'LTRX', 'WYFL', 'CELU', 'CRMG', 'BRNX', 'AIQU', 'INFH', 'AMKL', 'AXTL', 'OUSL', 'VNCE', 'TE', 'AXTX', 'GEMG', 'YJ']
+[12:59:19]   WNW: gap +31.0%, RVOL=17.9×, open=$3.2500
+[12:59:19]   MIMI: gap +27.8%, RVOL=12.8×, open=$2.3000
+[12:59:19]   SMTG: gap +12.4%, RVOL=6.7×, open=$8.8000
+[12:59:19]   PSNYW: gap +14.1%, RVOL=6.6×, open=$6.1400
+[12:59:19]   BBUL: gap +13.3%, RVOL=4.7×, open=$12.3000
+[12:59:19]   DAIC: gap +13.8%, RVOL=3.4×, open=$5.8600
+[12:59:19]   LTRX: gap +17.9%, RVOL=2.9×, open=$6.6750
+[12:59:19]   WYFL: gap +10.1%, RVOL=2.3×, open=$5.8000
+[12:59:19]   CELU: gap +26.1%, RVOL=1.8×, open=$1.1100
+[12:59:19]   CRMG: gap +23.7%, RVOL=1.6×, open=$8.3000
+[12:59:19]   BRNX: gap +10.5%, RVOL=1.4×, open=$6.8950
+[12:59:19]   AIQU: gap +10.7%, RVOL=0.7×, open=$18.5000
+[12:59:19]   INFH: gap +11.6%, RVOL=0.6×, open=$10.1600
+[12:59:19]   AMKL: gap +17.0%, RVOL=0.6×, open=$7.0800
+[12:59:19]   AXTL: gap +15.2%, RVOL=0.6×, open=$3.1400
+[12:59:19]   OUSL: gap +11.7%, RVOL=0.5×, open=$14.5900
+[12:59:19]   VNCE: gap +18.3%, RVOL=0.5×, open=$7.5000
+[12:59:19]   TE: gap +11.9%, RVOL=0.5×, open=$5.0450
+[12:59:19]   AXTX: gap +15.2%, RVOL=0.4×, open=$8.1100
+[12:59:19]   GEMG: gap +11.0%, RVOL=0.3×, open=$9.4000
+[12:59:19]   YJ: gap +15.2%, RVOL=0.1×, open=$3.1800
+[12:59:19] Top candidate: WNW (RVOL=17.9×, gap=+31.0%)
+[12:59:19] Watching WNW for RTG signal (RVOL=17.9×)
+[12:59:21] WebSocket stream started for 1 symbols
+[12:59:24] No RTG signal for WNW
+[12:59:24] Watching MIMI for RTG signal (RVOL=12.8×)
+[12:59:26] WebSocket stream started for 1 symbols
+[12:59:29] No RTG signal for MIMI
+[12:59:29] Watching SMTG for RTG signal (RVOL=6.7×)
+[12:59:31] WebSocket stream started for 1 symbols
+[12:59:34] No RTG signal for SMTG
+[12:59:34] No entry this cycle
+[12:59:34] ═══ Cycle 11 at 10:25:00 ═══
+[12:59:34] Scanning for gap stocks on 2026-08-27...
+[12:59:38] After leveraged ETF filter: 13057 symbols
+[12:59:39] After crypto ETF filter: 12987 symbols
+[12:59:39] After EXCLUDE_SYMBOLS filter: 12983 symbols (removed 4)
+[12:59:44]   Scan progress: 10/65 batches
+[12:59:50]   Scan progress: 20/65 batches
+[12:59:54]   Scan progress: 30/65 batches
+[12:59:59]   Scan progress: 40/65 batches
+[13:00:04]   Scan progress: 50/65 batches
+[13:00:14]   Scan progress: 60/65 batches
+[13:00:20]   Scan progress: 65/65 batches
+[13:00:22] Fetched 20d avg volume for 21/21 symbols
+[13:00:22] Top 21 candidates by RVOL: ['WNW', 'MIMI', 'SMTG', 'PSNYW', 'BBUL', 'DAIC', 'LTRX', 'WYFL', 'CELU', 'CRMG', 'BRNX', 'AIQU', 'INFH', 'AMKL', 'AXTL', 'OUSL', 'VNCE', 'TE', 'AXTX', 'GEMG', 'YJ']
+[13:00:22]   WNW: gap +31.0%, RVOL=17.9×, open=$3.2500
+[13:00:22]   MIMI: gap +27.8%, RVOL=12.8×, open=$2.3000
+[13:00:22]   SMTG: gap +12.4%, RVOL=6.7×, open=$8.8000
+[13:00:22]   PSNYW: gap +14.1%, RVOL=6.6×, open=$6.1400
+[13:00:22]   BBUL: gap +13.3%, RVOL=4.7×, open=$12.3000
+[13:00:22]   DAIC: gap +13.8%, RVOL=3.4×, open=$5.8600
+[13:00:22]   LTRX: gap +17.9%, RVOL=2.9×, open=$6.6750
+[13:00:22]   WYFL: gap +10.1%, RVOL=2.3×, open=$5.8000
+[13:00:22]   CELU: gap +26.1%, RVOL=1.8×, open=$1.1100
+[13:00:22]   CRMG: gap +23.7%, RVOL=1.6×, open=$8.3000
+[13:00:22]   BRNX: gap +10.5%, RVOL=1.4×, open=$6.8950
+[13:00:22]   AIQU: gap +10.7%, RVOL=0.7×, open=$18.5000
+[13:00:22]   INFH: gap +11.6%, RVOL=0.6×, open=$10.1600
+[13:00:22]   AMKL: gap +17.0%, RVOL=0.6×, open=$7.0800
+[13:00:22]   AXTL: gap +15.2%, RVOL=0.6×, open=$3.1400
+[13:00:22]   OUSL: gap +11.7%, RVOL=0.5×, open=$14.5900
+[13:00:22]   VNCE: gap +18.3%, RVOL=0.5×, open=$7.5000
+[13:00:22]   TE: gap +11.9%, RVOL=0.5×, open=$5.0450
+[13:00:22]   AXTX: gap +15.2%, RVOL=0.4×, open=$8.1100
+[13:00:22]   GEMG: gap +11.0%, RVOL=0.3×, open=$9.4000
+[13:00:22]   YJ: gap +15.2%, RVOL=0.1×, open=$3.1800
+[13:00:22] Top candidate: WNW (RVOL=17.9×, gap=+31.0%)
+[13:00:22] Watching WNW for RTG signal (RVOL=17.9×)
+[13:00:24] WebSocket stream started for 1 symbols
+[13:00:27] No RTG signal for WNW
+[13:00:27] Watching MIMI for RTG signal (RVOL=12.8×)
+[13:00:29] WebSocket stream started for 1 symbols
+[13:00:32] No RTG signal for MIMI
+[13:00:32] Watching SMTG for RTG signal (RVOL=6.7×)
+[13:00:34] WebSocket stream started for 1 symbols
+[13:00:37] No RTG signal for SMTG
+[13:00:37] No entry this cycle
+[13:00:37] ═══ Cycle 12 at 10:30:00 ═══
+[13:00:37] Scanning for gap stocks on 2026-08-27...
+[13:00:42] After leveraged ETF filter: 13057 symbols
+[13:00:42] After crypto ETF filter: 12987 symbols
+[13:00:42] After EXCLUDE_SYMBOLS filter: 12983 symbols (removed 4)
+[13:00:55]   Scan progress: 10/65 batches
+[13:01:06]   Scan progress: 20/65 batches
+[13:01:15]   Scan progress: 30/65 batches
+[13:01:24]   Scan progress: 40/65 batches
+[13:01:33]   Scan progress: 50/65 batches
+[13:01:40]   Scan progress: 60/65 batches
+[13:01:43]   Scan progress: 65/65 batches
+[13:01:45] Fetched 20d avg volume for 21/21 symbols
+[13:01:45] Top 21 candidates by RVOL: ['WNW', 'MIMI', 'SMTG', 'PSNYW', 'BBUL', 'DAIC', 'LTRX', 'WYFL', 'CELU', 'CRMG', 'BRNX', 'AIQU', 'INFH', 'AMKL', 'AXTL', 'OUSL', 'VNCE', 'TE', 'AXTX', 'GEMG', 'YJ']
+[13:01:45]   WNW: gap +31.0%, RVOL=17.9×, open=$3.2500
+[13:01:45]   MIMI: gap +27.8%, RVOL=12.8×, open=$2.3000
+[13:01:45]   SMTG: gap +12.4%, RVOL=6.7×, open=$8.8000
+[13:01:45]   PSNYW: gap +14.1%, RVOL=6.6×, open=$6.1400
+[13:01:45]   BBUL: gap +13.3%, RVOL=4.7×, open=$12.3000
+[13:01:45]   DAIC: gap +13.8%, RVOL=3.4×, open=$5.8600
+[13:01:45]   LTRX: gap +17.9%, RVOL=2.9×, open=$6.6750
+[13:01:45]   WYFL: gap +10.1%, RVOL=2.3×, open=$5.8000
+[13:01:45]   CELU: gap +26.1%, RVOL=1.8×, open=$1.1100
+[13:01:45]   CRMG: gap +23.7%, RVOL=1.6×, open=$8.3000
+[13:01:45]   BRNX: gap +10.5%, RVOL=1.4×, open=$6.8950
+[13:01:45]   AIQU: gap +10.7%, RVOL=0.7×, open=$18.5000
+[13:01:45]   INFH: gap +11.6%, RVOL=0.6×, open=$10.1600
+[13:01:45]   AMKL: gap +17.0%, RVOL=0.6×, open=$7.0800
+[13:01:45]   AXTL: gap +15.2%, RVOL=0.6×, open=$3.1400
+[13:01:45]   OUSL: gap +11.7%, RVOL=0.5×, open=$14.5900
+[13:01:45]   VNCE: gap +18.3%, RVOL=0.5×, open=$7.5000
+[13:01:45]   TE: gap +11.9%, RVOL=0.5×, open=$5.0450
+[13:01:45]   AXTX: gap +15.2%, RVOL=0.4×, open=$8.1100
+[13:01:45]   GEMG: gap +11.0%, RVOL=0.3×, open=$9.4000
+[13:01:45]   YJ: gap +15.2%, RVOL=0.1×, open=$3.1800
+[13:01:45] Top candidate: WNW (RVOL=17.9×, gap=+31.0%)
+[13:01:45] Watching WNW for RTG signal (RVOL=17.9×)
+[13:01:47] WebSocket stream started for 1 symbols
+[13:01:50] No RTG signal for WNW
+[13:01:50] Watching MIMI for RTG signal (RVOL=12.8×)
+[13:01:52] WebSocket stream started for 1 symbols
+[13:01:55] No RTG signal for MIMI
+[13:01:55] Watching SMTG for RTG signal (RVOL=6.7×)
+[13:01:57] WebSocket stream started for 1 symbols
+[13:02:00] No RTG signal for SMTG
+[13:02:00] No entry this cycle
+[13:02:00] ═══ Cycle 13 at 10:35:00 ═══
+[13:02:00] Scanning for gap stocks on 2026-08-27...
+[13:02:05] After leveraged ETF filter: 13057 symbols
+[13:02:05] After crypto ETF filter: 12987 symbols
+[13:02:05] After EXCLUDE_SYMBOLS filter: 12983 symbols (removed 4)
+[13:02:16]   Scan progress: 10/65 batches
+[13:02:24]   Scan progress: 20/65 batches
+[13:02:31]   Scan progress: 30/65 batches
+[13:02:38]   Scan progress: 40/65 batches
+[13:02:46]   Scan progress: 50/65 batches
+[13:02:52]   Scan progress: 60/65 batches
+[13:02:56]   Scan progress: 65/65 batches
+[13:02:57] Fetched 20d avg volume for 21/21 symbols
+[13:02:57] Top 21 candidates by RVOL: ['WNW', 'MIMI', 'SMTG', 'PSNYW', 'BBUL', 'DAIC', 'LTRX', 'WYFL', 'CELU', 'CRMG', 'BRNX', 'AIQU', 'INFH', 'AMKL', 'AXTL', 'OUSL', 'VNCE', 'TE', 'AXTX', 'GEMG', 'YJ']
+[13:02:57]   WNW: gap +31.0%, RVOL=17.9×, open=$3.2500
+[13:02:57]   MIMI: gap +27.8%, RVOL=12.8×, open=$2.3000
+[13:02:57]   SMTG: gap +12.4%, RVOL=6.7×, open=$8.8000
+[13:02:57]   PSNYW: gap +14.1%, RVOL=6.6×, open=$6.1400
+[13:02:57]   BBUL: gap +13.3%, RVOL=4.7×, open=$12.3000
+[13:02:57]   DAIC: gap +13.8%, RVOL=3.4×, open=$5.8600
+[13:02:57]   LTRX: gap +17.9%, RVOL=2.9×, open=$6.6750
+[13:02:57]   WYFL: gap +10.1%, RVOL=2.3×, open=$5.8000
+[13:02:57]   CELU: gap +26.1%, RVOL=1.8×, open=$1.1100
+[13:02:57]   CRMG: gap +23.7%, RVOL=1.6×, open=$8.3000
+[13:02:57]   BRNX: gap +10.5%, RVOL=1.4×, open=$6.8950
+[13:02:57]   AIQU: gap +10.7%, RVOL=0.7×, open=$18.5000
+[13:02:57]   INFH: gap +11.6%, RVOL=0.6×, open=$10.1600
+[13:02:57]   AMKL: gap +17.0%, RVOL=0.6×, open=$7.0800
+[13:02:57]   AXTL: gap +15.2%, RVOL=0.6×, open=$3.1400
+[13:02:57]   OUSL: gap +11.7%, RVOL=0.5×, open=$14.5900
+[13:02:57]   VNCE: gap +18.3%, RVOL=0.5×, open=$7.5000
+[13:02:57]   TE: gap +11.9%, RVOL=0.5×, open=$5.0450
+[13:02:57]   AXTX: gap +15.2%, RVOL=0.4×, open=$8.1100
+[13:02:57]   GEMG: gap +11.0%, RVOL=0.3×, open=$9.4000
+[13:02:57]   YJ: gap +15.2%, RVOL=0.1×, open=$3.1800
+[13:02:57] Top candidate: WNW (RVOL=17.9×, gap=+31.0%)
+[13:02:57] Watching WNW for RTG signal (RVOL=17.9×)
+[13:02:59] WebSocket stream started for 1 symbols
+[13:03:02] No RTG signal for WNW
+[13:03:02] Watching MIMI for RTG signal (RVOL=12.8×)
+[13:03:04] WebSocket stream started for 1 symbols
+[13:03:07] No RTG signal for MIMI
+[13:03:07] Watching SMTG for RTG signal (RVOL=6.7×)
+[13:03:09] WebSocket stream started for 1 symbols
+[13:03:12] No RTG signal for SMTG
+[13:03:12] No entry this cycle
+[13:03:12] ═══ Cycle 14 at 10:40:00 ═══
+[13:03:12] Scanning for gap stocks on 2026-08-27...
+[13:03:17] After leveraged ETF filter: 13057 symbols
+[13:03:17] After crypto ETF filter: 12987 symbols
+[13:03:17] After EXCLUDE_SYMBOLS filter: 12983 symbols (removed 4)
+[13:03:26]   Scan progress: 10/65 batches
+[13:03:34]   Scan progress: 20/65 batches
+[13:03:40]   Scan progress: 30/65 batches
+[13:03:45]   Scan progress: 40/65 batches
+[13:03:53]   Scan progress: 50/65 batches
+[13:03:58]   Scan progress: 60/65 batches
+[13:04:01]   Scan progress: 65/65 batches
+[13:04:02] Fetched 20d avg volume for 21/21 symbols
+[13:04:02] Top 21 candidates by RVOL: ['WNW', 'MIMI', 'SMTG', 'PSNYW', 'BBUL', 'DAIC', 'LTRX', 'WYFL', 'CELU', 'CRMG', 'BRNX', 'AIQU', 'INFH', 'AMKL', 'AXTL', 'OUSL', 'VNCE', 'TE', 'AXTX', 'GEMG', 'YJ']
+[13:04:02]   WNW: gap +31.0%, RVOL=17.9×, open=$3.2500
+[13:04:02]   MIMI: gap +27.8%, RVOL=12.8×, open=$2.3000
+[13:04:02]   SMTG: gap +12.4%, RVOL=6.7×, open=$8.8000
+[13:04:02]   PSNYW: gap +14.1%, RVOL=6.6×, open=$6.1400
+[13:04:02]   BBUL: gap +13.3%, RVOL=4.7×, open=$12.3000
+[13:04:02]   DAIC: gap +13.8%, RVOL=3.4×, open=$5.8600
+[13:04:02]   LTRX: gap +17.9%, RVOL=2.9×, open=$6.6750
+[13:04:02]   WYFL: gap +10.1%, RVOL=2.3×, open=$5.8000
+[13:04:02]   CELU: gap +26.1%, RVOL=1.8×, open=$1.1100
+[13:04:02]   CRMG: gap +23.7%, RVOL=1.6×, open=$8.3000
+[13:04:02]   BRNX: gap +10.5%, RVOL=1.4×, open=$6.8950
+[13:04:02]   AIQU: gap +10.7%, RVOL=0.7×, open=$18.5000
+[13:04:02]   INFH: gap +11.6%, RVOL=0.6×, open=$10.1600
+[13:04:02]   AMKL: gap +17.0%, RVOL=0.6×, open=$7.0800
+[13:04:02]   AXTL: gap +15.2%, RVOL=0.6×, open=$3.1400
+[13:04:02]   OUSL: gap +11.7%, RVOL=0.5×, open=$14.5900
+[13:04:02]   VNCE: gap +18.3%, RVOL=0.5×, open=$7.5000
+[13:04:02]   TE: gap +11.9%, RVOL=0.5×, open=$5.0450
+[13:04:02]   AXTX: gap +15.2%, RVOL=0.4×, open=$8.1100
+[13:04:02]   GEMG: gap +11.0%, RVOL=0.3×, open=$9.4000
+[13:04:02]   YJ: gap +15.2%, RVOL=0.1×, open=$3.1800
+[13:04:02] Top candidate: WNW (RVOL=17.9×, gap=+31.0%)
+[13:04:02] Watching WNW for RTG signal (RVOL=17.9×)
+[13:04:04] WebSocket stream started for 1 symbols
+[13:04:07] No RTG signal for WNW
+[13:04:07] Watching MIMI for RTG signal (RVOL=12.8×)
+[13:04:09] WebSocket stream started for 1 symbols
+[13:04:12] No RTG signal for MIMI
+[13:04:12] Watching SMTG for RTG signal (RVOL=6.7×)
+[13:04:14] WebSocket stream started for 1 symbols
+[13:04:17] No RTG signal for SMTG
+[13:04:17] No entry this cycle
+[13:04:17] ═══ Cycle 15 at 10:45:00 ═══
+[13:04:17] Scanning for gap stocks on 2026-08-27...
+[13:04:22] After leveraged ETF filter: 13057 symbols
+[13:04:22] After crypto ETF filter: 12987 symbols
+[13:04:22] After EXCLUDE_SYMBOLS filter: 12983 symbols (removed 4)
+[13:04:29]   Scan progress: 10/65 batches
+[13:04:36]   Scan progress: 20/65 batches
+[13:04:41]   Scan progress: 30/65 batches
+[13:04:47]   Scan progress: 40/65 batches
+[13:04:52]   Scan progress: 50/65 batches
+[13:04:57]   Scan progress: 60/65 batches
+[13:05:00]   Scan progress: 65/65 batches
+[13:05:01] Fetched 20d avg volume for 21/21 symbols
+[13:05:01] Top 21 candidates by RVOL: ['WNW', 'MIMI', 'SMTG', 'PSNYW', 'BBUL', 'DAIC', 'LTRX', 'WYFL', 'CELU', 'CRMG', 'BRNX', 'AIQU', 'INFH', 'AMKL', 'AXTL', 'OUSL', 'VNCE', 'TE', 'AXTX', 'GEMG', 'YJ']
+[13:05:01]   WNW: gap +31.0%, RVOL=17.9×, open=$3.2500
+[13:05:01]   MIMI: gap +27.8%, RVOL=12.8×, open=$2.3000
+[13:05:01]   SMTG: gap +12.4%, RVOL=6.7×, open=$8.8000
+[13:05:01]   PSNYW: gap +14.1%, RVOL=6.6×, open=$6.1400
+[13:05:01]   BBUL: gap +13.3%, RVOL=4.7×, open=$12.3000
+[13:05:01]   DAIC: gap +13.8%, RVOL=3.4×, open=$5.8600
+[13:05:01]   LTRX: gap +17.9%, RVOL=2.9×, open=$6.6750
+[13:05:01]   WYFL: gap +10.1%, RVOL=2.3×, open=$5.8000
+[13:05:01]   CELU: gap +26.1%, RVOL=1.8×, open=$1.1100
+[13:05:01]   CRMG: gap +23.7%, RVOL=1.6×, open=$8.3000
+[13:05:01]   BRNX: gap +10.5%, RVOL=1.4×, open=$6.8950
+[13:05:01]   AIQU: gap +10.7%, RVOL=0.7×, open=$18.5000
+[13:05:01]   INFH: gap +11.6%, RVOL=0.6×, open=$10.1600
+[13:05:01]   AMKL: gap +17.0%, RVOL=0.6×, open=$7.0800
+[13:05:01]   AXTL: gap +15.2%, RVOL=0.6×, open=$3.1400
+[13:05:01]   OUSL: gap +11.7%, RVOL=0.5×, open=$14.5900
+[13:05:01]   VNCE: gap +18.3%, RVOL=0.5×, open=$7.5000
+[13:05:01]   TE: gap +11.9%, RVOL=0.5×, open=$5.0450
+[13:05:01]   AXTX: gap +15.2%, RVOL=0.4×, open=$8.1100
+[13:05:01]   GEMG: gap +11.0%, RVOL=0.3×, open=$9.4000
+[13:05:01]   YJ: gap +15.2%, RVOL=0.1×, open=$3.1800
+[13:05:01] Top candidate: WNW (RVOL=17.9×, gap=+31.0%)
+[13:05:01] Watching WNW for RTG signal (RVOL=17.9×)
+[13:05:03] WebSocket stream started for 1 symbols
+[13:05:06] No RTG signal for WNW
+[13:05:06] Watching MIMI for RTG signal (RVOL=12.8×)
+[13:05:08] WebSocket stream started for 1 symbols
+[13:05:11] No RTG signal for MIMI
+[13:05:11] Watching SMTG for RTG signal (RVOL=6.7×)
+[13:05:13] WebSocket stream started for 1 symbols
+[13:05:16] No RTG signal for SMTG
+[13:05:16] No entry this cycle
+[13:05:16] ═══ Cycle 16 at 10:50:00 ═══
+[13:05:16] Scanning for gap stocks on 2026-08-27...

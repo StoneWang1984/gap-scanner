@@ -609,6 +609,47 @@ def check_rtg_entry(symbol, open_price, bars, after_time=None, min_volume=None):
     return 0.0, False, ""
 
 
+def check_breakout_entry(symbol, bars, min_volume=None):
+    """Detect intraday breakout: current bar makes new day high + volume spike.
+
+    Signal: bar.close > all previous bars' highs AND volume >= 1.5x prev bar
+    This catches afternoon breakouts that RTG signal misses.
+    """
+    if not getattr(config, "BREAKOUT_ENABLED", True):
+        return 0.0, False, ""
+    min_bars = getattr(config, "BREAKOUT_MIN_BARS", 5)
+    if len(bars) < min_bars + 1:
+        return 0.0, False, ""
+    if min_volume is None:
+        min_volume = config.RTG_MIN_VOLUME
+    vol_mult = getattr(config, "BREAKOUT_VOLUME_MULT", 1.5)
+    ew_start_h, ew_start_m = (int(x) for x in config.ENTRY_WINDOW_START.split(":"))
+    ew_end_h, ew_end_m = (int(x) for x in config.ENTRY_WINDOW_END.split(":"))
+    entry_start = dt.time(ew_start_h, ew_start_m)
+    entry_end = dt.time(ew_end_h, ew_end_m)
+    # Track day high as we scan forward
+    day_high = max(b["high"] for b in bars[:min_bars])
+    for i in range(min_bars, len(bars)):
+        bar = bars[i]
+        prev = bars[i - 1]
+        ts = bar.get("timestamp")
+        if ts is None:
+            continue
+        bar_time = ts.time() if isinstance(ts, dt.datetime) else (ts.time() if hasattr(ts, "time") else None)
+        if bar_time is None or not (entry_start <= bar_time <= entry_end):
+            day_high = max(day_high, bar["high"])
+            continue
+        bc = bar["close"]
+        bv = bar["volume"]
+        pv = prev["volume"]
+        # Breakout: close exceeds all previous highs + volume spike
+        if bc > day_high and pv > 0 and bv >= vol_mult * pv and bv >= min_volume:
+            entry = round(bc * 1.001, 4) if getattr(config, "BREAKOUT_ENTRY_AT_CLOSE", True) else round(bc, 4)
+            return entry, True, "breakout"
+        day_high = max(day_high, bar["high"])
+    return 0.0, False, ""
+
+
 def _parse_time(t_str):
     h, m = (int(x) for x in t_str.split(":"))
     return dt.time(h, m)
@@ -647,9 +688,9 @@ def select_best_candidates(candidates, max_n=3):
     return qualified[:max_n]
 
 
-def wait_for_rtg_signal(symbol, open_price, rvol, deadline):
-    """Poll 1-min bars for RTG entry signal until deadline.
-    Returns (entry_price, True, "rtg") on signal, or (0, False, "") on timeout."""
+def wait_for_entry_signal(symbol, open_price, rvol, deadline):
+    """Poll 1-min bars for entry signal (RTG or Breakout) until deadline.
+    Returns (entry_price, True, signal_type) on signal, or (0, False, "") on timeout."""
     while dt.datetime.now(_EST) < deadline:
         bars = _accumulator.get_1min_bars(symbol)
         # RVOL-adaptive min volume
@@ -658,8 +699,16 @@ def wait_for_rtg_signal(symbol, open_price, rvol, deadline):
             min_vol = max(config.RTG_MIN_VOLUME // 3, 5000)
         elif rvol >= 5:
             min_vol = max(config.RTG_MIN_VOLUME // 2, 10000)
+
+        # Check RTG signal first (opening drive)
         entry_price, confirmed, signal_type = check_rtg_entry(
             symbol, open_price, bars, min_volume=min_vol)
+        if confirmed and entry_price > 0:
+            return entry_price, True, signal_type
+
+        # Check breakout signal (intraday momentum)
+        entry_price, confirmed, signal_type = check_breakout_entry(
+            symbol, bars, min_volume=min_vol)
         if confirmed and entry_price > 0:
             return entry_price, True, signal_type
 
@@ -924,12 +973,12 @@ def run_trading_day(target_date):
             backfill_1min_bars([sym], target_date)
             time.sleep(2)
 
-            # Wait for RTG signal
-            entry_price, confirmed, signal_type = wait_for_rtg_signal(
+            # Wait for entry signal (RTG or Breakout)
+            entry_price, confirmed, signal_type = wait_for_entry_signal(
                 sym, open_price, rvol, entry_deadline)
 
             if not confirmed or entry_price <= 0:
-                log(f"No RTG signal for {sym}")
+                log(f"No entry signal for {sym}")
                 continue
 
             # ── ALL-IN BUY ──
@@ -971,7 +1020,7 @@ def run_trading_day(target_date):
             position = Position(
                 symbol=sym, shares=filled, entry_price=fill_price,
                 entry_ts=time.time(), open_price=open_price,
-                gap_pct=cand["gap_pct"], signal_type="rtg",
+                gap_pct=cand["gap_pct"], signal_type=signal_type,
                 highest=fill_price, trail_active=False,
                 rvol=rvol,
                 stop_pct=config.STOP_PCT,
@@ -981,7 +1030,7 @@ def run_trading_day(target_date):
             )
             daily_trades += 1
             entered = True
-            log(f"ENTRY {sym} [rtg] {filled}sh @ ${fill_price:.4f} "
+            log(f"ENTRY {sym} [{signal_type}] {filled}sh @ ${fill_price:.4f} "
                 f"[ALL-IN ${capital:.2f}, RVOL={rvol:.1f}×, trail=1%]")
             break  # Don't try more candidates
 
@@ -1138,7 +1187,7 @@ def main():
     log(f"Using {config.DATA_FEED.upper()} data feed")
     log("=" * 60)
     log(f"stonewang RTG 3.0 Live Trading — Cycle-based All-in with 1% Trailing Stop")
-    log(f"Entry: RTG (vol >= {config.RTG_VOLUME_MULT}x prior) / GapGo DISABLED")
+    log(f"Entry: RTG (vol >= {config.RTG_VOLUME_MULT}x prior) + Breakout (new high + vol) / GapGo DISABLED")
     log(f"Exit: 1% trailing stop (fixed) | 3% hard stop backstop")
     log(f"Window: {config.ENTRY_WINDOW_START}-{config.ENTRY_WINDOW_END} EST")
     log(f"Sizing: ALL-IN ({getattr(config, 'ALL_IN_BP_RATIO', 0.95):.0%} of BP) | 1 position max")

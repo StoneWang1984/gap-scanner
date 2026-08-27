@@ -60,6 +60,14 @@ TRAIL_ACTIVATE_PCT = 0.005       # Activate trail after +0.5% gain
 STOP_PCT = 0.03                  # 3% hard stop (backstop)
 TARGET_PCT = 0.50                # 50% target (safety valve)
 
+# ── Intraday breakout signal (rtg_3.0) ──────────────────────────────
+# Detects afternoon breakouts: stock makes new day high + volume spike
+# Catches momentum that develops after the opening drive fades
+BREAKOUT_ENABLED = True           # Enable intraday breakout signal
+BREAKOUT_MIN_BARS = 5             # Min bars before checking (need history for day_high)
+BREAKOUT_VOLUME_MULT = 1.5        # Volume multiplier (same as RTG)
+BREAKOUT_ENTRY_AT_CLOSE = True    # Enter at breakout close price (not open)
+
 # ── No daily profit protection (rtg_3.0) ─────────────────────────────
 DAILY_PROFIT_PROTECT_ENABLED = False
 DAILY_PROFIT_PROTECT_RATIO = 0.85

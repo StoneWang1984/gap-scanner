@@ -266,11 +266,11 @@ elif tab == "策略概览":
         """)
 
     with col2:
-        st.subheader("入场规则 (RTG Signal)")
+        st.subheader("入场规则 (RTG + Breakout)")
         st.markdown(f"""
         - RTG信号: close > open_price AND vol >= {config.RTG_VOLUME_MULT}x prior AND vol >= {config.RTG_MIN_VOLUME:,}
+        - 突破信号: close > 今日最高价 AND vol >= {getattr(config, 'BREAKOUT_VOLUME_MULT', 1.5)}x prior (盘中量价齐升)
         - 入场窗口: **{config.ENTRY_WINDOW_START} ~ {config.ENTRY_WINDOW_END} EST**
-        - 入场价: open_price + 0.1%
         - 选股: 最高RVOL优先
         """)
 
@@ -296,6 +296,7 @@ elif tab == "策略概览":
     - **1% Fixed Trailing**: 不用渐进trailing，简单1%追踪止损，利润到0.5%即激活
     - **3% Hard Stop**: 追踪未激活时的回补保护
     - **RTG Signal**: 跳空高开股出现Red-to-Green(量价突破)→市价入场，过滤假突破
+    - **Breakout Signal**: 盘中创新高+放量突破，捕获下午量价齐升机会
     - **Min RVOL 3×**: 低于3倍相对成交量的股票不入场，避免低信心标的
     - **T+1兼容**: close_position()兜底处理锁定股
     """)
