@@ -314,8 +314,34 @@ def place_sell_market(symbol, shares):
         filled, price = wait_order_filled(str(order.id), timeout=30)
         return filled, price
     except Exception as e:
-        log(f"SELL failed: {symbol} {shares}sh. - {e}")
-        return 0, 0.0
+        log(f"SELL market failed: {symbol} {shares}sh. - {e}")
+        # Fallback: use close_position() which handles T+1 locked shares
+        try:
+            log(f"  Retrying {symbol} via close_position()...")
+            trading_client.close_position(symbol_or_asset_id=symbol)
+            time.sleep(1)
+            for _ in range(30):
+                try:
+                    pos = trading_client.get_open_position(symbol)
+                    remaining = int(float(pos.qty))
+                    if remaining <= 0:
+                        break
+                except Exception:
+                    break
+            fill_price = 0.0
+            try:
+                orders = trading_client.get_orders_for_symbol(symbol)
+                for o in orders:
+                    if o.side == OrderSide.SELL and o.status in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
+                        if int(float(o.filled_qty)) >= shares:
+                            fill_price = float(o.filled_avg_price or 0)
+                            break
+            except Exception:
+                pass
+            return shares, fill_price
+        except Exception as e2:
+            log(f"SELL close_position also failed: {symbol} - {e2}")
+            return 0, 0.0
 
 
 def force_sell_position(symbol, shares):
