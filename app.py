@@ -1,4 +1,4 @@
-"""RTG 2.0 策略 — Streamlit Web UI (交易显示 + 回测)"""
+"""RTG 3.0 策略 — Streamlit Web UI (交易显示 + 回测)"""
 
 import json
 import time
@@ -8,20 +8,20 @@ import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
 
-VERSION_DIR = Path("/Users/stonewang2014/gap-scanner/stonewang_daytrade_rtg_2.0")
-STATE_FILE = Path("/Users/stonewang2014/gap-scanner/live_state.json")
+VERSION_DIR = Path("/Users/stonewang2014/gap-scanner/stonewang_daytrade_rtg_3.0")
+STATE_FILE = Path("/Users/stonewang2014/gap-scanner/live_rtg3_state.json")
 import importlib.util, sys
 _spec = importlib.util.spec_from_file_location("config", VERSION_DIR / "config.py")
 config = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(config)
 sys.modules["config"] = config
 
-st.set_page_config(page_title="RTG 2.0 交易", page_icon="📊", layout="wide")
+st.set_page_config(page_title="RTG 3.0 交易", page_icon="📊", layout="wide")
 
 # ── Sidebar ──────────────────────────────────────────────────────
 
-st.sidebar.title("RTG 2.0 交易")
-st.sidebar.caption("RTG + Profit Protection + Progressive Trailing")
+st.sidebar.title("RTG 3.0 交易")
+st.sidebar.caption("Cycle-based All-in + 1% Trailing Stop")
 
 tab = st.sidebar.radio("导航", ["实盘交易", "策略概览", "交易详情"])
 
@@ -77,15 +77,23 @@ if tab == "实盘交易":
     if state:
         version = state.get("version", "?")
         daily_trades = state.get("daily_trades", 0)
-        st.caption(f"v{version} | {config.DATA_FEED} | 今日 {daily_trades} 笔")
+        cycle_idx = state.get("cycle_index", "?")
+        next_scan = state.get("next_scan_time", "")
+        status = f"v{version} | {config.DATA_FEED} | 今日 {daily_trades} 笔 | 周期 #{cycle_idx}"
+        if next_scan:
+            status += f" | 下次扫描: {next_scan[11:16]}"
+        st.caption(status)
 
     # ── 当前持仓 ──
     st.divider()
     st.subheader("当前持仓")
 
-    if alpaca_positions:
-        state_positions = {p["symbol"]: p for p in state.get("positions", [])} if state else {}
+    # rtg_3.0 uses single position (dict), not array
+    state_position = state.get("position") if state else None
+    state_positions_list = [state_position] if state_position else (state.get("positions", []) if state else [])
+    state_positions = {p["symbol"]: p for p in state_positions_list}
 
+    if alpaca_positions:
         pos_rows = []
         for p in alpaca_positions:
             sym = p.symbol
@@ -108,21 +116,21 @@ if tab == "实盘交易":
             if sp:
                 row["信号"] = sp.get("signal_type", "rtg")
                 row["RVOL"] = f"{sp.get('rvol', 0):.1f}×"
-                row["止损%"] = f"{sp.get('stop_pct', 0):.0%}"
+                row["Trail"] = f"{sp.get('trail_pct', 0):.1%}"
 
             pos_rows.append(row)
 
         st.dataframe(pd.DataFrame(pos_rows), hide_index=True, use_container_width=True)
-    elif state and state.get("positions"):
+    elif state_positions_list:
         pos_rows = []
-        for p in state["positions"]:
+        for p in state_positions_list:
             pos_rows.append({
                 "股票": p["symbol"],
                 "信号": p.get("signal_type", "rtg"),
                 "数量": p.get("shares", 0),
                 "入场价": f"${p.get('entry_price', 0):.4f}",
                 "RVOL": f"{p.get('rvol', 0):.1f}×",
-                "止损%": f"{p.get('stop_pct', 0):.0%}",
+                "Trail": f"{p.get('trail_pct', 0):.1%}",
             })
         st.dataframe(pd.DataFrame(pos_rows), hide_index=True, use_container_width=True)
     else:
@@ -213,7 +221,7 @@ if tab == "实盘交易":
         st.info("今日暂无交易记录")
 
     if not state:
-        st.warning("未找到 live_state.json，实盘未运行")
+        st.warning("未找到 live_rtg3_state.json，实盘未运行")
 
     # ── Auto refresh ──
     st.divider()
@@ -227,12 +235,14 @@ if tab == "实盘交易":
 # ══════════════════════════════════════════════════════════════════
 
 elif tab == "策略概览":
-    st.title("RTG 2.0 策略概览")
+    st.title("RTG 3.0 策略概览")
 
     col1, col2 = st.columns(2)
 
     with col1:
-        st.subheader("扫描条件")
+        st.subheader("扫描条件 (每5分钟循环)")
+        scan_sec = getattr(config, "SCAN_INTERVAL_SEC", 300)
+        min_rvol = getattr(config, "MIN_RVOL_TO_TRADE", 3.0)
         st.markdown(f"""
         - 跳空幅度 > **{config.GAP_THRESHOLD:.0%}**
         - 盘前成交量 > **{config.MIN_VOLUME:,}** 股
@@ -241,50 +251,53 @@ elif tab == "策略概览":
         - 杠杆ETF过滤: **启用**
         - Crypto ETF过滤: **启用**
         - 候选股: **Top {config.MAX_CANDIDATES} by RVOL**
-        - 盘中重扫: **每30分钟** (发现新gap股)
+        - 最低RVOL: **{min_rvol:.1f}×** (低RVOL不入场)
+        - 扫描间隔: **每{scan_sec//60}分钟**
         """)
 
-        st.subheader("仓位管理")
+        st.subheader("仓位管理 (All-in)")
         max_daily = config.MAX_DAILY_TRADES if config.MAX_DAILY_TRADES > 0 else "无限制"
+        all_in_ratio = getattr(config, "ALL_IN_BP_RATIO", 0.95)
         st.markdown(f"""
         - 初始资金: **${config.INITIAL_CAPITAL:,.2f}**
-        - 每仓: **${config.MIN_POSITION_SIZE}** ~ **${config.MAX_POSITION_SIZE}**
+        - 仓位: **ALL-IN** (购买力 × {all_in_ratio:.0%})
         - 最大同时持仓: **{config.MAX_POSITIONS}** 只
-        - 每日最大交易: **{max_daily}** 笔
+        - 每周期尝试: **Top 3** 候选股
         """)
 
     with col2:
         st.subheader("入场规则 (RTG Signal)")
-        sizing_str = " / ".join(f"RVOL>{r:.0f}×→{p:.0%}" for r, p in config.RVOL_SIZING_TIERS)
         st.markdown(f"""
         - RTG信号: close > open_price AND vol >= {config.RTG_VOLUME_MULT}x prior AND vol >= {config.RTG_MIN_VOLUME:,}
-        - 入场窗口: **{config.ENTRY_WINDOW_START} ~ {config.ENTRY_WINDOW_END} EST** (全天)
+        - 入场窗口: **{config.ENTRY_WINDOW_START} ~ {config.ENTRY_WINDOW_END} EST**
         - 入场价: open_price + 0.1%
-        - RVOL仓位: {sizing_str}
+        - 选股: 最高RVOL优先
         """)
 
-        st.subheader("出场规则 (RVOL-tiered + Progressive)")
-        exit_str = " / ".join(f"RVOL>{r:.0f}×→stop{s:.0%}/tgt{t:.0%}/trail{tr:.0%}" for r, s, t, tr in config.RVOL_EXIT_TIERS)
-        trail_str = " / ".join(f"利润>{p:.0%}→trail{t:.1%}" for p, t in config.PROGRESSIVE_TRAIL_TIERS)
+        st.subheader("出场规则 (Fixed 1% Trailing)")
+        trail_pct = getattr(config, "TRAIL_PCT", 0.01)
+        trail_act = getattr(config, "TRAIL_ACTIVATE_PCT", 0.005)
+        stop_pct = getattr(config, "STOP_PCT", 0.03)
         st.markdown(f"""
-        - 出场层级: {exit_str}
-        - 渐进Trailing: {trail_str}
+        - 硬止损: **{stop_pct:.0%}** (回补保护)
+        - Trailing激活: 利润 > **{trail_act:.1%}**
+        - Trailing: **{trail_pct:.0%}** (固定，无渐进)
+        - 目标: **{config.TARGET_PCT:.0%}** (安全阀)
+        - 周期结束前强制平仓
         - 强制平仓: **{config.FORCE_CLOSE_TIME} EST**
         - 日损失熔断: **{config.MAX_DAILY_LOSS_PCT:.0%}**
         """)
 
     st.divider()
-    st.subheader("RTG 2.0 设计理念")
-    protect_ratio = int(config.DAILY_PROFIT_PROTECT_RATIO * 100)
-    protect_min = config.DAILY_PROFIT_PROTECT_MIN
+    st.subheader("RTG 3.0 设计理念")
     st.markdown(f"""
+    - **Cycle Machine**: 每{scan_sec//60}分钟一个循环：扫描→选股→全仓买入→1%追踪→强平→重复
+    - **All-in**: 每次只用1只股票，95%购买力全仓，集中火力打最强标的
+    - **1% Fixed Trailing**: 不用渐进trailing，简单1%追踪止损，利润到0.5%即激活
+    - **3% Hard Stop**: 追踪未激活时的回补保护
     - **RTG Signal**: 跳空高开股出现Red-to-Green(量价突破)→市价入场，过滤假突破
-    - **RVOL-tiered Exit**: 高RVOL宽止损(7%)+高目标(50%)，低RVOL窄止损(3%)+低目标(15%)
-    - **Progressive Trailing**: 利润越大trailing越紧(5%→1.5%, 10%→1%, 15%→0.5%)，锁定收益
-    - **利润保护**: 今日利润降至最高利润的{protect_ratio}%时全仓强平(最低${protect_min}起效)
-    - **盘中重扫**: 每30分钟重新扫描，发现新gap股即时加入监控
-    - **异步卖出**: 卖单异步提交，8仓平仓<10秒(避免串行阻塞4分钟)
-    - **全天入场**: 不限10:25，RTG信号随时可触发
+    - **Min RVOL 3×**: 低于3倍相对成交量的股票不入场，避免低信心标的
+    - **T+1兼容**: close_position()兜底处理锁定股
     """)
 
 # ══════════════════════════════════════════════════════════════════
