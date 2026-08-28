@@ -1,12 +1,12 @@
-"""Backtesting engine — stonewang_daytrade_rtg_3.0: Event-driven All-in RTG with Bar-based Exits.
+"""Backtesting engine — stonewang_daytrade_rtg_3.0: Multi-position Bar-by-bar RTG.
 
-Key differences from rtg_1.0 backtest:
-  - Event-driven: scan → buy → monitor (bar-based exit) → sell → immediately scan again
-  - Single position at a time (MAX_POSITIONS=1)
-  - All-in sizing (95% of equity)
-  - Bar-based exits: red_bar_exit / green_to_red / three_green_bars / 3% hard stop
-  - Entry restriction: skip if >=2 consecutive green bars before entry
-  - RTG + Breakout entry signals
+Key features:
+  - Multi-position bar-by-bar simulation (up to MAX_POSITIONS concurrent)
+  - RVOL-weighted position sizing (same as rtg_2.0)
+  - Bar-based exits: green_to_red (1 red bar) / RVOL-adaptive stop / target
+  - Daily profit protection (same as rtg_2.0)
+  - RTG + Breakout entry signals (same as rtg_2.0)
+  - Force close at end of day
 """
 
 import json
@@ -224,6 +224,7 @@ def find_rtg_entry(bars_list, open_price, start_idx=0, min_volume=None):
         min_volume = config.RTG_MIN_VOLUME
     entry_start = getattr(config, "ENTRY_WINDOW_START", "09:30")
     entry_end = getattr(config, "ENTRY_WINDOW_END", "15:55")
+    min_gain_pct = getattr(config, "RTG_MIN_BAR_GAIN_PCT", 0.01)
 
     for i in range(max(start_idx, 1), len(bars_list)):
         bar = bars_list[i]
@@ -235,7 +236,8 @@ def find_rtg_entry(bars_list, open_price, start_idx=0, min_volume=None):
         if not (start_time <= bar_time <= end_time):
             continue
 
-        if (bar["close"] > open_price
+        gain_pct = (bar["close"] / open_price) - 1.0 if open_price > 0 else 0
+        if (gain_pct >= min_gain_pct
                 and prev["volume"] > 0
                 and bar["volume"] >= config.RTG_VOLUME_MULT * prev["volume"]
                 and bar["volume"] >= min_volume):
@@ -421,14 +423,15 @@ def run_backtest(end_date=None, n_days=None):
         print("No trading days found.")
         return []
 
-    max_green = getattr(config, "MAX_GREEN_BARS_TO_ENTER", 2)
+    max_pos = getattr(config, "MAX_POSITIONS", 8)
+    max_entry_att = getattr(config, "MAX_ENTRY_ATTEMPTS", 8)
     print(f"[rtg_3.0] Backtesting {len(trading_days)} trading days: "
           f"{trading_days[0].date()} to {trading_days[-1].date()}")
-    print(f"Capital: ${config.INITIAL_CAPITAL:,.2f} | ALL-IN ({config.ALL_IN_BP_RATIO:.0%} BP) | "
-          f"Event-driven | Max 1 position")
-    print(f"Entry: RTG + Breakout | Max {max_green} consecutive green bars to enter")
-    print(f"Exit: red_bar / green_to_red / 3_green_bars / {config.STOP_PCT:.0%} stop / {config.TARGET_PCT:.0%} target")
-    print(f"Min RVOL: {config.MIN_RVOL_TO_TRADE:.1f}x | Max entry attempts: {config.MAX_ENTRY_ATTEMPTS}")
+    print(f"Capital: ${config.INITIAL_CAPITAL:,.2f} | RVOL-weighted sizing | "
+          f"Max {max_pos} concurrent positions")
+    print(f"Exit: green_to_red (1 bar) / RVOL-adaptive stop / target / force_close")
+    print(f"Min RVOL: {config.MIN_RVOL_TO_TRADE:.1f}x | Max entry attempts: {max_entry_att}")
+    print(f"Scan interval: {getattr(config, 'SCAN_INTERVAL_SEC', 30)}s")
 
     print("\nLoading tradable symbols...")
     symbols = get_tradable_symbols()
@@ -475,147 +478,321 @@ def run_backtest(end_date=None, n_days=None):
                 continue
             cached_bars[symbol] = _bars_to_list(bars_1m)
 
-        # ── Event-driven simulation ──
+        # ── Multi-position bar-by-bar simulation ──
         force_close_str = getattr(config, "FORCE_CLOSE_TIME", "15:59")
         force_close_min_parts = force_close_str.split(":")
         force_close_min = int(force_close_min_parts[0]) * 60 + int(force_close_min_parts[1])
+        entry_end_str = getattr(config, "ENTRY_WINDOW_END", "15:55")
+        entry_end_parts = entry_end_str.split(":")
+        entry_end_min = int(entry_end_parts[0]) * 60 + int(entry_end_parts[1])
         daily_loss = 0.0
         max_daily_loss = equity * config.MAX_DAILY_LOSS_PCT
-        # Track earliest bar index we can search from (per symbol)
-        # After a trade exits, next entry must be after SCAN_INTERVAL_SEC
-        next_search_idx = {row["symbol"]: 0 for _, row in qualified.iterrows()}
-        # Global: minimum bar timestamp for next entry (simulates scan wait)
-        last_exit_bar_min = 0  # in minutes since midnight
-        scan_interval_min = getattr(config, "SCAN_INTERVAL_SEC", 300) / 60.0
-        scan_idx = 0
-        daily_trades_count = 0
+        max_positions = getattr(config, "MAX_POSITIONS", 8)
+        max_entry_attempts = getattr(config, "MAX_ENTRY_ATTEMPTS", 8)
+        scan_interval_min = getattr(config, "SCAN_INTERVAL_SEC", 30) / 60.0
         max_daily_trades = getattr(config, "MAX_DAILY_TRADES", 0)
-        # Daily profit protection
+        daily_trades_count = 0
         max_daily_profit = 0.0
         profit_protect = getattr(config, "DAILY_PROFIT_PROTECT_ENABLED", False)
         profit_ratio = getattr(config, "DAILY_PROFIT_PROTECT_RATIO", 0.85)
         profit_min = getattr(config, "DAILY_PROFIT_PROTECT_MIN", 5.0)
 
-        while True:
-            scan_idx += 1
+        # Build unified timeline of all 1-min bar timestamps
+        all_timestamps = set()
+        for sym, bars in cached_bars.items():
+            if bars:
+                for bar in bars:
+                    ts = bar["timestamp"]
+                    bar_min = ts.hour * 60 + ts.minute
+                    if bar_min <= force_close_min:
+                        all_timestamps.add(ts)
+        if not all_timestamps:
+            continue
+        sorted_ts = sorted(all_timestamps)
+
+        # Index bars by (symbol, timestamp) for O(1) lookup
+        bar_index = {}  # symbol -> {timestamp -> bar}
+        for sym, bars in cached_bars.items():
+            if bars:
+                bar_index[sym] = {bar["timestamp"]: bar for bar in bars}
+
+        # Candidate info for quick lookup
+        cand_info = {}  # symbol -> {open_price, rvol, gap_pct}
+        for _, row in qualified.iterrows():
+            cand_info[row["symbol"]] = {
+                "open_price": row["open_price"],
+                "rvol": row.get("rvol", 0),
+                "gap_pct": row["gap_pct"],
+            }
+
+        # Open positions: list of dicts
+        # Each: {symbol, entry_price, shares, open_price, rvol, signal_type,
+        #        entry_bar_idx, stop_price, target_price, highest,
+        #        is_first_bar (for g2r logic), exited}
+        open_positions = []
+        # Track which symbols already have a position
+        symbols_in_pos = set()
+        # Per-symbol: next bar index to search for entry
+        next_search_idx = {sym: 0 for sym in cached_bars}
+        # Last exit minute (global cooldown)
+        last_exit_bar_min = -999
+
+        for ts_idx, ts in enumerate(sorted_ts):
+            bar_min = ts.hour * 60 + ts.minute
+
+            # ── 1. Check exits for all open positions ──
+            positions_to_close = []
+            for pos in open_positions:
+                if pos.get("exited"):
+                    continue
+                sym = pos["symbol"]
+                sym_bars = bar_index.get(sym, {})
+                bar = sym_bars.get(ts)
+                if bar is None:
+                    continue
+
+                bar_high = float(bar["high"])
+                bar_low = float(bar["low"])
+                bar_close = float(bar["close"])
+                bar_open = float(bar["open"])
+                if bar_high > pos["highest"]:
+                    pos["highest"] = bar_high
+
+                exit_triggered = False
+                exit_price = 0.0
+                reason = ""
+
+                # Green-to-red exit (skip first bar after entry)
+                if not pos["is_first_bar"]:
+                    is_red = bar_close < bar_open
+                    if is_red:
+                        pos["consec_red"] = pos.get("consec_red", 0) + 1
+                    else:
+                        pos["consec_red"] = 0
+                    g2r_consec = getattr(config, "GREEN_TO_RED_CONSEC_BARS", 1)
+                    if pos["consec_red"] >= g2r_consec and getattr(config, "EXIT_ON_GREEN_TO_RED", True):
+                        exit_price = bar_close; reason = "green_to_red"; exit_triggered = True
+
+                # Trailing stop (activated after price moves +1% from entry)
+                trail_act_pct = getattr(config, "TRAIL_ACTIVATE_PCT", 0.01)
+                trail_pct = getattr(config, "TRAIL_PCT", 0.015)
+                if not exit_triggered and trail_pct > 0:
+                    gain_from_entry = (pos["highest"] / pos["entry_price"]) - 1.0
+                    if gain_from_entry >= trail_act_pct:
+                        trail_price = round(pos["highest"] * (1 - trail_pct), 4)
+                        # Update max trail price seen
+                        if trail_price > pos.get("trail_stop_price", 0):
+                            pos["trail_stop_price"] = trail_price
+                        if bar_low <= pos["trail_stop_price"]:
+                            exit_price = pos["trail_stop_price"]; reason = "trail_stop"; exit_triggered = True
+
+                # RVOL-adaptive stop loss
+                if not exit_triggered and bar_low <= pos["stop_price"]:
+                    exit_price = pos["stop_price"]; reason = "stop_loss"; exit_triggered = True
+
+                # Target
+                if not exit_triggered and bar_high >= pos["target_price"]:
+                    exit_price = pos["target_price"]; reason = "target"; exit_triggered = True
+
+                pos["is_first_bar"] = False
+
+                # Force close at end of day
+                if not exit_triggered and bar_min >= force_close_min:
+                    exit_price = bar_close; reason = "force_close"; exit_triggered = True
+
+                if exit_triggered:
+                    slippage = getattr(config, "SLIPPAGE_EXIT_PCT", 0.0)
+                    if slippage > 0 and reason not in ("stop_loss", "green_to_red", "target"):
+                        exit_price = round(exit_price * (1 - slippage), 4)
+
+                    pnl = round((exit_price - pos["entry_price"]) * pos["shares"], 2)
+                    pnl_pct = round(pnl / (pos["entry_price"] * pos["shares"]), 4)
+
+                    r = BtResult()
+                    r.symbol = sym; r.date = str(date_key)
+                    r.entry_price = pos["entry_price"]; r.exit_price = round(exit_price, 4)
+                    r.shares = pos["shares"]; r.pnl = pnl; r.pnl_pct = pnl_pct
+                    r.exit_reason = reason; r.open_price = pos["open_price"]
+                    r.stop_price = pos["stop_price"]; r.target_price = pos["target_price"]
+                    r.trailing_high = round(pos["highest"], 4)
+                    r.entry_bar_idx = pos["entry_bar_idx"]; r.signal_type = pos["signal_type"]
+                    r.position_size = round(pos["entry_price"] * pos["shares"], 2)
+
+                    all_trades.append(r)
+                    equity += pnl
+                    daily_loss += pnl
+                    if daily_loss > max_daily_profit:
+                        max_daily_profit = daily_loss
+                    daily_trades_count += 1
+                    pos["exited"] = True
+                    symbols_in_pos.discard(sym)
+                    last_exit_bar_min = bar_min
+
+                    # Update next_search_idx for this symbol
+                    all_bars_sym = cached_bars.get(sym, [])
+                    for k in range(pos["entry_bar_idx"] + 1, len(all_bars_sym)):
+                        if all_bars_sym[k]["timestamp"] >= ts:
+                            next_search_idx[sym] = k + 1
+                            break
+
+                    exit_ts_str = ts.strftime("%H:%M")
+                    entry_ts_str = _bar_ts_str(all_bars_sym, pos["entry_bar_idx"])
+                    print(f"  {sym} [{pos['signal_type']}] entry=${pos['entry_price']:.4f}@{entry_ts_str} "
+                          f"exit=${r.exit_price:.4f}@{exit_ts_str} ({reason}), "
+                          f"P&L=${pnl:+,.2f} ({pnl_pct:+.2%}) [RVOL={pos['rvol']:.1f}x]")
+
+            # Remove exited positions
+            open_positions = [p for p in open_positions if not p.get("exited")]
+
+            # ── 2. Check daily loss / profit protection / trade limit ──
             if daily_loss <= -max_daily_loss:
                 break
             if max_daily_trades > 0 and daily_trades_count >= max_daily_trades:
                 break
-            # Daily profit protection check
             if profit_protect and max_daily_profit >= profit_min:
                 if daily_loss <= -(max_daily_profit * (1 - profit_ratio)):
                     print(f"  [Profit Protect] daily P&L ${daily_loss:+,.2f} dropped below "
                           f"{profit_ratio:.0%} of max ${max_daily_profit:+,.2f}, stopping")
+                    # Force close remaining positions
+                    for pos in open_positions:
+                        sym = pos["symbol"]
+                        sym_bars = bar_index.get(sym, {})
+                        bar = sym_bars.get(ts)
+                        close_p = float(bar["close"]) if bar else pos["entry_price"]
+                        pnl = round((close_p - pos["entry_price"]) * pos["shares"], 2)
+                        pnl_pct = round(pnl / (pos["entry_price"] * pos["shares"]), 4)
+                        r = BtResult()
+                        r.symbol = sym; r.date = str(date_key)
+                        r.entry_price = pos["entry_price"]; r.exit_price = round(close_p, 4)
+                        r.shares = pos["shares"]; r.pnl = pnl; r.pnl_pct = pnl_pct
+                        r.exit_reason = "profit_protect"; r.open_price = pos["open_price"]
+                        r.stop_price = pos["stop_price"]; r.target_price = pos["target_price"]
+                        r.trailing_high = round(pos["highest"], 4)
+                        r.entry_bar_idx = pos["entry_bar_idx"]; r.signal_type = pos["signal_type"]
+                        r.position_size = round(pos["entry_price"] * pos["shares"], 2)
+                        all_trades.append(r)
+                        equity += pnl; daily_loss += pnl
+                        daily_trades_count += 1
+                        print(f"  {sym} [profit_protect] close@${close_p:.4f}, P&L=${pnl:+,.2f}")
+                    open_positions = []
                     break
 
-            # Try top candidates (by RVOL)
-            max_attempts = getattr(config, "MAX_ENTRY_ATTEMPTS", 3)
-            entered = False
+            # ── 3. Check entries (if we have room) ──
+            if bar_min > entry_end_min:
+                continue  # Past entry window, only monitor exits
+            if bar_min < last_exit_bar_min + scan_interval_min:
+                continue  # Still in cooldown after last exit
+            if len(open_positions) >= max_positions:
+                continue  # No room for more positions
 
+            attempts = max_entry_attempts
             for _, row in qualified.iterrows():
-                if entered or max_attempts <= 0:
+                if attempts <= 0 or len(open_positions) >= max_positions:
                     break
 
                 symbol = row["symbol"]
+                if symbol in symbols_in_pos:
+                    continue  # Already have position in this symbol
                 open_price = row["open_price"]
                 rvol = row.get("rvol", 0)
                 all_bars = cached_bars.get(symbol)
                 if all_bars is None:
-                    max_attempts -= 1
                     continue
 
-                # Find entry signal starting after previous exit for this symbol
+                # Find entry signal from current position
                 search_from = next_search_idx.get(symbol, 0)
                 result = find_entry_signal(all_bars, open_price, start_idx=search_from)
                 if result is None:
-                    max_attempts -= 1
+                    attempts -= 1
                     continue
 
                 entry_price_signal, entry_bar_idx, signal_type = result
 
-                # Check entry bar is after scan cooldown from last exit
+                # Entry must be at or before current timestamp
                 entry_bar_ts = all_bars[entry_bar_idx]["timestamp"]
                 entry_bar_min_val = entry_bar_ts.hour * 60 + entry_bar_ts.minute
-                if entry_bar_min_val < last_exit_bar_min + scan_interval_min:
-                    max_attempts -= 1
-                    continue
-
-                # Check entry is before force close
+                if entry_bar_ts > ts:
+                    continue  # Signal is in the future, skip for now
                 if entry_bar_min_val >= force_close_min - 1:
-                    max_attempts -= 1
+                    attempts -= 1
                     continue
 
-                # Entry price: use the signal bar's close (not open_price*1.001)
-                # In live, we buy at market when signal triggers
+                # Entry price with slippage
                 entry_bar_close = all_bars[entry_bar_idx]["close"]
                 entry_slippage = getattr(config, "SLIPPAGE_ENTRY_PCT", 0.005)
                 entry_price_actual = round(entry_bar_close * (1 + entry_slippage), 4)
 
-                # All-in sizing
-                all_in_ratio = getattr(config, "ALL_IN_BP_RATIO", 0.95)
-                pos_size = equity * all_in_ratio
-                shares = int(pos_size / entry_price_actual)
-                if shares <= 0:
-                    max_attempts -= 1
-                    continue
-
-                # Bars after entry, trimmed to force_close
-                remaining_bars = all_bars[entry_bar_idx + 1:]
-                cycle_bars = []
-                force_close_price = remaining_bars[-1]["close"] if remaining_bars else entry_price_actual
-                for bar in remaining_bars:
-                    bar_min_val = bar["timestamp"].hour * 60 + bar["timestamp"].minute
-                    cycle_bars.append(bar)
-                    if bar_min_val >= force_close_min:
-                        force_close_price = bar["close"]
+                # RVOL-weighted position sizing
+                rvol_tiers = getattr(config, "RVOL_SIZING_TIERS", [(0.0, 0.20)])
+                equity_ratio = 0.20
+                for rvol_min, eq_pct in rvol_tiers:
+                    if rvol >= rvol_min:
+                        equity_ratio = eq_pct
                         break
-
-                if not cycle_bars:
-                    max_attempts -= 1
+                pos_size = equity * equity_ratio
+                shares = int(pos_size / entry_price_actual)
+                min_pos = getattr(config, "MIN_POSITION_SIZE", 40)
+                max_pos = getattr(config, "MAX_POSITION_SIZE", 9999)
+                if shares * entry_price_actual < min_pos:
+                    attempts -= 1
+                    continue
+                if shares * entry_price_actual > max_pos:
+                    shares = int(max_pos / entry_price_actual)
+                if shares <= 0:
+                    attempts -= 1
                     continue
 
-                # Evaluate with bar-based exit (pass rvol for adaptive stop/target)
-                trade_result = evaluate_bar_exit(
-                    entry_price=entry_price_actual, shares=shares,
-                    bars_after_entry=cycle_bars, symbol=symbol,
-                    open_price=open_price, force_close_price=force_close_price,
-                    entry_bar_idx=entry_bar_idx, signal_type=signal_type,
-                    rvol=rvol,
-                )
-                trade_result.date = str(date_key)
-                trade_result.open_price = open_price
+                # RVOL-adaptive stop/target
+                stop_pct, target_pct = _get_rvol_exit_tier(rvol)
+                stop_price = round(entry_price_actual * (1 - stop_pct), 4)
+                target_price = round(entry_price_actual * (1 + target_pct), 4)
 
-                # Update next search index and exit time
-                exit_bar_abs = entry_bar_idx + 1 + trade_result.exit_bar_idx
-                next_search_idx[symbol] = exit_bar_abs + 1
-                # Set cooldown: next entry must be after exit + scan interval
-                if exit_bar_abs < len(all_bars):
-                    exit_ts = all_bars[exit_bar_abs]["timestamp"]
-                    last_exit_bar_min = exit_ts.hour * 60 + exit_ts.minute
-                else:
-                    last_exit_bar_min = force_close_min
+                open_positions.append({
+                    "symbol": symbol, "entry_price": entry_price_actual,
+                    "shares": shares, "open_price": open_price,
+                    "rvol": rvol, "signal_type": signal_type,
+                    "entry_bar_idx": entry_bar_idx,
+                    "stop_price": stop_price, "target_price": target_price,
+                    "highest": entry_price_actual,
+                    "trail_stop_price": 0.0,
+                    "is_first_bar": True, "exited": False,
+                })
+                symbols_in_pos.add(symbol)
+                next_search_idx[symbol] = entry_bar_idx + 1
 
-                entry_ts = _bar_ts_str(all_bars, entry_bar_idx)
-                exit_bar = min(exit_bar_abs, len(all_bars) - 1)
-                exit_ts_str = _bar_ts_str(all_bars, exit_bar)
+                entry_ts_str = _bar_ts_str(all_bars, entry_bar_idx)
+                print(f"  + {symbol} [{signal_type}] entry=${entry_price_actual:.4f}@{entry_ts_str} "
+                      f"shares={shares} stop={stop_pct:.0%} target={target_pct:.0%} "
+                      f"[RVOL={rvol:.1f}x, {equity_ratio:.0%} equity]")
+                attempts -= 1
 
-                print(f"  {symbol} [{signal_type}] entry=${entry_price_actual:.4f}@{entry_ts} "
-                      f"exit=${trade_result.exit_price:.4f}@{exit_ts_str} ({trade_result.exit_reason}), "
-                      f"P&L=${trade_result.pnl:+,.2f} ({trade_result.pnl_pct:+.2%}) "
-                      f"[RVOL={rvol:.1f}x]")
-
-                all_trades.append(trade_result)
-                equity += trade_result.pnl
-                daily_loss += trade_result.pnl
-                if daily_loss > max_daily_profit:
-                    max_daily_profit = daily_loss
-                daily_trades_count += 1
-                entered = True
-                break  # One position at a time
-
-            if not entered:
-                break  # No more entries possible
+        # ── Force close any remaining open positions at end of day ──
+        for pos in open_positions:
+            sym = pos["symbol"]
+            all_bars_sym = cached_bars.get(sym, [])
+            if all_bars_sym:
+                last_bar = all_bars_sym[-1]
+                close_p = float(last_bar["close"])
+            else:
+                close_p = pos["entry_price"]
+            slippage = getattr(config, "SLIPPAGE_FORCE_CLOSE_PCT", 0.01)
+            close_p = round(close_p * (1 - slippage), 4)
+            pnl = round((close_p - pos["entry_price"]) * pos["shares"], 2)
+            pnl_pct = round(pnl / (pos["entry_price"] * pos["shares"]), 4)
+            r = BtResult()
+            r.symbol = sym; r.date = str(date_key)
+            r.entry_price = pos["entry_price"]; r.exit_price = close_p
+            r.shares = pos["shares"]; r.pnl = pnl; r.pnl_pct = pnl_pct
+            r.exit_reason = "force_close_eod"; r.open_price = pos["open_price"]
+            r.stop_price = pos["stop_price"]; r.target_price = pos["target_price"]
+            r.trailing_high = round(pos["highest"], 4)
+            r.entry_bar_idx = pos["entry_bar_idx"]; r.signal_type = pos["signal_type"]
+            r.position_size = round(pos["entry_price"] * pos["shares"], 2)
+            all_trades.append(r)
+            equity += pnl; daily_loss += pnl
+            daily_trades_count += 1
+            print(f"  {sym} [force_close_eod] close@${close_p:.4f}, P&L=${pnl:+,.2f}")
+        open_positions = []
 
     print(f"\n{'=' * 70}")
     print(f"[rtg_3.0] Backtest complete. Final equity: ${equity:,.2f}")

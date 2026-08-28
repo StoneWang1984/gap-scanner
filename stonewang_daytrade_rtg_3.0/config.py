@@ -47,11 +47,11 @@ RVOL_LOOKBACK_DAYS = 20
 RTG_ONLY = True
 
 # ── Cycle parameters (rtg_3.0) ───────────────────────────────────────
-SCAN_INTERVAL_SEC = 300          # Wait time before re-scanning when no signal found
+SCAN_INTERVAL_SEC = 30           # Re-scan quickly after no signal (30s)
 MIN_RVOL_TO_TRADE = 3.0         # Minimum RVOL to qualify as "best stock"
 ALL_IN_BP_RATIO = 0.95          # Buy with 95% of available buying power
-MAX_POSITIONS = 1               # Exactly one position at a time
-MAX_ENTRY_ATTEMPTS = 3          # Try top 3 candidates per scan
+MAX_POSITIONS = 8                # Up to 8 concurrent positions (same as rtg_2.0)
+MAX_ENTRY_ATTEMPTS = 8          # Try top 8 candidates per scan
 
 # ── Exit: green-to-red only + RVOL-adaptive stop (same as rtg_2.0) ────
 EXIT_ON_RED_BAR = False           # Disabled — only green_to_red exits
@@ -73,9 +73,9 @@ TARGET_PCT = 0.30
 # ── Entry restriction: disabled (same as rtg_2.0) ────────────────────
 MAX_GREEN_BARS_TO_ENTER = 999    # Effectively no restriction
 
-# Legacy trail params (unused in 3.0, kept for compatibility)
-TRAIL_PCT = 0.01
-TRAIL_ACTIVATE_PCT = 0.005
+# Legacy trail params (disabled — using G2R instead)
+TRAIL_PCT = 0.0
+TRAIL_ACTIVATE_PCT = 0.0
 
 # ── Intraday breakout signal ────────────────────────────────────────
 BREAKOUT_ENABLED = True           # Enable intraday breakout signal
@@ -91,8 +91,12 @@ DAILY_PROFIT_PROTECT_MIN = 5.0       # Only activate when max profit >= $5
 # ── No progressive trailing (rtg_3.0 uses bar exit, not trailing) ────
 PROGRESSIVE_TRAIL_TIERS = []
 
-# ── RVOL sizing (flat for rtg_3.0 — always all-in) ──────────────────
-RVOL_SIZING_TIERS = [(0.0, 1.0)]  # Always 100% (all-in)
+# ── RVOL sizing (same as rtg_2.0) ──────────────────
+RVOL_SIZING_TIERS = [
+    (10.0, 0.50),   # RVOL > 10x → 50% of equity
+    (5.0,  0.35),   # RVOL 5-10x → 35% of equity
+    (0.0,  0.20),   # RVOL < 5x → 20% of equity
+]
 
 # ── Re-entry: NONE ───────────────────────────────────────────────────
 RTG_REENTRY_ALLOWED = False
@@ -108,7 +112,7 @@ ENTRY_WINDOW_END = "15:55"
 RTG_VOLUME_MULT = 1.5            # Same as rtg_2.0
 RTG_MIN_VOLUME = 30000
 RTG_MIN_PRICE_GAIN = 0.0
-RTG_MIN_BAR_GAIN_PCT = 0.0      # No minimum bar gain (same as rtg_2.0)
+RTG_MIN_BAR_GAIN_PCT = 0.01     # Bar must be >=1% above open_price to qualify
 RTG_ENTRY_AT_OPEN = True
 ENTRY_CONFIRM_BARS = 1           # No 2-bar confirmation (same as rtg_2.0)
 
