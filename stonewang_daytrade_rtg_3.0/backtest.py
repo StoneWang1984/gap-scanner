@@ -1,0 +1,621 @@
+"""Backtesting engine — stonewang_daytrade_rtg_3.0: Cycle-based All-in RTG with 1% Trailing Stop.
+
+Key difference from rtg_1.0 backtest:
+  - Cycle-based: every 5 min, scan → pick best → all-in buy → 1% trail → force close → repeat
+  - Single position at a time (MAX_POSITIONS=1)
+  - All-in sizing (95% of equity)
+  - Fixed 1% trailing stop (not RVOL-tiered)
+  - RTG + Breakout entry signals
+  - No re-entry (cycle model handles this)
+"""
+
+import json
+import os
+import re
+import sys
+import importlib.util
+
+_ver_dir = os.path.dirname(os.path.abspath(__file__))
+_parent_dir = os.path.dirname(_ver_dir)
+if _parent_dir not in sys.path:
+    sys.path.insert(0, _parent_dir)
+_spec = importlib.util.spec_from_file_location("config", os.path.join(_ver_dir, "config.py"))
+config = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(config)
+sys.modules["config"] = config
+
+import pandas as pd
+from alpaca.data.historical.stock import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+from alpaca.data.enums import Adjustment, DataFeed
+
+# Load scanner and strategy from parent / rtg_1.0
+from scanner import get_data_client, get_tradable_symbols
+
+_strat_spec = importlib.util.spec_from_file_location("strategy", os.path.join(_parent_dir, "stonewang_daytrade_rtg_1.0", "strategy.py"))
+strategy = importlib.util.module_from_spec(_strat_spec)
+_strat_spec.loader.exec_module(strategy)
+sys.modules["strategy"] = strategy
+evaluate_trade_rtg = strategy.evaluate_trade_rtg
+TradeResult = strategy.TradeResult
+
+# ── ETF filters (same as rtg_1.0) ──────────────────────────────────
+_LEV_PATTERN = re.compile(r'(2X|3X|BULL|BEAR)$', re.IGNORECASE)
+_LEV_PREFIXES = (
+    "TQQQ", "SQQQ", "UPRO", "SPXU", "TNA", "TZA",
+    "MSTU", "MSTZ", "CONL", "NAIL", "WEBL", "FNGU",
+    "FNGD", "SOXL", "SOXS", "TECL", "TECS", "UDOW",
+    "SDOW", "UMDD", "SMDD", "TQQ", "SQQ", "YINN",
+    "YANG", "CURE", "LABD", "LABU", "DRN", "DRV",
+    "DGP", "DGZ", "BOIL", "KOLD", "NUGT", "DUST",
+    "JNUG", "JDST", "GLL", "UGL", "AXTU", "RDWU",
+)
+
+def is_leveraged_etf(symbol: str) -> bool:
+    if _LEV_PATTERN.search(symbol):
+        return True
+    if symbol.endswith(("BULL", "BEAR")):
+        return True
+    if any(symbol.startswith(p) for p in _LEV_PREFIXES):
+        return True
+    return False
+
+_CRYPTO_ETF_NAMES = {"BITX", "BITU", "XRPI", "UXRP", "XRPC", "XRPZ", "BTF", "BTFG",
+                      "XRP", "ETHW", "SOLX", "DEFI", "BKCH", "CRPT", "STCE"}
+_CRYPTO_ETF_PREFIXES = ("XRP", "BTC", "BIT", "ETH", "SOL", "DOGE", "LTC", "ADA")
+
+def is_crypto_etf(symbol: str) -> bool:
+    if symbol in _CRYPTO_ETF_NAMES:
+        return True
+    if any(symbol.startswith(k) and len(symbol) <= 6 for k in _CRYPTO_ETF_PREFIXES):
+        return True
+    return False
+
+
+# ── Data helpers ───────────────────────────────────────────────────
+
+def get_trading_days(client, end_date, n_days):
+    start = end_date - pd.Timedelta(days=n_days * 2 + 10)
+    request = StockBarsRequest(
+        symbol_or_symbols="SPY", timeframe=TimeFrame.Day,
+        start=start, end=end_date, adjustment=Adjustment.RAW,
+        feed=getattr(config, "DATA_FEED_OBJ", DataFeed.IEX),
+    )
+    bars = client.get_stock_bars(request)
+    if bars.df.empty:
+        return []
+    df = bars.df
+    dates = sorted(set(df.index.get_level_values("timestamp").date))
+    return [pd.Timestamp(d) for d in dates[-n_days:]]
+
+
+def bulk_scan_gaps(client, trading_days, symbols):
+    """Scan for gap-up stocks across all trading days with RVOL."""
+    start = trading_days[0] - pd.Timedelta(days=45)
+    end = trading_days[-1] + pd.Timedelta(days=1)
+    all_dates_set = {d.date() for d in trading_days}
+
+    batch_size = 500
+    symbol_data = {}
+    total_batches = (len(symbols) + batch_size - 1) // batch_size
+
+    for batch_idx in range(total_batches):
+        batch = symbols[batch_idx * batch_size: (batch_idx + 1) * batch_size]
+        if batch_idx % 5 == 0:
+            print(f"  Bulk scanning batch {batch_idx + 1}/{total_batches}...")
+
+        request = StockBarsRequest(
+            symbol_or_symbols=batch, timeframe=TimeFrame.Day,
+            start=start, end=end, adjustment=Adjustment.RAW,
+            feed=getattr(config, "DATA_FEED_OBJ", DataFeed.IEX),
+        )
+        try:
+            bars = client.get_stock_bars(request)
+        except Exception as e:
+            print(f"  API error: {e}")
+            continue
+        if bars.df.empty:
+            continue
+        df = bars.df
+
+        for symbol in batch:
+            try:
+                sym_df = df[df.index.get_level_values("symbol") == symbol].sort_index()
+                if len(sym_df) < 2:
+                    continue
+                for i in range(1, len(sym_df)):
+                    curr = sym_df.iloc[i]
+                    prev = sym_df.iloc[i - 1]
+                    idx_val = sym_df.index[i]
+                    if isinstance(idx_val, tuple):
+                        ts = idx_val[1] if hasattr(idx_val[1], "date") else pd.Timestamp(idx_val[1])
+                    else:
+                        ts = pd.Timestamp(idx_val) if not hasattr(idx_val, "date") else idx_val
+                    curr_date = ts.date()
+                    if curr_date not in all_dates_set:
+                        continue
+                    prev_close = float(prev["close"])
+                    open_price = float(curr["open"])
+                    volume = int(prev["volume"])
+                    if prev_close <= 0:
+                        continue
+                    gap_pct = (open_price / prev_close) - 1.0
+                    if gap_pct < config.GAP_THRESHOLD:
+                        continue
+                    if gap_pct > getattr(config, "GAP_MAX", 1.0):
+                        continue
+                    if volume < config.MIN_VOLUME:
+                        continue
+                    if not (config.PRICE_MIN <= open_price <= config.PRICE_MAX):
+                        continue
+                    dollar_volume = prev_close * volume
+                    if dollar_volume < config.MIN_DOLLAR_VOLUME:
+                        continue
+                    lookback_start = max(0, i - config.RVOL_LOOKBACK_DAYS - 1)
+                    prior_vols = [int(sym_df.iloc[j]["volume"]) for j in range(lookback_start, i)]
+                    avg_vol_20d = sum(prior_vols) / len(prior_vols) if prior_vols else 0
+                    rvol = volume / avg_vol_20d if avg_vol_20d > 0 else 0
+
+                    if symbol not in symbol_data:
+                        symbol_data[symbol] = []
+                    symbol_data[symbol].append({
+                        "date": curr_date, "open_price": open_price,
+                        "prev_close": prev_close, "gap_pct": gap_pct,
+                        "volume": volume, "dollar_volume": dollar_volume,
+                        "rvol": rvol,
+                    })
+            except (KeyError, IndexError):
+                continue
+
+    results = {}
+    for symbol, entries in symbol_data.items():
+        for entry in entries:
+            d = entry["date"]
+            if d not in results:
+                results[d] = []
+            results[d].append({**entry, "symbol": symbol})
+
+    for d in results:
+        df_d = pd.DataFrame(results[d])
+        df_d = df_d.sort_values("rvol", ascending=False).reset_index(drop=True)
+        results[d] = df_d
+
+    return results
+
+
+def get_1min_bars(client, symbol, date):
+    market_open = pd.Timestamp(f"{date.date()} {config.MARKET_OPEN}", tz="America/New_York")
+    market_close = pd.Timestamp(f"{date.date()} {config.MARKET_CLOSE}", tz="America/New_York")
+    request = StockBarsRequest(
+        symbol_or_symbols=symbol, timeframe=TimeFrame(1, TimeFrameUnit.Minute),
+        start=market_open, end=market_close, adjustment=Adjustment.RAW,
+        feed=getattr(config, "DATA_FEED_OBJ", DataFeed.IEX),
+    )
+    bars = client.get_stock_bars(request)
+    if bars.df.empty:
+        return pd.DataFrame()
+    return bars.df
+
+
+def _bars_to_list(bars_df, start_idx=0):
+    result = []
+    for i in range(start_idx, len(bars_df)):
+        bar = bars_df.iloc[i]
+        idx = bars_df.index[i]
+        ts = idx
+        if isinstance(idx, tuple):
+            ts = idx[1]
+        ts = pd.Timestamp(ts)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        ts = ts.tz_convert("America/New_York")
+        result.append({
+            "high": float(bar["high"]), "low": float(bar["low"]),
+            "close": float(bar["close"]), "open": float(bar["open"]),
+            "volume": int(bar["volume"]) if "volume" in bar.index else 0,
+            "timestamp": ts,
+        })
+    return result
+
+
+def _bar_ts_str(bars_list, idx):
+    if 0 <= idx < len(bars_list):
+        return bars_list[idx]["timestamp"].strftime("%H:%M")
+    return "00:00"
+
+
+def _bars_to_chart(bars_df):
+    result = []
+    for i in range(len(bars_df)):
+        bar = bars_df.iloc[i]
+        idx = bars_df.index[i]
+        ts = idx[1] if isinstance(idx, tuple) else idx
+        ts = pd.Timestamp(ts)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        ts = ts.tz_convert("America/New_York")
+        result.append({
+            "ts": ts.strftime("%H:%M"),
+            "o": round(float(bar["open"]), 4), "h": round(float(bar["high"]), 4),
+            "l": round(float(bar["low"]), 4), "c": round(float(bar["close"]), 4),
+            "v": int(bar["volume"]) if "volume" in bar.index else 0,
+        })
+    return result
+
+
+# ── Entry signal detection ────────────────────────────────────────
+
+def find_rtg_entry(bars_list, open_price, start_idx=0, min_volume=None):
+    """Find RTG signal: close > open_price AND vol >= RTG_VOLUME_MULT * prev_vol.
+    Returns (entry_price, bar_idx, signal_type) or None.
+    """
+    if min_volume is None:
+        min_volume = config.RTG_MIN_VOLUME
+
+    entry_start = getattr(config, "ENTRY_WINDOW_START", "09:30")
+    entry_end = getattr(config, "ENTRY_WINDOW_END", "15:55")
+
+    for i in range(max(start_idx, 1), len(bars_list)):
+        bar = bars_list[i]
+        prev = bars_list[i - 1]
+        ts = bar["timestamp"]
+        bar_time = ts.time()
+        start_time = pd.Timestamp(f"{ts.date()} {entry_start}", tz="America/New_York").time()
+        end_time = pd.Timestamp(f"{ts.date()} {entry_end}", tz="America/New_York").time()
+        if not (start_time <= bar_time <= end_time):
+            continue
+
+        if (bar["close"] > open_price
+                and prev["volume"] > 0
+                and bar["volume"] >= config.RTG_VOLUME_MULT * prev["volume"]
+                and bar["volume"] >= min_volume):
+            entry_price = round(open_price * 1.001, 4)
+            return entry_price, i, "rtg"
+
+    return None
+
+
+def find_breakout_entry(bars_list, open_price, start_idx=0, min_volume=None):
+    """Find breakout signal: close > day_high_so_far AND vol >= BREAKOUT_VOLUME_MULT * prev_vol.
+    Returns (entry_price, bar_idx, signal_type) or None.
+    """
+    if not getattr(config, "BREAKOUT_ENABLED", False):
+        return None
+    if min_volume is None:
+        min_volume = config.RTG_MIN_VOLUME
+
+    min_bars = getattr(config, "BREAKOUT_MIN_BARS", 5)
+    vol_mult = getattr(config, "BREAKOUT_VOLUME_MULT", 1.5)
+    entry_at_close = getattr(config, "BREAKOUT_ENTRY_AT_CLOSE", True)
+
+    day_high = 0.0
+    for i in range(max(start_idx, 1), len(bars_list)):
+        bar = bars_list[i]
+        prev = bars_list[i - 1]
+
+        # Update day high from bars before this one
+        if i > 0:
+            day_high = max(day_high, bars_list[i - 1]["high"])
+
+        # Need enough bars for day_high to be meaningful
+        if i < min_bars:
+            continue
+
+        if (bar["close"] > day_high
+                and prev["volume"] > 0
+                and bar["volume"] >= vol_mult * prev["volume"]
+                and bar["volume"] >= min_volume):
+            if entry_at_close:
+                entry_price = round(bar["close"] * 1.001, 4)
+            else:
+                entry_price = round(bar["open"] * 1.001, 4)
+            return entry_price, i, "breakout"
+
+    return None
+
+
+def find_entry_signal(bars_list, open_price, start_idx=0, min_volume=None):
+    """Check both RTG and Breakout signals. Return earliest."""
+    rtg = find_rtg_entry(bars_list, open_price, start_idx, min_volume)
+    brk = find_breakout_entry(bars_list, open_price, start_idx, min_volume)
+
+    if rtg is None and brk is None:
+        return None
+    if rtg is None:
+        return brk
+    if brk is None:
+        return rtg
+    # Return whichever fires first (lower bar index)
+    if rtg[1] <= brk[1]:
+        return rtg
+    return brk
+
+
+# ── Cycle time computation ────────────────────────────────────────
+
+def compute_cycle_times(date_str):
+    """Compute scan cycle start times (every SCAN_INTERVAL_SEC from 09:35)."""
+    scan_sec = getattr(config, "SCAN_INTERVAL_SEC", 300)
+    force_close_str = getattr(config, "FORCE_CLOSE_TIME", "15:59")
+    tz = pd.Timestamp.now(tz="America/New_York").tz
+
+    first_scan = pd.Timestamp(f"{date_str} 09:35", tz=tz)
+    last_time = pd.Timestamp(f"{date_str} {force_close_str}", tz=tz)
+
+    times = []
+    t = first_scan
+    while t <= last_time:
+        times.append(t)
+        t += pd.Timedelta(seconds=scan_sec)
+    return times
+
+
+# ── Exit evaluation (reuse rtg_1.0 strategy with fixed 3.0 params) ─
+
+def evaluate_cycle_trade(entry_price, shares, bars_after_entry, symbol="",
+                         open_price=0.0, force_close_price=None, entry_bar_idx=0,
+                         signal_type=""):
+    """Evaluate trade with rtg_3.0 fixed params: 3% stop, 50% target, 0.5% trail_act, 1% trail."""
+    return evaluate_trade_rtg(
+        entry_price=entry_price,
+        shares=shares,
+        bars_after_entry=bars_after_entry,
+        symbol=symbol,
+        open_price=open_price,
+        force_close_price=force_close_price,
+        entry_bar_idx=entry_bar_idx,
+        signal_type=signal_type,
+        stop_pct=config.STOP_PCT,
+        target_pct=config.TARGET_PCT,
+        trail_activate_pct=config.TRAIL_ACTIVATE_PCT,
+        trail_pct=config.TRAIL_PCT,
+    )
+
+
+# ── Main backtest ─────────────────────────────────────────────────
+
+def save_backtest_charts(chart_entries, filepath="versions/chart_data_rtg3.json"):
+    date_parts = sorted(set(v["date"] for v in chart_entries.values()))
+    date_range = f"{date_parts[0]} to {date_parts[-1]}" if len(date_parts) > 1 else date_parts[0]
+    output = {"date": date_range, "symbols": chart_entries}
+    os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
+    with open(filepath, "w") as f:
+        json.dump(output, f, indent=2)
+    print(f"Chart data saved to {filepath} ({len(chart_entries)} symbols)")
+
+
+def run_backtest(end_date=None, n_days=None):
+    if n_days is None:
+        n_days = config.BACKTEST_DAYS
+    client = get_data_client()
+    if end_date is None:
+        end_date = pd.Timestamp.now(tz="America/New_York")
+
+    trading_days = get_trading_days(client, end_date, n_days)
+    if not trading_days:
+        print("No trading days found.")
+        return []
+
+    print(f"[rtg_3.0] Backtesting {len(trading_days)} trading days: "
+          f"{trading_days[0].date()} to {trading_days[-1].date()}")
+    print(f"Capital: ${config.INITIAL_CAPITAL:,.2f} | ALL-IN ({config.ALL_IN_BP_RATIO:.0%} BP) | "
+          f"Cycle: every {config.SCAN_INTERVAL_SEC//60}min | Max 1 position")
+    print(f"Entry: RTG (close > open, vol >= {config.RTG_VOLUME_MULT}x) + "
+          f"Breakout (close > day_high, vol >= {getattr(config, 'BREAKOUT_VOLUME_MULT', 1.5)}x)")
+    print(f"Exit: {config.STOP_PCT:.0%} stop | {config.TARGET_PCT:.0%} target | "
+          f"{config.TRAIL_ACTIVATE_PCT:.1%} trail act | {config.TRAIL_PCT:.0%} trail")
+    print(f"Min RVOL: {config.MIN_RVOL_TO_TRADE:.1f}x | Max entry attempts: {config.MAX_ENTRY_ATTEMPTS}")
+
+    print("\nLoading tradable symbols...")
+    symbols = get_tradable_symbols()
+    print(f"Found {len(symbols)} tradable symbols")
+
+    symbols = [s for s in symbols if not is_leveraged_etf(s)]
+    symbols = [s for s in symbols if not is_crypto_etf(s)]
+    print(f"After ETF filters: {len(symbols)} symbols")
+
+    print("\nBulk scanning for gaps (with RVOL)...")
+    gap_data = bulk_scan_gaps(client, trading_days, symbols)
+    total_candidates = sum(len(v) for v in gap_data.values())
+    print(f"Found {total_candidates} gap entries across {len(gap_data)} days")
+
+    all_trades = []
+    equity = config.INITIAL_CAPITAL
+
+    for date in trading_days:
+        date_key = date.date()
+        if date_key not in gap_data or gap_data[date_key].empty:
+            continue
+
+        candidates = gap_data[date_key]
+        max_cands = getattr(config, "MAX_CANDIDATES", 40)
+        candidates = candidates.head(max_cands)
+
+        # Filter by MIN_RVOL_TO_TRADE
+        min_rvol = getattr(config, "MIN_RVOL_TO_TRADE", 3.0)
+        qualified = candidates[candidates["rvol"] >= min_rvol]
+
+        print(f"\n--- {date_key} ({len(candidates)} candidates, {len(qualified)} qualified by RVOL>={min_rvol:.1f}x, equity: ${equity:,.2f}) ---")
+        for _, row in candidates.iterrows():
+            sym = row["symbol"]
+            rvol = row.get("rvol", 0)
+            gap_pct = row["gap_pct"]
+            open_p = row["open_price"]
+            marker = " *" if rvol >= min_rvol else ""
+            print(f"  {sym} gap={gap_pct:+.1%} RVOL={rvol:.1f}x open=${open_p:.2f}{marker}")
+
+        if qualified.empty:
+            print("  No qualified candidates, skipping day")
+            continue
+
+        # Pre-fetch all 1-min bars for qualified candidates
+        cached_bars = {}
+        for _, row in qualified.iterrows():
+            symbol = row["symbol"]
+            bars_1m = get_1min_bars(client, symbol, date)
+            if bars_1m.empty or len(bars_1m) < 2:
+                cached_bars[symbol] = None
+                continue
+            cached_bars[symbol] = _bars_to_list(bars_1m)
+
+        # ── Cycle-based simulation ──
+        cycle_times = compute_cycle_times(str(date_key))
+        daily_trades = 0
+        daily_loss = 0.0
+        max_daily_loss = equity * config.MAX_DAILY_LOSS_PCT
+        traded_symbols = set()  # cooldown: don't re-enter same symbol
+
+        for cycle_idx, cycle_start in enumerate(cycle_times):
+            if max_daily_loss > 0 and daily_loss <= -max_daily_loss:
+                print(f"  Daily loss ${daily_loss:,.2f} exceeded limit, stopping")
+                break
+
+            cycle_start_min = cycle_start.hour * 60 + cycle_start.minute
+            # cycle_end = next cycle start or force_close
+            if cycle_idx + 1 < len(cycle_times):
+                cycle_end = cycle_times[cycle_idx + 1]
+            else:
+                force_close_str = getattr(config, "FORCE_CLOSE_TIME", "15:59")
+                cycle_end = pd.Timestamp(f"{date_key} {force_close_str}", tz="America/New_York")
+            cycle_end_min = cycle_end.hour * 60 + cycle_end.minute
+
+            # Try top N candidates
+            max_attempts = getattr(config, "MAX_ENTRY_ATTEMPTS", 3)
+            attempt_count = 0
+            entered = False
+
+            for _, row in qualified.iterrows():
+                if entered:
+                    break
+                if attempt_count >= max_attempts:
+                    break
+
+                symbol = row["symbol"]
+                open_price = row["open_price"]
+                rvol = row.get("rvol", 0)
+
+                if symbol in traded_symbols:
+                    continue
+
+                all_bars = cached_bars.get(symbol)
+                if all_bars is None:
+                    continue
+
+                # Find bar index corresponding to cycle_start
+                start_idx = 0
+                for bi, bar in enumerate(all_bars):
+                    bar_min = bar["timestamp"].hour * 60 + bar["timestamp"].minute
+                    if bar_min >= cycle_start_min:
+                        start_idx = bi
+                        break
+
+                # Find entry signal in this cycle window
+                result = find_entry_signal(all_bars, open_price, start_idx=start_idx)
+                if result is None:
+                    attempt_count += 1
+                    continue
+
+                entry_price_signal, entry_bar_idx, signal_type = result
+
+                # Check entry is within cycle window
+                entry_bar_min = all_bars[entry_bar_idx]["timestamp"].hour * 60 + all_bars[entry_bar_idx]["timestamp"].minute
+                if entry_bar_min > cycle_end_min:
+                    attempt_count += 1
+                    continue
+
+                # All-in position sizing
+                entry_slippage = getattr(config, "SLIPPAGE_ENTRY_PCT", 0.005)
+                entry_price_actual = round(entry_price_signal * (1 + entry_slippage), 4)
+                all_in_ratio = getattr(config, "ALL_IN_BP_RATIO", 0.95)
+                pos_size = equity * all_in_ratio
+                shares = int(pos_size / entry_price_actual)
+                if shares <= 0:
+                    attempt_count += 1
+                    continue
+
+                # Determine bars remaining for this cycle (force close at cycle_end)
+                remaining_bars = all_bars[entry_bar_idx + 1:]
+                # Find force close bar index
+                force_close_bar_idx = len(remaining_bars) - 1
+                force_close_price = remaining_bars[-1]["close"] if remaining_bars else entry_price_actual
+
+                # Trim bars to cycle_end for trailing stop monitoring
+                cycle_bars = []
+                for bi, bar in enumerate(remaining_bars):
+                    bar_min = bar["timestamp"].hour * 60 + bar["timestamp"].minute
+                    cycle_bars.append(bar)
+                    if bar_min >= cycle_end_min:
+                        force_close_bar_idx = len(cycle_bars) - 1
+                        force_close_price = bar["close"]
+                        break
+
+                if not cycle_bars:
+                    attempt_count += 1
+                    continue
+
+                # Evaluate trade with fixed 3.0 exit params
+                trade_result = evaluate_cycle_trade(
+                    entry_price=entry_price_actual,
+                    shares=shares,
+                    bars_after_entry=cycle_bars,
+                    symbol=symbol,
+                    open_price=open_price,
+                    force_close_price=force_close_price,
+                    entry_bar_idx=entry_bar_idx,
+                    signal_type=signal_type,
+                )
+                trade_result.date = str(date_key)
+                trade_result.open_price = open_price
+
+                entry_ts = _bar_ts_str(all_bars, entry_bar_idx)
+                exit_bar = entry_bar_idx + 1 + trade_result.exit_bar_idx
+                exit_ts = _bar_ts_str(all_bars, min(exit_bar, len(all_bars) - 1))
+
+                print(f"  {symbol} [{signal_type}] entry=${entry_price_actual:.4f}@{entry_ts} "
+                      f"exit=${trade_result.exit_price:.4f}@{exit_ts} ({trade_result.exit_reason}), "
+                      f"P&L=${trade_result.pnl:+,.2f} ({trade_result.pnl_pct:+.2%}) "
+                      f"[RVOL={rvol:.1f}x stop={config.STOP_PCT:.0%} tgt={config.TARGET_PCT:.0%}]")
+
+                all_trades.append(trade_result)
+                equity += trade_result.pnl
+                daily_loss += trade_result.pnl
+                daily_trades += 1
+                entered = True
+                traded_symbols.add(symbol)
+
+            if not entered:
+                pass  # No entry this cycle
+
+        # Force close at end of day: already handled by cycle_end logic
+
+    print(f"\n{'=' * 70}")
+    print(f"[rtg_3.0] Backtest complete. Final equity: ${equity:,.2f}")
+    print(f"Total trades: {len(all_trades)}")
+    if all_trades:
+        wins = [t for t in all_trades if t.pnl > 0]
+        losses = [t for t in all_trades if t.pnl <= 0]
+        win_rate = len(wins) / len(all_trades)
+        avg_win = sum(t.pnl for t in wins) / len(wins) if wins else 0
+        avg_loss = sum(t.pnl for t in losses) / len(losses) if losses else 0
+        total_pnl = sum(t.pnl for t in all_trades)
+        print(f"Win rate: {win_rate:.1%} ({len(wins)}W / {len(losses)}L)")
+        print(f"Avg win: ${avg_win:+,.2f} | Avg loss: ${avg_loss:+,.2f}")
+        print(f"Total P&L: ${total_pnl:+,.2f} ({total_pnl/config.INITIAL_CAPITAL:+.1%})")
+        from collections import Counter
+        reasons = Counter(t.exit_reason for t in all_trades)
+        print(f"Exit reasons: {dict(reasons)}")
+        sigs = Counter(t.signal_type for t in all_trades)
+        print(f"Signal types: {dict(sigs)}")
+
+    return all_trades
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--days", type=int, default=config.BACKTEST_DAYS)
+    parser.add_argument("--end", type=str, default=None)
+    args = parser.parse_args()
+    end = pd.Timestamp(args.end, tz="America/New_York") if args.end else None
+    run_backtest(end_date=end, n_days=args.days)

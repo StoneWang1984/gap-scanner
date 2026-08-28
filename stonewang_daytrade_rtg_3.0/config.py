@@ -1,14 +1,12 @@
-"""Config — stonewang_daytrade_rtg_3.0: Cycle-based All-in RTG with 1% Trailing Stop.
+"""Config — stonewang_daytrade_rtg_3.0: Event-driven All-in RTG.
 
-Fundamental differences from rtg_2.0:
-  1. Cycle-based: scan -> buy best stock -> monitor -> force close -> scan again
+Fundamental design:
+  1. Event-driven: scan -> buy -> monitor -> sell -> immediately scan again
   2. Single position: at most ONE position at a time
   3. All-in: buy with ALL available capital (no RVOL tiered sizing)
-  4. Fixed 1% trailing stop (not progressive, not RVOL-tiered)
-  5. Force close before next scan: if still holding at scan time, close then scan
-  6. Scan every 5 minutes (not 30 min)
-  7. No daily profit protection (each cycle is independent)
-  8. No re-entry (not applicable in cycle model)
+  4. Exit rules: red bar exit / green-to-red / 3 green bars / 3% hard stop
+  5. Entry restriction: only buy on 1st or 2nd consecutive green bar
+  6. Full-day trading until force close at 15:59
 """
 
 import os
@@ -47,18 +45,26 @@ MAX_CANDIDATES = 40
 RVOL_LOOKBACK_DAYS = 20
 RTG_ONLY = True
 
-# ── Cycle parameters (NEW in rtg_3.0) ────────────────────────────────
-SCAN_INTERVAL_SEC = 300          # Scan every 5 minutes
+# ── Cycle parameters (rtg_3.0) ───────────────────────────────────────
+SCAN_INTERVAL_SEC = 300          # Wait time before re-scanning when no signal found
 MIN_RVOL_TO_TRADE = 3.0         # Minimum RVOL to qualify as "best stock"
 ALL_IN_BP_RATIO = 0.95          # Buy with 95% of available buying power
 MAX_POSITIONS = 1               # Exactly one position at a time
-MAX_ENTRY_ATTEMPTS = 3          # Try top 3 candidates per cycle
+MAX_ENTRY_ATTEMPTS = 3          # Try top 3 candidates per scan
 
-# ── Exit: Fixed 1% trailing stop ─────────────────────────────────────
-TRAIL_PCT = 0.01                 # 1% trailing stop (FIXED)
-TRAIL_ACTIVATE_PCT = 0.005       # Activate trail after +0.5% gain
-STOP_PCT = 0.03                  # 3% hard stop (backstop)
+# ── Exit: Bar-based exit rules (rtg_3.0) ─────────────────────────────
+EXIT_ON_RED_BAR = True            # First bar after entry is red → immediate sell
+EXIT_ON_GREEN_TO_RED = True       # Green-to-red transition → sell
+EXIT_ON_THREE_GREEN = True        # 3 consecutive green bars → sell
+STOP_PCT = 0.03                  # 3% hard stop (backstop for extreme moves)
 TARGET_PCT = 0.50                # 50% target (safety valve)
+
+# ── Entry restriction ────────────────────────────────────────────────
+MAX_GREEN_BARS_TO_ENTER = 2       # Only enter on 1st or 2nd consecutive green bar
+
+# Legacy trail params (unused in 3.0 bar-based exit, kept for compatibility)
+TRAIL_PCT = 0.01
+TRAIL_ACTIVATE_PCT = 0.005
 
 # ── Intraday breakout signal (rtg_3.0) ──────────────────────────────
 # Detects afternoon breakouts: stock makes new day high + volume spike

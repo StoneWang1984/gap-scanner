@@ -602,6 +602,16 @@ def check_rtg_entry(symbol, open_price, bars, after_time=None, min_volume=None):
         po = prev["open"]
         pc = prev["close"]
         if bc > open_price and pv > 0 and bv >= config.RTG_VOLUME_MULT * pv and bv >= min_volume:
+            # Check consecutive green bars before entry (don't chase)
+            max_green = getattr(config, "MAX_GREEN_BARS_TO_ENTER", 2)
+            consecutive_green = 0
+            for j in range(i - 1, -1, -1):
+                if bars[j]["close"] > bars[j]["open"]:
+                    consecutive_green += 1
+                else:
+                    break
+            if consecutive_green >= max_green:
+                continue  # Already riding high, skip this entry
             entry = round(open_price * 1.001, 4) if getattr(config, "RTG_ENTRY_AT_OPEN", True) else round(bc, 4)
             return entry, True, "rtg"
         if pc > po and pv >= config.GAPGO_MIN_FIRST_BAR_VOL and bh > ph and bv >= config.GAPGO_MIN_BREAKOUT_VOL:
@@ -644,6 +654,17 @@ def check_breakout_entry(symbol, bars, min_volume=None):
         pv = prev["volume"]
         # Breakout: close exceeds all previous highs + volume spike
         if bc > day_high and pv > 0 and bv >= vol_mult * pv and bv >= min_volume:
+            # Check consecutive green bars before entry (don't chase)
+            max_green = getattr(config, "MAX_GREEN_BARS_TO_ENTER", 2)
+            consecutive_green = 0
+            for j in range(i - 1, -1, -1):
+                if bars[j]["close"] > bars[j]["open"]:
+                    consecutive_green += 1
+                else:
+                    break
+            if consecutive_green >= max_green:
+                day_high = max(day_high, bar["high"])
+                continue  # Already riding high, skip this entry
             entry = round(bc * 1.001, 4) if getattr(config, "BREAKOUT_ENTRY_AT_CLOSE", True) else round(bc, 4)
             return entry, True, "breakout"
         day_high = max(day_high, bar["high"])
@@ -725,9 +746,18 @@ def wait_for_entry_signal(symbol, open_price, rvol, deadline):
 
 
 def monitor_position(position, force_close_at):
-    """Monitor single position with fixed 1% trailing stop.
+    """Monitor single position with bar-based exit rules.
+    Exit rules (priority order):
+      1. First bar after entry is red → red_bar_exit
+      2. Green-to-red transition → green_to_red
+      3. 3 consecutive green bars → three_green_bars
+      4. 3% hard stop (backstop for extreme moves)
+      5. 50% target (safety valve)
     Returns (reason, fill_price) on exit, or None if still open at force_close_at."""
     _pending_sell = None
+    _last_bar_ts = None  # Track which bar we've already processed
+    _is_first_bar = True  # Is this the first completed bar after entry?
+    _green_bar_count = 0  # Consecutive green bars counter
 
     while dt.datetime.now(_EST) < force_close_at:
         # Check pending async sell
@@ -739,7 +769,6 @@ def monitor_position(position, force_close_at):
             if time.time() - submit_time > 60:
                 log(f"SELL timeout for {position.symbol}, retrying...")
                 _pending_sell = None
-                # Will re-evaluate exit conditions below
             else:
                 filled, fill_price = check_sell_filled(order_id, position.symbol, position.shares)
                 if filled > 0:
@@ -751,9 +780,7 @@ def monitor_position(position, force_close_at):
                     _pending_sell = None
                     log(f"SELL order failed for {position.symbol}, will retry")
                 else:
-                    # Still pending — just wait
                     time.sleep(config.POLL_INTERVAL)
-                    # But also save state
                     continue
 
         # Get latest bar
@@ -763,35 +790,63 @@ def monitor_position(position, force_close_at):
             continue
 
         latest = bars[-1]
+        bar_ts = latest.get("timestamp")
+
+        # Only process completed bars (skip if same bar as last check)
+        if bar_ts is not None and bar_ts == _last_bar_ts:
+            time.sleep(config.POLL_INTERVAL)
+            continue
+
+        bar_open = latest["open"]
+        bar_close = latest["close"]
         bar_low = latest["low"]
         bar_high = latest["high"]
+        is_green = bar_close >= bar_open  # Green bar (close >= open)
+        is_red = not is_green  # Red bar (close < open)
+
+        if bar_ts is not None:
+            _last_bar_ts = bar_ts
 
         # Update highest
         if bar_high > position.highest:
             position.highest = bar_high
 
-        # Check hard stop loss (3% backstop)
-        stop_price = round(position.entry_price * (1 - position.stop_pct), 4)
         reason = None
-        if bar_low <= stop_price:
-            reason = "stop_loss"
 
-        # Check trailing stop (FIXED 1%)
+        # Exit rule 1: First bar after entry is red → immediate exit
+        if _is_first_bar and is_red and getattr(config, "EXIT_ON_RED_BAR", True):
+            reason = "red_bar_exit"
+            log(f"First bar is RED for {position.symbol} (o=${bar_open:.4f} c=${bar_close:.4f})")
+
+        # Exit rule 2: Green-to-red transition → sell
+        if reason is None and not _is_first_bar and is_red and getattr(config, "EXIT_ON_GREEN_TO_RED", True):
+            reason = "green_to_red"
+            log(f"Green→Red for {position.symbol} (o=${bar_open:.4f} c=${bar_close:.4f})")
+
+        # Exit rule 3: 3 consecutive green bars → sell
+        if reason is None and is_green and getattr(config, "EXIT_ON_THREE_GREEN", True):
+            _green_bar_count += 1
+            if _green_bar_count >= 3:
+                reason = "three_green_bars"
+                log(f"3 green bars for {position.symbol} (count={_green_bar_count})")
+        elif reason is None and is_red:
+            _green_bar_count = 0  # Reset on red bar
+
+        # Exit rule 4: Hard stop loss (3% backstop)
         if reason is None:
-            if not position.trail_active:
-                if position.highest >= position.entry_price * (1 + position.trail_activate_pct):
-                    position.trail_active = True
-                    log(f"Trail activated for {position.symbol} at ${position.highest:.4f}")
-            if position.trail_active:
-                trail_stop = round(position.highest * (1 - position.trail_pct), 4)
-                if bar_low <= trail_stop:
-                    reason = "trail_stop"
+            stop_price = round(position.entry_price * (1 - position.stop_pct), 4)
+            if bar_low <= stop_price:
+                reason = "stop_loss"
 
-        # Check target (safety valve)
+        # Exit rule 5: Target (safety valve)
         if reason is None:
             target_price = round(position.entry_price * (1 + position.target_pct), 4)
             if bar_high >= target_price:
                 reason = "target"
+
+        # Mark first bar as processed
+        if _is_first_bar:
+            _is_first_bar = False
 
         if reason is not None and _pending_sell is None:
             order_id = place_sell_async(position.symbol, position.shares)
@@ -846,13 +901,10 @@ def run_trading_day(target_date):
     # Force-close any orphan positions from previous run/crash
     handle_orphan_position()
 
-    # Compute cycle schedule
-    cycle_times = compute_cycle_times(target_date)
-    log(f"Cycle schedule: {len(cycle_times)} cycles, every {config.SCAN_INTERVAL_SEC}s")
-    log(f"  First: {cycle_times[0].strftime('%H:%M')}, Last: {cycle_times[-1].strftime('%H:%M')}")
-
     force_close_dt = dt.datetime.combine(target_date.date(), _parse_time(config.FORCE_CLOSE_TIME), tzinfo=_EST)
     market_close_dt = dt.datetime.combine(target_date.date(), _parse_time(config.MARKET_CLOSE), tzinfo=_EST)
+    # Entry deadline: 30s before force close
+    entry_deadline_dt = force_close_dt - dt.timedelta(seconds=30)
 
     position = None
     daily_trades = 0
@@ -860,6 +912,7 @@ def run_trading_day(target_date):
     trades_detail = []
     candidates = []
     max_daily_loss = equity * config.MAX_DAILY_LOSS_PCT
+    scan_count = 0
 
     state = {
         "version": config.VERSION_SHORT, "data_feed": config.DATA_FEED,
@@ -869,76 +922,69 @@ def run_trading_day(target_date):
         "position": None, "trades_detail": [],
     }
 
-    for cycle_idx, cycle_time in enumerate(cycle_times):
+    # ── Event-driven main loop ──
+    while dt.datetime.now(_EST) < force_close_dt:
         now = dt.datetime.now(_EST)
-        if now >= force_close_dt:
-            break
 
-        # Wait until cycle_time
-        if now < cycle_time:
-            remaining = (cycle_time - now).total_seconds()
-            if remaining > 30:
-                log(f"Cycle {cycle_idx}: next scan in {int(remaining)}s...")
-            while dt.datetime.now(_EST) < cycle_time:
-                time.sleep(min(5, max(1, (cycle_time - dt.datetime.now(_EST)).total_seconds() - 1)))
-
-        log(f"═══ Cycle {cycle_idx} at {cycle_time.strftime('%H:%M:%S')} ═══")
-
-        # ── PHASE 1: Force close if still holding from previous cycle ──
-        if position is not None:
-            log(f"Force closing {position.symbol} before new scan")
-            sold, fill = force_sell_position(position.symbol, position.shares)
-            if sold > 0:
-                pnl = (fill - position.entry_price) * sold if fill > 0 else 0
-                trades_detail.append({
-                    "cycle_index": cycle_idx, "symbol": position.symbol,
-                    "entry": position.entry_price, "exit": round(fill, 4),
-                    "shares": sold, "pnl": round(pnl, 2),
-                    "reason": "force_close", "trade_type": position.signal_type,
-                    "hold_duration_sec": round(time.time() - position.entry_ts),
-                })
-                daily_pnl += pnl
-                daily_trades += 1
-                position = None
-                log(f"Force closed, P&L=${pnl:+,.2f}")
-            else:
-                log(f"CRITICAL: Force close failed for {position.symbol}! Retrying...")
-                for attempt in range(3):
-                    time.sleep(5)
-                    sold, fill = force_sell_position(position.symbol, position.shares)
-                    if sold > 0:
-                        pnl = (fill - position.entry_price) * sold if fill > 0 else 0
-                        trades_detail.append({
-                            "cycle_index": cycle_idx, "symbol": position.symbol,
-                            "entry": position.entry_price, "exit": round(fill, 4),
-                            "shares": sold, "pnl": round(pnl, 2),
-                            "reason": "force_close_retry", "trade_type": position.signal_type,
-                            "hold_duration_sec": round(time.time() - position.entry_ts),
-                        })
-                        daily_pnl += pnl
-                        daily_trades += 1
-                        position = None
-                        log(f"Force close retry {attempt+1} succeeded, P&L=${pnl:+,.2f}")
-                        break
-                if position is not None:
-                    log(f"FATAL: Cannot close {position.symbol} — skipping scan")
-                    save_state(state)
-                    continue
-
-        # ── Daily loss circuit breaker ──
+        # Daily loss circuit breaker
         if max_daily_loss > 0 and daily_pnl <= -max_daily_loss:
             log(f"Daily loss ${daily_pnl:,.2f} exceeded limit ${max_daily_loss:,.2f}, stopping")
             state["daily_stopped"] = True
             break
 
-        # ── PHASE 2: Scan for gap stocks ──
+        if position is not None:
+            # ── HAVE POSITION: monitor until exit ──
+            force_close_start = force_close_dt - dt.timedelta(seconds=30)
+            exit_result = monitor_position(position, force_close_start)
+
+            if exit_result:
+                reason, fill_price = exit_result
+                pnl = round((fill_price - position.entry_price) * position.shares, 2)
+                hold_dur = round(time.time() - position.entry_ts)
+                trades_detail.append({
+                    "cycle_index": scan_count, "symbol": position.symbol,
+                    "entry": position.entry_price, "exit": round(fill_price, 4),
+                    "shares": position.shares, "pnl": pnl,
+                    "reason": reason, "trade_type": position.signal_type,
+                    "hold_duration_sec": hold_dur,
+                })
+                daily_pnl += pnl
+                log(f"EXIT {position.symbol} {reason} @ ${fill_price:.4f}, P&L=${pnl:+,.2f} (held {hold_dur}s)")
+                position = None
+                # Immediately continue → will scan again in next iteration
+            else:
+                # monitor_position returned None → force close time reached
+                log("Force close time reached during monitoring")
+                break
+
+            # Save state after exit
+            state.update({
+                "updated": dt.datetime.now().isoformat(),
+                "ws_connected": _stream_state["running"],
+                "daily_trades": daily_trades,
+                "cycle_index": scan_count,
+                "position": None,
+                "trades_detail": trades_detail,
+            })
+            save_state(state)
+            continue
+
+        # ── NO POSITION: scan → select → wait signal → buy ──
+        # Check if we still have time to enter
+        if dt.datetime.now(_EST) >= entry_deadline_dt:
+            log("Too late for new entries today")
+            break
+
+        scan_count += 1
+        log(f"═══ Scan #{scan_count} at {now.strftime('%H:%M:%S')} ═══")
+
+        # Scan for gap stocks
         try:
             candidates = scan_gaps(target_date)
         except Exception as e:
             log(f"Scan error: {e}")
             candidates = []
 
-        # Select best candidates
         best_candidates = select_best_candidates(
             candidates, max_n=getattr(config, "MAX_ENTRY_ATTEMPTS", 3))
 
@@ -948,25 +994,33 @@ def run_trading_day(target_date):
                 log(f"No qualified candidates (max RVOL={best_rvol:.1f} < {config.MIN_RVOL_TO_TRADE})")
             else:
                 log(f"No gap stocks found in scan")
-            state["current_cycle"] = {"scan_time": cycle_time.isoformat(), "best_candidate": None,
+            state["current_cycle"] = {"scan_time": now.isoformat(), "best_candidate": None,
                                        "qualified_count": 0, "skipped_reason": "no_qualified"}
             save_state(state)
+            # Wait before re-scanning
+            time.sleep(config.SCAN_INTERVAL_SEC)
             continue
 
         log(f"Top candidate: {best_candidates[0]['symbol']} (RVOL={best_candidates[0]['rvol']:.1f}×, "
             f"gap=+{best_candidates[0]['gap_pct']:.1%})")
 
-        # ── PHASE 3: Try entry for best candidates ──
-        next_cycle = cycle_times[cycle_idx + 1] if cycle_idx + 1 < len(cycle_times) else force_close_dt
-        entry_deadline = next_cycle - dt.timedelta(seconds=30)  # 30s buffer before next cycle
+        # Try entry for best candidates
+        # Deadline: min of entry_deadline_dt and 5 min from now (don't wait forever per scan)
+        signal_deadline = min(
+            entry_deadline_dt,
+            now + dt.timedelta(seconds=config.SCAN_INTERVAL_SEC),
+        )
 
         entered = False
         for cand in best_candidates:
+            if dt.datetime.now(_EST) >= entry_deadline_dt:
+                break
+
             sym = cand["symbol"]
             open_price = cand["open_price"]
             rvol = cand["rvol"]
 
-            log(f"Watching {sym} for RTG signal (RVOL={rvol:.1f}×)")
+            log(f"Watching {sym} for entry signal (RVOL={rvol:.1f}×)")
 
             # Start WS + backfill for this symbol
             restart_ws_stream([sym])
@@ -975,7 +1029,7 @@ def run_trading_day(target_date):
 
             # Wait for entry signal (RTG or Breakout)
             entry_price, confirmed, signal_type = wait_for_entry_signal(
-                sym, open_price, rvol, entry_deadline)
+                sym, open_price, rvol, signal_deadline)
 
             if not confirmed or entry_price <= 0:
                 log(f"No entry signal for {sym}")
@@ -1028,59 +1082,34 @@ def run_trading_day(target_date):
                 trail_activate_pct=config.TRAIL_ACTIVATE_PCT,
                 trail_pct=config.TRAIL_PCT,
             )
-            daily_trades += 1
             entered = True
             log(f"ENTRY {sym} [{signal_type}] {filled}sh @ ${fill_price:.4f} "
-                f"[ALL-IN ${capital:.2f}, RVOL={rvol:.1f}×, trail=1%]")
+                f"[ALL-IN ${capital:.2f}, RVOL={rvol:.1f}×]")
             break  # Don't try more candidates
 
         if not entered:
-            log(f"No entry this cycle")
+            log(f"No entry this scan")
             state["current_cycle"] = {
-                "scan_time": cycle_time.isoformat(),
+                "scan_time": now.isoformat(),
                 "best_candidate": best_candidates[0] if best_candidates else None,
                 "qualified_count": len(best_candidates),
                 "skipped_reason": "no_signal",
             }
+            state.update({
+                "candidates": candidates,
+                "position": None,
+            })
             save_state(state)
+            # Wait before re-scanning
+            time.sleep(config.SCAN_INTERVAL_SEC)
             continue
 
-        # ── PHASE 4: Monitor position with 1% trailing stop ──
-        force_close_start = next_cycle - dt.timedelta(seconds=30)
-
-        exit_result = monitor_position(position, force_close_start)
-
-        if exit_result:
-            reason, fill_price = exit_result
-            pnl = round((fill_price - position.entry_price) * position.shares, 2)
-            hold_dur = round(time.time() - position.entry_ts)
-            trades_detail.append({
-                "cycle_index": cycle_idx, "symbol": position.symbol,
-                "entry": position.entry_price, "exit": round(fill_price, 4),
-                "shares": position.shares, "pnl": pnl,
-                "reason": reason, "trade_type": "rtg",
-                "hold_duration_sec": hold_dur,
-            })
-            daily_pnl += pnl
-            daily_trades += 1
-            log(f"EXIT {position.symbol} {reason} @ ${fill_price:.4f}, P&L=${pnl:+,.2f} (held {hold_dur}s)")
-            position = None
-        else:
-            log(f"Monitor ended — position still open, will be force closed next cycle")
-
-        # Save state
-        next_scan = cycle_times[cycle_idx + 1] if cycle_idx + 1 < len(cycle_times) else None
+        # Save state after entry
         state.update({
             "updated": dt.datetime.now().isoformat(),
             "ws_connected": _stream_state["running"],
             "daily_trades": daily_trades,
-            "cycle_index": cycle_idx,
-            "next_scan_time": next_scan.isoformat() if next_scan else None,
-            "current_cycle": {
-                "scan_time": cycle_time.isoformat(),
-                "best_candidate": {"symbol": position.symbol, "rvol": position.rvol} if position else None,
-                "qualified_count": len(best_candidates),
-            },
+            "cycle_index": scan_count,
             "candidates": candidates,
             "position": {
                 "symbol": position.symbol, "shares": position.shares,
@@ -1090,7 +1119,7 @@ def run_trading_day(target_date):
                 "trail_active": position.trail_active,
                 "stop_pct": position.stop_pct, "target_pct": position.target_pct,
                 "trail_activate_pct": position.trail_activate_pct, "trail_pct": position.trail_pct,
-            } if position else None,
+            },
             "trades_detail": trades_detail,
         })
         save_state(state)

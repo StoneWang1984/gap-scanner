@@ -1,21 +1,17 @@
-"""Backtesting engine — stonewang_daytrade_rtg_1.0: Red-to-Green Volume Breakout.
+"""Backtesting engine — stonewang_daytrade_rtg_2.0: RTG + Profit Protection + Progressive Trailing.
 
-Entry detection (1-min bars, approximates live WebSocket bar stream):
+Key differences from rtg_1.0 backtest:
+  1. Daily profit protection: when today's profit drops to X% of max, force close all
+  2. Progressive trailing stop: trail_pct tightens as profit grows
+  3. Bar-by-bar concurrent simulation (all positions evaluated each bar,
+     so daily profit protection can trigger across all open positions)
+
+Entry detection (1-min bars):
   Signal A (Red-to-Green):
     - bar[i].close > open_price (crossed back above open)
     - bar[i].volume >= RTG_VOLUME_MULT × bar[i-1].volume (volume spike)
     - bar[i].volume >= RTG_MIN_VOLUME (liquidity floor)
-  Signal B (Gap-and-Go):
-    - bar[i-1].close > bar[i-1].open (prior bar bullish)
-    - bar[i].high > bar[i-1].high (breakout)
-    - bar[i-1].volume >= GAPGO_MIN_FIRST_BAR_VOL
-    - bar[i].volume >= GAPGO_MIN_BREAKOUT_VOL
-
-Entry window: 09:30 - 10:30 EST (1 hour)
-One trade per symbol per day (no re-entry — keeps logic simple for first version).
-
-Exit (evaluate_trade_rtg):
-  3% stop, 10% target, 10-min time limit, 3% trailing after +5%.
+  Signal B (Gap-and-Go): DISABLED
 """
 
 import json
@@ -24,7 +20,6 @@ import re
 import sys
 import importlib.util
 
-# Load version-specific config (must be before `import config`)
 _ver_dir = os.path.dirname(os.path.abspath(__file__))
 _parent_dir = os.path.dirname(_ver_dir)
 if _parent_dir not in sys.path:
@@ -40,19 +35,14 @@ from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.data.enums import Adjustment, DataFeed
 
-import config
-
-# Load scanner from parent directory
 from scanner import get_data_client, get_tradable_symbols
 
-# Load strategy from rtg_1.0 directory
 _strat_spec = importlib.util.spec_from_file_location("strategy", os.path.join(_ver_dir, "strategy.py"))
 strategy = importlib.util.module_from_spec(_strat_spec)
 _strat_spec.loader.exec_module(strategy)
 sys.modules["strategy"] = strategy
 evaluate_trade_rtg = strategy.evaluate_trade_rtg
 TradeResult = strategy.TradeResult
-
 
 # ── Leveraged ETF filter ─────────────────────────────────────────────
 _LEV_PATTERN = re.compile(r'(2X|3X|BULL|BEAR)$', re.IGNORECASE)
@@ -105,8 +95,8 @@ def get_trading_days(client, end_date, n_days):
 
 
 def bulk_scan_gaps(client, trading_days, symbols):
-    """Scan for gap-up stocks across all trading days. Also fetches 20-day avg volume for RVOL."""
-    start = trading_days[0] - pd.Timedelta(days=45)  # extra lookback for 20-day avg vol
+    """Scan for gap-up stocks across all trading days with RVOL."""
+    start = trading_days[0] - pd.Timedelta(days=45)
     end = trading_days[-1] + pd.Timedelta(days=1)
     all_dates_set = {d.date() for d in trading_days}
 
@@ -129,7 +119,6 @@ def bulk_scan_gaps(client, trading_days, symbols):
         except Exception as e:
             print(f"  API error: {e}")
             continue
-
         if bars.df.empty:
             continue
         df = bars.df
@@ -167,7 +156,6 @@ def bulk_scan_gaps(client, trading_days, symbols):
                     dollar_volume = prev_close * volume
                     if dollar_volume < config.MIN_DOLLAR_VOLUME:
                         continue
-                    # RVOL: 20-day average volume
                     lookback_start = max(0, i - config.RVOL_LOOKBACK_DAYS - 1)
                     prior_vols = [int(sym_df.iloc[j]["volume"]) for j in range(lookback_start, i)]
                     avg_vol_20d = sum(prior_vols) / len(prior_vols) if prior_vols else 0
@@ -184,7 +172,6 @@ def bulk_scan_gaps(client, trading_days, symbols):
             except (KeyError, IndexError):
                 continue
 
-    # Group by date, sort by RVOL descending (top candidates = highest RVOL)
     results = {}
     for symbol, entries in symbol_data.items():
         for entry in entries:
@@ -262,10 +249,7 @@ def _bars_to_chart(bars_df):
 
 
 def find_rtg_entry_1min(bars_1m, open_price, min_volume=None):
-    """Find RTG or Gap-and-Go entry on 1-min bars.
-
-    Returns (entry_price, entry_bar_idx, confirmed, signal_type).
-    """
+    """Find RTG or Gap-and-Go entry on 1-min bars."""
     if bars_1m.empty or len(bars_1m) < 2:
         return 0.0, -1, False, ""
     if min_volume is None:
@@ -291,9 +275,7 @@ def find_rtg_entry_1min(bars_1m, open_price, min_volume=None):
         bar = bars_1m.iloc[i]
         prev_bar = bars_1m.iloc[i - 1]
 
-        bar_open = float(bar["open"])
         bar_high = float(bar["high"])
-        bar_low = float(bar["low"])
         bar_close = float(bar["close"])
         bar_vol = int(bar["volume"])
         prev_vol = int(prev_bar["volume"])
@@ -301,25 +283,14 @@ def find_rtg_entry_1min(bars_1m, open_price, min_volume=None):
         prev_open = float(prev_bar["open"])
         prev_close = float(prev_bar["close"])
 
-        # Signal A: Red-to-Green
-        # Bar close crossed above open_price (stock was red, now green)
-        # Volume spike: bar vol >= RTG_VOLUME_MULT × prior bar vol
-        # Liquidity floor: bar vol >= RTG_MIN_VOLUME
         if (bar_close > open_price
                 and prev_vol > 0
                 and bar_vol >= config.RTG_VOLUME_MULT * prev_vol
                 and bar_vol >= min_volume):
-            # First entry: at open_price + 0.1% (better price, matches live)
-            # Re-entry: at signal bar close (market price at time of signal)
-            # Caller decides based on entry_count which price to use
             entry_at_open = round(open_price * 1.001, 4)
             entry_at_close = round(bar_close * 1.001, 4)
             return entry_at_open, entry_at_close, i, True, "rtg"
 
-        # Signal B: Gap-and-Go (2-bar breakout)
-        # Prior bar bullish (close > open)
-        # This bar breaks prior bar's high
-        # Both bars have minimum volume
         if (i >= 1
                 and prev_close > prev_open
                 and prev_vol >= config.GAPGO_MIN_FIRST_BAR_VOL
@@ -341,16 +312,12 @@ def _get_rvol_tier(rvol):
 
 
 def get_rvol_sizing(rvol, equity, same_tier_count=1):
-    """Get position size based on RVOL-weighted tiers, split among same-tier candidates."""
     _, pct = _get_rvol_tier(rvol)
     split_pct = pct / max(same_tier_count, 1)
     return round(equity * split_pct, 2)
 
 
 def get_rvol_exit_params(rvol):
-    """Get adaptive exit params based on RVOL tier.
-    Returns (stop_pct, target_pct, trail_activate_pct, trail_pct).
-    """
     tiers = getattr(config, "RVOL_EXIT_TIERS", [
         (10.0, 0.07, 0.30, 0.05, 0.03),
         (5.0,  0.05, 0.20, 0.05, 0.03),
@@ -362,7 +329,126 @@ def get_rvol_exit_params(rvol):
     return 0.05, 0.20, 0.05, 0.03
 
 
-def save_backtest_charts(chart_entries, filepath="versions/chart_data_rtg.json"):
+# ── Open position tracker for concurrent bar-by-bar simulation ────
+
+class OpenPosition:
+    """Tracks a single open position during bar-by-bar simulation."""
+    def __init__(self, symbol, shares, entry_price, entry_bar_idx, open_price,
+                 rvol, stop_pct, target_pct, trail_activate_pct, trail_pct, signal_type):
+        self.symbol = symbol
+        self.shares = shares
+        self.entry_price = entry_price
+        self.entry_bar_idx = entry_bar_idx
+        self.open_price = open_price
+        self.rvol = rvol
+        self.stop_pct = stop_pct
+        self.target_pct = target_pct
+        self.trail_activate_pct = trail_activate_pct
+        self.base_trail_pct = trail_pct
+        self.signal_type = signal_type
+
+        self.stop_price = round(entry_price * (1 - stop_pct), 4)
+        self.target_price = round(entry_price * (1 + target_pct), 4)
+        self.trail_activate = entry_price * (1 + trail_activate_pct)
+
+        self.highest = entry_price
+        self.trail_active = False
+        self.trail_stop = 0.0
+        self.current_trail_pct = trail_pct
+        self.closed = False
+        self.exit_price = 0.0
+        self.exit_reason = ""
+        self.exit_bar_idx = -1
+
+    def _get_progressive_trail(self, profit_pct):
+        tiers = getattr(config, "PROGRESSIVE_TRAIL_TIERS", [])
+        if not tiers:
+            return self.base_trail_pct
+        for threshold, trail in tiers:
+            if profit_pct >= threshold:
+                return trail
+        return self.base_trail_pct
+
+    def evaluate_bar(self, bar, bar_idx):
+        """Evaluate a single bar. Returns True if position exited this bar."""
+        if self.closed:
+            return False
+
+        bar_high = float(bar["high"])
+        bar_low = float(bar["low"])
+        bar_close = float(bar["close"])
+
+        if bar_high > self.highest:
+            self.highest = bar_high
+
+        # Progressive trailing: adjust trail_pct based on current profit
+        if self.highest > self.entry_price:
+            profit_pct = (self.highest - self.entry_price) / self.entry_price
+            self.current_trail_pct = self._get_progressive_trail(profit_pct)
+
+        # 1. Hard stop
+        if bar_low <= self.stop_price:
+            self.exit_price = self.stop_price
+            self.exit_reason = "stop_loss"
+            self.exit_bar_idx = bar_idx
+            self.closed = True
+            return True
+
+        # 2. Trailing stop (with progressive tightening)
+        if not self.trail_active and self.highest >= self.trail_activate:
+            self.trail_active = True
+            self.trail_stop = round(self.highest * (1 - self.current_trail_pct), 4)
+        if self.trail_active:
+            new_trail = round(self.highest * (1 - self.current_trail_pct), 4)
+            if new_trail > self.trail_stop:
+                self.trail_stop = new_trail
+            if bar_low <= self.trail_stop:
+                self.exit_price = self.trail_stop
+                self.exit_reason = "trail_stop"
+                self.exit_bar_idx = bar_idx
+                self.closed = True
+                return True
+
+        # 3. Target
+        if bar_high >= self.target_price:
+            self.exit_price = self.target_price
+            self.exit_reason = "target"
+            self.exit_bar_idx = bar_idx
+            self.closed = True
+            return True
+
+        return False
+
+    def force_close(self, price, bar_idx, reason="force_close"):
+        """Force close at given price (profit protect or EOD)."""
+        slippage = getattr(config, "SLIPPAGE_EXIT_PCT", 0.0)
+        if slippage > 0:
+            price = round(price * (1 - slippage), 4)
+        self.exit_price = price
+        self.exit_reason = reason
+        self.exit_bar_idx = bar_idx
+        self.closed = True
+
+    @property
+    def unrealized_pnl(self):
+        if self.closed:
+            return round((self.exit_price - self.entry_price) * self.shares, 2)
+        return 0.0
+
+    @property
+    def pnl(self):
+        if not self.closed:
+            return 0.0
+        return round((self.exit_price - self.entry_price) * self.shares, 2)
+
+    @property
+    def pnl_pct(self):
+        if not self.closed or self.entry_price <= 0:
+            return 0.0
+        return round(self.pnl / (self.entry_price * self.shares), 4)
+
+
+def save_backtest_charts(chart_entries, filepath="versions/chart_data_rtg2.json"):
     date_parts = sorted(set(v["date"] for v in chart_entries.values()))
     date_range = f"{date_parts[0]} to {date_parts[-1]}" if len(date_parts) > 1 else date_parts[0]
     output = {"date": date_range, "symbols": chart_entries}
@@ -384,7 +470,12 @@ def run_backtest(end_date=None, n_days=None):
         print("No trading days found.")
         return []
 
-    print(f"[rtg_1.0] Backtesting {len(trading_days)} trading days: "
+    profit_protect = getattr(config, "DAILY_PROFIT_PROTECT_ENABLED", False)
+    profit_ratio = getattr(config, "DAILY_PROFIT_PROTECT_RATIO", 0.85)
+    profit_min = getattr(config, "DAILY_PROFIT_PROTECT_MIN", 5.0)
+    progressive_tiers = getattr(config, "PROGRESSIVE_TRAIL_TIERS", [])
+
+    print(f"[rtg_2.0] Backtesting {len(trading_days)} trading days: "
           f"{trading_days[0].date()} to {trading_days[-1].date()}")
     print(f"Capital: ${config.INITIAL_CAPITAL:,.2f} | RVOL-weighted sizing | "
           f"Max concurrent: {config.MAX_POSITIONS} | Max daily trades: {config.MAX_DAILY_TRADES}")
@@ -400,6 +491,11 @@ def run_backtest(end_date=None, n_days=None):
             f"RVOL>{r:.0f}×→stop{s:.0%}/tgt{t:.0%}/trail{a:.0%}/{tr:.0%}"
             for r, s, t, a, tr in exit_tiers))
     print(f"  Re-entry: {'ON (max ' + str(config.RTG_REENTRY_MAX) + ')' if getattr(config, 'RTG_REENTRY_ALLOWED', False) else 'OFF'}")
+    print(f"  Profit Protect: {'ON (ratio=' + f'{profit_ratio:.0%}' + ', min=$' + f'{profit_min:.0f}' + ')' if profit_protect else 'OFF'}")
+    if progressive_tiers:
+        print(f"  Progressive Trail: " + ", ".join(f"profit>{t:.0%}→trail{p:.1%}" for t, p in progressive_tiers))
+    else:
+        print(f"  Progressive Trail: OFF")
 
     print("\nLoading tradable symbols...")
     symbols = get_tradable_symbols()
@@ -426,27 +522,21 @@ def run_backtest(end_date=None, n_days=None):
             continue
 
         candidates = gap_data[date_key]
-        # Select top N by RVOL
         max_cands = getattr(config, "MAX_CANDIDATES", 5)
         candidates = candidates.head(max_cands)
 
         print(f"\n--- {date_key} ({len(candidates)} candidates by RVOL, equity: ${equity:,.2f}) ---")
         for _, row in candidates.iterrows():
             sym = row["symbol"]
-            open_price = row["open_price"]
             rvol = row.get("rvol", 0)
             gap_pct = row["gap_pct"]
-            print(f"  {sym} gap={gap_pct:+.1%} RVOL={rvol:.1f}× open=${open_price:.2f}")
+            open_p = row["open_price"]
+            print(f"  {sym} gap={gap_pct:+.1%} RVOL={rvol:.1f}× open=${open_p:.2f}")
 
-        daily_trades = 0
-        daily_loss = 0.0
-        max_daily_loss = equity * config.MAX_DAILY_LOSS_PCT
-        entry_count = {}  # symbol -> count of entries (for re-entry tracking)
-        cached_bars = {}  # symbol -> (bars_df, bars_list)
-        # Backtest: raise daily trade limit to allow all candidates to trade concurrently
-        bt_max_daily_trades = max(config.MAX_DAILY_TRADES, len(candidates) * 20)
+        # Pre-fetch all 1-min bars and find entry signals
+        cached_bars = {}  # symbol -> bars_list
+        entry_info = {}   # symbol -> (entry_price, entry_bar_idx, signal_type)
 
-        # Pre-compute same-tier counts for fair sizing split
         tier_counts = {}
         for _, r in candidates.iterrows():
             rvol_r = r.get("rvol", 0)
@@ -458,168 +548,214 @@ def run_backtest(end_date=None, n_days=None):
             open_price = row["open_price"]
             rvol = row.get("rvol", 0)
 
-            # Fetch and cache bars for this symbol
-            if symbol not in cached_bars:
-                bars_1m = get_1min_bars(client, symbol, date)
-                if bars_1m.empty or len(bars_1m) < 2:
-                    cached_bars[symbol] = (None, None)
-                    continue
-                cached_bars[symbol] = (bars_1m, _bars_to_list(bars_1m))
-            bars_1m, all_bars_1m = cached_bars[symbol]
-            if bars_1m is None:
+            bars_1m = get_1min_bars(client, symbol, date)
+            if bars_1m.empty or len(bars_1m) < 2:
                 continue
+            bars_list = _bars_to_list(bars_1m)
+            cached_bars[symbol] = bars_list
 
-            # RVOL-adaptive min volume: high RVOL relaxes liquidity floor
+            # RVOL-adaptive min volume
             min_vol = config.RTG_MIN_VOLUME
             if rvol >= 10:
                 min_vol = max(config.RTG_MIN_VOLUME // 3, 5000)
             elif rvol >= 5:
                 min_vol = max(config.RTG_MIN_VOLUME // 2, 10000)
 
-            entry_slippage = getattr(config, "SLIPPAGE_ENTRY_PCT", 0.005)
+            # Find first RTG entry
+            entry_at_open, entry_at_close, entry_bar_idx, confirmed, signal_type = find_rtg_entry_1min(
+                bars_1m, open_price, min_volume=min_vol)
+            if confirmed and entry_at_open > 0:
+                entry_info[symbol] = (entry_at_open, entry_bar_idx, signal_type, rvol, open_price)
+
+        if not entry_info:
+            continue
+
+        # ── Bar-by-bar concurrent simulation ──
+        # Build timeline: union of all bar timestamps
+        # Each symbol enters at its RTG signal, then we track all open positions bar by bar
+        max_daily_loss = equity * config.MAX_DAILY_LOSS_PCT
+        daily_realized_pnl = 0.0
+        max_daily_pnl = 0.0
+        profit_protect_triggered = False
+
+        # Sort entries by bar index (earliest entry first for sizing)
+        sorted_entries = sorted(entry_info.items(), key=lambda x: x[1][1])
+
+        open_positions = []
+        closed_trades = []
+        entered_symbols = set()
+        entry_slippage = getattr(config, "SLIPPAGE_ENTRY_PCT", 0.005)
+
+        for symbol, (entry_price, entry_bar_idx, signal_type, rvol, open_price) in sorted_entries:
+            if symbol in entered_symbols:
+                continue
+            if len(entered_symbols) >= config.MAX_POSITIONS:
+                break
+
             same_tier = tier_counts.get(_get_rvol_tier(rvol)[0], 1)
             stop_p, target_p, trail_act_p, trail_p = get_rvol_exit_params(rvol)
-            sym_key = f"{symbol} ({date_key})"
-            chart_bars = _bars_to_chart(bars_1m)
-            events = chart_entries.get(sym_key, {}).get("events", [])
 
-            # Bar-by-bar simulation: scan for RTG, enter, exit, continue scanning
-            search_start = 0
-            last_exit_reason = None
-            _stop_cooldown_bar = 0
-            while True:
-                if bt_max_daily_trades > 0 and daily_trades >= bt_max_daily_trades:
-                    break
-                if max_daily_loss > 0 and daily_loss <= -max_daily_loss:
-                    print(f"  Daily loss ${daily_loss:,.2f} exceeded limit, stopping for day")
-                    break
-                if entry_count.get(symbol, 0) > config.RTG_REENTRY_MAX:
-                    break
+            entry_price_actual = round(entry_price * (1 + entry_slippage), 4)
+            pos_size = get_rvol_sizing(rvol, equity, same_tier_count=same_tier)
+            pos_size = max(config.MIN_POSITION_SIZE, pos_size)
+            shares = int(pos_size / entry_price_actual)
+            if shares <= 0:
+                continue
 
-                # Find next RTG signal after search_start
-                if search_start >= len(bars_1m):
-                    break
-                entry_at_open, entry_at_close, entry_bar_idx, confirmed, signal_type = find_rtg_entry_1min(
-                    bars_1m.iloc[search_start:], open_price, min_volume=min_vol)
-                if not confirmed or entry_at_open <= 0:
-                    break  # No more RTG signals for this symbol
+            pos = OpenPosition(
+                symbol=symbol, shares=shares, entry_price=entry_price_actual,
+                entry_bar_idx=entry_bar_idx, open_price=open_price, rvol=rvol,
+                stop_pct=stop_p, target_pct=target_p,
+                trail_activate_pct=trail_act_p, trail_pct=trail_p,
+                signal_type=signal_type,
+            )
+            open_positions.append(pos)
+            entered_symbols.add(symbol)
 
-                # Use open_price entry for first entry, close price for re-entry
-                entries_for_sym_pre = entry_count.get(symbol, 0)
-                is_reentry_bt = entries_for_sym_pre > 0
-                entry_price = entry_at_open if not is_reentry_bt else entry_at_close
+        # Build global bar timeline from all symbols' bars
+        all_bar_times = {}  # timestamp -> {symbol: bar}
+        for symbol in entered_symbols:
+            bars = cached_bars.get(symbol, [])
+            for bar in bars:
+                ts = bar["timestamp"]
+                if ts not in all_bar_times:
+                    all_bar_times[ts] = {}
+                all_bar_times[ts][symbol] = bar
 
-                # Re-entry rules (match live_trade.py)
-                if is_reentry_bt:
-                    # Stop-loss = setup failed → no re-entry
-                    if last_exit_reason == "stop_loss":
+        sorted_times = sorted(all_bar_times.keys())
+
+        # Simulate bar by bar
+        for ts in sorted_times:
+            bars_this_min = all_bar_times[ts]
+
+            # Evaluate each open position with this bar
+            for pos in open_positions:
+                if pos.closed:
+                    continue
+                if pos.symbol not in bars_this_min:
+                    continue
+                bar = bars_this_min[pos.symbol]
+                bar_idx = None
+                bars = cached_bars.get(pos.symbol, [])
+                for bi, b in enumerate(bars):
+                    if b["timestamp"] == ts:
+                        bar_idx = bi
                         break
-                    # Max re-entries per stock
-                    if entries_for_sym_pre > getattr(config, "RTG_REENTRY_MAX", 1):
-                        break
-                    # Don't chase: re-entry price must be < 115% of open
-                    max_re = open_price * getattr(config, "REENTRY_MAX_PRICE_VS_OPEN", 1.15)
-                    if entry_price > max_re:
-                        search_start = search_start + max(entry_bar_idx, 0) + 1
-                        continue
-                    # Must pull back >=3% from day high
-                    min_pb = getattr(config, "REENTRY_MIN_PULLBACK", 0.03)
-                    abs_bar = search_start + max(entry_bar_idx, 0)
-                    if abs_bar < len(all_bars_1m):
-                        day_h = max(b["high"] for b in all_bars_1m[:abs_bar + 1])
-                        if entry_price > day_h * (1 - min_pb):
-                            search_start = abs_bar + 1
-                            continue
-
-                # Stop-loss cooldown: skip 3 bars after stop_loss exit
-                if last_exit_reason == "stop_loss" and entry_bar_idx < _stop_cooldown_bar:
-                    search_start = _stop_cooldown_bar
+                if bar_idx is None:
                     continue
 
-                if bt_max_daily_trades > 0 and daily_trades >= bt_max_daily_trades:
-                    break
-                if max_daily_loss > 0 and daily_loss <= -max_daily_loss:
-                    break
+                exited = pos.evaluate_bar(bar, bar_idx)
+                if exited:
+                    closed_trades.append(pos)
 
-                # Adjust entry_bar_idx to absolute position
-                entry_bar_idx = search_start + entry_bar_idx
-
-                entries_for_sym = entries_for_sym_pre
-                is_reentry = entries_for_sym > 0
-                entry_price_actual = round(entry_price * (1 + entry_slippage), 4)
-
-                # RVOL-weighted position sizing
-                if is_reentry:
-                    reentry_pct = getattr(config, "RTG_REENTRY_SIZE_PCT", 0.50)
-                    pos_size = get_rvol_sizing(rvol, equity, same_tier_count=same_tier) * reentry_pct
-                else:
-                    pos_size = get_rvol_sizing(rvol, equity, same_tier_count=same_tier)
-                pos_size = max(config.MIN_POSITION_SIZE, pos_size)
-                shares = int(pos_size / entry_price_actual)
-                if shares <= 0:
-                    search_start = entry_bar_idx + 1
-                    continue
-
-                remaining_list = all_bars_1m[entry_bar_idx + 1:]
-                force_close_price = remaining_list[-1]["close"] if remaining_list else entry_price_actual
-
-                result = evaluate_trade_rtg(
-                    entry_price=entry_price_actual,
-                    shares=shares,
-                    bars_after_entry=remaining_list,
-                    symbol=symbol,
-                    open_price=open_price,
-                    force_close_price=force_close_price,
-                    entry_bar_idx=entry_bar_idx,
-                    signal_type=signal_type + ("_re" if is_reentry else ""),
-                    stop_pct=stop_p,
-                    target_pct=target_p,
-                    trail_activate_pct=trail_act_p,
-                    trail_pct=trail_p,
+            # Check daily profit protection
+            if profit_protect and not profit_protect_triggered:
+                # Calculate total P&L: realized + unrealized
+                realized = sum(p.pnl for p in closed_trades)
+                unrealized = sum(
+                    (b["close"] - p.entry_price) * p.shares
+                    for p in open_positions if not p.closed
+                    for b in [bars_this_min.get(p.symbol, {})]
+                    if "close" in b
                 )
-                result.date = str(date_key)
-                result.open_price = open_price
+                total_pnl = realized + unrealized
+                if total_pnl > max_daily_pnl:
+                    max_daily_pnl = total_pnl
 
-                entry_ts = _bar_ts_str(all_bars_1m, entry_bar_idx)
-                exit_bar = entry_bar_idx + 1 + result.exit_bar_idx
-                exit_ts = _bar_ts_str(all_bars_1m, exit_bar)
-                label = f"{signal_type}_re" if is_reentry else signal_type
-                print(f"  {symbol} [{label}] entry=${entry_price_actual:.4f}@{entry_ts} "
-                      f"exit=${result.exit_price:.4f}@{exit_ts} ({result.exit_reason}), "
-                      f"P&L=${result.pnl:+,.2f} ({result.pnl_pct:+.2%}) "
-                      f"[RVOL={rvol:.1f}× stop={stop_p:.0%} tgt={target_p:.0%}]")
+                if max_daily_pnl >= profit_min and total_pnl <= max_daily_pnl * profit_ratio:
+                    # Trigger profit protect: force close all open positions
+                    for p in open_positions:
+                        if not p.closed:
+                            bar = bars_this_min.get(p.symbol, {})
+                            if "close" in bar:
+                                p.force_close(bar["close"], bar_idx or 0, "profit_protect")
+                                closed_trades.append(p)
+                    profit_protect_triggered = True
+                    daily_realized_pnl = sum(p.pnl for p in closed_trades)
+                    print(f"  *** PROFIT PROTECT triggered at {ts.strftime('%H:%M')}: "
+                          f"max_pnl=${max_daily_pnl:+,.2f}, cur_pnl=${total_pnl:+,.2f}, "
+                          f"ratio={total_pnl/max_daily_pnl:.0%} ***")
 
-                all_trades.append(result)
-                equity += result.pnl
-                daily_loss += result.pnl
-                daily_trades += 1
-                entry_count[symbol] = entries_for_sym + 1
+            # Check daily loss limit
+            realized_so_far = sum(p.pnl for p in closed_trades)
+            if max_daily_loss > 0 and realized_so_far <= -max_daily_loss:
+                for p in open_positions:
+                    if not p.closed:
+                        bar = bars_this_min.get(p.symbol, {})
+                        if "close" in bar:
+                            p.force_close(bar["close"], bar_idx or 0, "daily_loss_limit")
+                            closed_trades.append(p)
+                print(f"  Daily loss ${realized_so_far:,.2f} exceeded limit, stopping")
+                break
 
-                events.append({"ts": entry_ts, "type": "buy", "price": entry_price_actual,
-                               "label": f"BUY {shares}sh [{label}]"})
-                events.append({"ts": exit_ts, "type": "sell", "price": result.exit_price,
-                               "label": f"{result.exit_reason.upper()} {shares}sh"})
+        # Force close any remaining open positions at end of day
+        last_bar_idx = len(sorted_times) - 1 if sorted_times else 0
+        for pos in open_positions:
+            if not pos.closed:
+                bars = cached_bars.get(pos.symbol, [])
+                if bars:
+                    last_bar = bars[-1]
+                    pos.force_close(last_bar["close"], len(bars) - 1, "force_close")
+                    closed_trades.append(pos)
 
-                # After exit, set cooldown and continue
-                search_start = exit_bar + 1
-                last_exit_reason = result.exit_reason
-                if result.exit_reason == "stop_loss":
-                    _stop_cooldown_bar = exit_bar + 3  # 3-bar cooldown after stop
-                else:
-                    _stop_cooldown_bar = 0
+        # Record results
+        for pos in closed_trades:
+            result = TradeResult(
+                symbol=pos.symbol,
+                date=str(date_key),
+                entry_price=pos.entry_price,
+                exit_price=pos.exit_price,
+                shares=pos.shares,
+                pnl=pos.pnl,
+                pnl_pct=pos.pnl_pct,
+                exit_reason=pos.exit_reason,
+                open_price=pos.open_price,
+                stop_price=pos.stop_price,
+                target_price=pos.target_price,
+                trailing_high=round(pos.highest, 4),
+                exit_bar_idx=pos.exit_bar_idx,
+                entry_bar_idx=pos.entry_bar_idx,
+                position_size=round(pos.entry_price * pos.shares, 2),
+                signal_type=pos.signal_type,
+            )
 
-            # Save chart data for this symbol
-            if events:
+            bars = cached_bars.get(pos.symbol, [])
+            entry_ts = _bar_ts_str(bars, pos.entry_bar_idx)
+            exit_ts = _bar_ts_str(bars, min(pos.exit_bar_idx, len(bars) - 1))
+
+            print(f"  {pos.symbol} [{pos.signal_type}] entry=${pos.entry_price:.4f}@{entry_ts} "
+                  f"exit=${pos.exit_price:.4f}@{exit_ts} ({pos.exit_reason}), "
+                  f"P&L=${pos.pnl:+,.2f} ({pos.pnl_pct:+.2%}) "
+                  f"[RVOL={pos.rvol:.1f}× stop={pos.stop_pct:.0%} tgt={pos.target_pct:.0%}]")
+
+            all_trades.append(result)
+            equity += result.pnl
+
+        # Save chart data
+        for pos in closed_trades:
+            sym_key = f"{pos.symbol} ({date_key})"
+            bars_1m_df = get_1min_bars(client, pos.symbol, date)
+            if not bars_1m_df.empty:
+                chart_bars = _bars_to_chart(bars_1m_df)
+                bars = cached_bars.get(pos.symbol, [])
+                entry_ts = _bar_ts_str(bars, pos.entry_bar_idx)
+                exit_ts = _bar_ts_str(bars, min(pos.exit_bar_idx, len(bars) - 1))
                 chart_entries[sym_key] = {
-                    "date": str(date_key), "bars_1m": chart_bars, "events": events,
-                    "entry_price": entry_price_actual,
-                    "stop_price": result.stop_price, "target_price": result.target_price,
-                    "pnl": sum(t.pnl for t in all_trades if t.symbol == symbol and t.date == str(date_key)),
-                    "open_price": open_price, "signal": signal_type,
+                    "date": str(date_key), "bars_1m": chart_bars,
+                    "events": [
+                        {"ts": entry_ts, "type": "buy", "price": pos.entry_price,
+                         "label": f"BUY {pos.shares}sh [{pos.signal_type}]"},
+                        {"ts": exit_ts, "type": "sell", "price": pos.exit_price,
+                         "label": f"{pos.exit_reason.upper()} {pos.shares}sh"},
+                    ],
+                    "entry_price": pos.entry_price,
+                    "stop_price": pos.stop_price, "target_price": pos.target_price,
+                    "pnl": pos.pnl,
+                    "open_price": pos.open_price, "signal": pos.signal_type,
                 }
 
     print(f"\n{'=' * 70}")
-    print(f"[rtg_1.0] Backtest complete. Final equity: ${equity:,.2f}")
+    print(f"[rtg_2.0] Backtest complete. Final equity: ${equity:,.2f}")
     print(f"Total trades: {len(all_trades)}")
     if all_trades:
         wins = [t for t in all_trades if t.pnl > 0]
@@ -631,11 +767,9 @@ def run_backtest(end_date=None, n_days=None):
         print(f"Win rate: {win_rate:.1%} ({len(wins)}W / {len(losses)}L)")
         print(f"Avg win: ${avg_win:+,.2f} | Avg loss: ${avg_loss:+,.2f}")
         print(f"Total P&L: ${total_pnl:+,.2f} ({total_pnl/config.INITIAL_CAPITAL:+.1%})")
-        # Exit reason breakdown
         from collections import Counter
         reasons = Counter(t.exit_reason for t in all_trades)
         print(f"Exit reasons: {dict(reasons)}")
-        # Signal type breakdown
         sigs = Counter(t.signal_type for t in all_trades)
         print(f"Signal types: {dict(sigs)}")
 

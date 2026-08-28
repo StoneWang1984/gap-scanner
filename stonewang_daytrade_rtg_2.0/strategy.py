@@ -1,14 +1,19 @@
-"""Strategy — stonewang_daytrade_rtg_1.0: Red-to-Green Volume Breakout.
+"""Strategy — stonewang_daytrade_rtg_2.0: RTG + Profit Protection + Progressive Trailing.
 
 Exit logic (evaluate_trade_rtg):
   1. Hard stop: bar low <= entry × (1 - RTG_STOP_PCT) → exit at stop price
-  2. Target: bar high >= entry × (1 + RTG_TARGET_PCT) → exit at target price
-  3. Trailing: after entry × (1 + RTG_TRAIL_ACTIVATE_PCT) reached,
-     trail at highest × (1 - RTG_TRAIL_PCT). If bar low <= trail → exit.
+  2. Trailing: after entry × (1 + RTG_TRAIL_ACTIVATE_PCT) reached,
+     trail at highest × (1 - trail_pct). If bar low <= trail → exit.
+     trail_pct tightens progressively as profit grows (PROGRESSIVE_TRAIL_TIERS).
+  3. Target: bar high >= entry × (1 + RTG_TARGET_PCT) → exit at target price
   4. Time limit: bi >= RTG_TIME_LIMIT_SEC // 60 → exit at bar close
   5. Force close: end of bars → exit at force_close_price or last close
 
 Priority: stop > trailing > target > time_limit (checked in this order per bar).
+
+rtg_2.0 additions vs rtg_1.0:
+  - Progressive trailing stop: as profit grows, trail_pct tightens
+  - (Daily profit protection is handled in backtest.py, not here)
 """
 
 from dataclasses import dataclass
@@ -32,7 +37,23 @@ class TradeResult:
     exit_bar_idx: int = -1
     position_size: float = 0.0
     entry_bar_idx: int = 0
-    signal_type: str = ""  # "rtg" (red-to-green) or "gapgo" (gap-and-go)
+    signal_type: str = ""
+
+
+def _get_progressive_trail(profit_pct, base_trail_pct):
+    """Get tightened trail_pct based on current profit and PROGRESSIVE_TRAIL_TIERS.
+
+    Tiers (from config): [(profit_threshold, trail_pct), ...]
+    e.g. [(0.15, 0.005), (0.10, 0.010), (0.05, 0.015)]
+    Sorted descending: first match wins.
+    """
+    tiers = getattr(config, "PROGRESSIVE_TRAIL_TIERS", [])
+    if not tiers:
+        return base_trail_pct
+    for threshold, trail in tiers:
+        if profit_pct >= threshold:
+            return trail
+    return base_trail_pct
 
 
 def evaluate_trade_rtg(
@@ -50,7 +71,7 @@ def evaluate_trade_rtg(
     trail_pct: float | None = None,
     time_limit_sec: int | None = None,
 ) -> TradeResult:
-    """RTG exit with adaptive per-trade parameters.
+    """RTG exit with progressive trailing stop (rtg_2.0).
 
     bars_after_entry: list of dicts with keys "high", "low", "close", "open", "volume", "timestamp"
     """
@@ -77,6 +98,7 @@ def evaluate_trade_rtg(
     highest = entry_price
     trail_active = False
     trail_stop = 0.0
+    current_trail_pct = _trail_pct
     exit_price = 0.0
     reason = ""
     exit_bi = 0
@@ -89,6 +111,11 @@ def evaluate_trade_rtg(
         if bar_high > highest:
             highest = bar_high
 
+        # Progressive trailing: adjust trail_pct based on current profit
+        if highest > entry_price:
+            profit_pct = (highest - entry_price) / entry_price
+            current_trail_pct = _get_progressive_trail(profit_pct, _trail_pct)
+
         # 1. Hard stop (highest priority)
         if bar_low <= stop_price:
             exit_price = stop_price
@@ -96,12 +123,12 @@ def evaluate_trade_rtg(
             exit_bi = bi
             break
 
-        # 2. Trailing stop (after activation)
+        # 2. Trailing stop (after activation, with progressive tightening)
         if not trail_active and highest >= trail_activate:
             trail_active = True
-            trail_stop = round(highest * (1 - _trail_pct), 4)
+            trail_stop = round(highest * (1 - current_trail_pct), 4)
         if trail_active:
-            new_trail = round(highest * (1 - _trail_pct), 4)
+            new_trail = round(highest * (1 - current_trail_pct), 4)
             if new_trail > trail_stop:
                 trail_stop = new_trail
             if bar_low <= trail_stop:

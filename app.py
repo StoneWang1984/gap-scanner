@@ -240,9 +240,10 @@ elif tab == "策略概览":
     col1, col2 = st.columns(2)
 
     with col1:
-        st.subheader("扫描条件 (每5分钟循环)")
+        st.subheader("扫描条件 (事件驱动)")
         scan_sec = getattr(config, "SCAN_INTERVAL_SEC", 300)
         min_rvol = getattr(config, "MIN_RVOL_TO_TRADE", 3.0)
+        max_green = getattr(config, "MAX_GREEN_BARS_TO_ENTER", 2)
         st.markdown(f"""
         - 跳空幅度 > **{config.GAP_THRESHOLD:.0%}**
         - 盘前成交量 > **{config.MIN_VOLUME:,}** 股
@@ -252,7 +253,7 @@ elif tab == "策略概览":
         - Crypto ETF过滤: **启用**
         - 候选股: **Top {config.MAX_CANDIDATES} by RVOL**
         - 最低RVOL: **{min_rvol:.1f}×** (低RVOL不入场)
-        - 扫描间隔: **每{scan_sec//60}分钟**
+        - 扫描模式: **事件驱动** (交易完成即扫描，无信号等{scan_sec//60}分钟)
         """)
 
         st.subheader("仓位管理 (All-in)")
@@ -262,43 +263,47 @@ elif tab == "策略概览":
         - 初始资金: **${config.INITIAL_CAPITAL:,.2f}**
         - 仓位: **ALL-IN** (购买力 × {all_in_ratio:.0%})
         - 最大同时持仓: **{config.MAX_POSITIONS}** 只
-        - 每周期尝试: **Top 3** 候选股
+        - 每次扫描尝试: **Top 3** 候选股
         """)
 
     with col2:
-        st.subheader("入场规则 (RTG + Breakout)")
+        st.subheader("入场规则 (RTG + Breakout + 限制)")
         st.markdown(f"""
         - RTG信号: close > open_price AND vol >= {config.RTG_VOLUME_MULT}x prior AND vol >= {config.RTG_MIN_VOLUME:,}
         - 突破信号: close > 今日最高价 AND vol >= {getattr(config, 'BREAKOUT_VOLUME_MULT', 1.5)}x prior (盘中量价齐升)
+        - 入场限制: 前{max_green}根连续绿bar后才触发则**不买入** (防追高)
         - 入场窗口: **{config.ENTRY_WINDOW_START} ~ {config.ENTRY_WINDOW_END} EST**
         - 选股: 最高RVOL优先
         """)
 
-        st.subheader("出场规则 (Fixed 1% Trailing)")
-        trail_pct = getattr(config, "TRAIL_PCT", 0.01)
-        trail_act = getattr(config, "TRAIL_ACTIVATE_PCT", 0.005)
+        st.subheader("出场规则 (Bar-based)")
         stop_pct = getattr(config, "STOP_PCT", 0.03)
+        exit_red = getattr(config, "EXIT_ON_RED_BAR", True)
+        exit_g2r = getattr(config, "EXIT_ON_GREEN_TO_RED", True)
+        exit_3g = getattr(config, "EXIT_ON_THREE_GREEN", True)
         st.markdown(f"""
-        - 硬止损: **{stop_pct:.0%}** (回补保护)
-        - Trailing激活: 利润 > **{trail_act:.1%}**
-        - Trailing: **{trail_pct:.0%}** (固定，无渐进)
+        - 首根红bar退出: **{'启用' if exit_red else '关闭'}** (买入后第一根bar是红bar→立即卖出)
+        - 绿转红退出: **{'启用' if exit_g2r else '关闭'}** (持仓出现红bar→卖出)
+        - 3根绿bar退出: **{'启用' if exit_3g else '关闭'}** (连续3根阳线→确认退出)
+        - 硬止损: **{stop_pct:.0%}** (极端行情兜底)
         - 目标: **{config.TARGET_PCT:.0%}** (安全阀)
-        - 周期结束前强制平仓
         - 强制平仓: **{config.FORCE_CLOSE_TIME} EST**
+        - 全天交易至3:59 (下午不停止)
         - 日损失熔断: **{config.MAX_DAILY_LOSS_PCT:.0%}**
         """)
 
     st.divider()
     st.subheader("RTG 3.0 设计理念")
     st.markdown(f"""
-    - **Cycle Machine**: 每{scan_sec//60}分钟一个循环：扫描→选股→全仓买入→1%追踪→强平→重复
+    - **Event-Driven**: 交易完成→立即扫描→选股→买入→监控→卖出→立即扫描，不浪费等待时间
     - **All-in**: 每次只用1只股票，95%购买力全仓，集中火力打最强标的
-    - **1% Fixed Trailing**: 不用渐进trailing，简单1%追踪止损，利润到0.5%即激活
-    - **3% Hard Stop**: 追踪未激活时的回补保护
+    - **Bar-based Exit**: 首根红bar退出 / 绿转红退出 / 3根绿bar确认退出，比1% trailing更直观
+    - **3% Hard Stop**: 极端行情兜底保护
+    - **Entry Restriction**: 只在前{max_green}根连续绿bar时买入，防止高位追涨
     - **RTG Signal**: 跳空高开股出现Red-to-Green(量价突破)→市价入场，过滤假突破
     - **Breakout Signal**: 盘中创新高+放量突破，捕获下午量价齐升机会
     - **Min RVOL 3×**: 低于3倍相对成交量的股票不入场，避免低信心标的
-    - **T+1兼容**: close_position()兜底处理锁定股
+    - **全天交易**: 从开盘到{config.FORCE_CLOSE_TIME}持续交易，下午不停止
     """)
 
 # ══════════════════════════════════════════════════════════════════
