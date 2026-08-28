@@ -27,6 +27,9 @@ from alpaca.data.historical.stock import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.data.enums import Adjustment, DataFeed
+from alpaca.data.historical.screener import ScreenerClient
+from alpaca.data.requests import MostActivesRequest, MarketMoversRequest
+from alpaca.data.enums import MostActivesBy, MarketType
 
 import importlib.util, sys, os
 
@@ -56,6 +59,7 @@ _ALPACA_PAPER = getattr(config, "ALPACA_PAPER", False)
 EXCLUDE_SYMBOLS = getattr(config, "EXCLUDE_SYMBOLS", set())
 trading_client = TradingClient(config.ALPACA_API_KEY, config.ALPACA_SECRET_KEY, paper=_ALPACA_PAPER)
 data_client = StockHistoricalDataClient(config.ALPACA_API_KEY, config.ALPACA_SECRET_KEY)
+screener_client = ScreenerClient(config.ALPACA_API_KEY, config.ALPACA_SECRET_KEY)
 
 _log_file = None
 _state_file = os.path.join(_parent_dir, "live_state.json")
@@ -577,6 +581,153 @@ def scan_gaps(target_date):
     return candidates
 
 
+def scan_volume_breakouts(target_date, existing_symbols=None):
+    """Scan for intraday volume breakouts using Alpaca Screener API.
+
+    Uses get_most_actives() and get_market_movers() to discover stocks
+    with unusual intraday volume that weren't caught by the gap scan.
+
+    Returns list of candidate dicts: {"symbol", "open_price", "prev_close", "gap_pct", "rvol"}
+    """
+    if existing_symbols is None:
+        existing_symbols = set()
+
+    top_n = getattr(config, "VOLUME_SCAN_TOP_N", 30)
+    movers_top_n = getattr(config, "VOLUME_SCAN_MOVERS_TOP_N", 20)
+    min_rvol = getattr(config, "VOLUME_SCAN_MIN_RVOL", 3.0)
+    price_min = getattr(config, "VOLUME_SCAN_PRICE_MIN", 0.50)
+    price_max = getattr(config, "VOLUME_SCAN_PRICE_MAX", 20.0)
+
+    # ── Get most active stocks and top movers ──
+    active_symbols = {}  # symbol -> cumulative_volume
+    try:
+        req = MostActivesRequest(by=MostActivesBy.VOLUME, top=top_n)
+        result = screener_client.get_most_actives(req)
+        for s in result.most_actives:
+            active_symbols[s.symbol] = float(s.volume)
+        log(f"Volume scan: {len(result.most_actives)} most-actives from screener")
+    except Exception as e:
+        log(f"Volume scan: most-actives error: {e}")
+
+    try:
+        req2 = MarketMoversRequest(market_type=MarketType.STOCKS, top=movers_top_n)
+        movers = screener_client.get_market_movers(req2)
+        for m in movers.gainer:
+            if m.symbol not in active_symbols:
+                active_symbols[m.symbol] = 0
+        log(f"Volume scan: {len(movers.gainer)} top gainers from screener")
+    except Exception as e:
+        log(f"Volume scan: market-movers error: {e}")
+
+    if not active_symbols:
+        return []
+
+    # ── Filter out already-monitored, leveraged, crypto ETF ──
+    new_symbols = []
+    for sym in active_symbols:
+        if sym in existing_symbols:
+            continue
+        if sym in EXCLUDE_SYMBOLS:
+            continue
+        if is_leveraged_etf(sym):
+            continue
+        if is_crypto_etf(sym):
+            continue
+        new_symbols.append(sym)
+
+    if not new_symbols:
+        log(f"Volume scan: all {len(active_symbols)} symbols already monitored or filtered")
+        return []
+
+    log(f"Volume scan: {len(new_symbols)} new symbols to evaluate (from {len(active_symbols)})")
+
+    # ── Get snapshots for open_price, prev_close, current volume ──
+    from alpaca.data.requests import StockSnapshotRequest
+
+    snapshots = {}
+    batch_size = 50
+    for i in range(0, len(new_symbols), batch_size):
+        batch = new_symbols[i:i + batch_size]
+        try:
+            req = StockSnapshotRequest(symbol_or_symbols=batch,
+                                       feed=getattr(config, "DATA_FEED_OBJ", DataFeed.SIP))
+            result = data_client.get_stock_snapshot(req)
+            snapshots.update(result)
+        except Exception as e:
+            log(f"Volume scan: snapshot error batch {i}: {e}")
+
+    if not snapshots:
+        log("Volume scan: no snapshots returned")
+        return []
+
+    # ── Compute intraday RVOL ──
+    now_est = dt.datetime.now(_EST)
+    mkt_open_min = 9 * 60 + 30   # 570
+    mkt_close_min = 16 * 60      # 960
+    current_min = now_est.hour * 60 + now_est.minute
+    elapsed_min = max(1, current_min - mkt_open_min)
+    total_min = mkt_close_min - mkt_open_min  # 390
+    fraction_of_day = elapsed_min / total_min
+
+    avg_vols = _fetch_20d_avg_volumes(new_symbols, target_date)
+
+    candidates = []
+    for sym in new_symbols:
+        snap = snapshots.get(sym)
+        if not snap or not snap.daily_bar or not snap.previous_daily_bar:
+            continue
+
+        daily_bar = snap.daily_bar
+        prev_bar = snap.previous_daily_bar
+
+        open_price = float(daily_bar.open)
+        prev_close = float(prev_bar.close)
+        current_volume = float(daily_bar.volume)
+        prev_avg_vol = avg_vols.get(sym, float(prev_bar.volume))
+
+        current_price = float(daily_bar.close) if daily_bar.close else open_price
+        if not (price_min <= current_price <= price_max):
+            continue
+        if not (price_min <= open_price <= price_max):
+            continue
+
+        if prev_avg_vol <= 0:
+            continue
+        expected_vol = prev_avg_vol * fraction_of_day
+        if expected_vol <= 0:
+            continue
+        intraday_rvol = current_volume / expected_vol
+
+        if intraday_rvol < min_rvol:
+            continue
+
+        if prev_close <= 0:
+            continue
+        gap_pct = (open_price / prev_close) - 1.0
+
+        candidates.append({
+            "symbol": sym,
+            "open_price": open_price,
+            "prev_close": prev_close,
+            "gap_pct": gap_pct,
+            "rvol": intraday_rvol,
+        })
+
+    candidates.sort(key=lambda c: c["rvol"], reverse=True)
+    max_candidates = getattr(config, "MAX_CANDIDATES", 40)
+    candidates = candidates[:max_candidates]
+
+    if candidates:
+        log(f"Volume breakout: {len(candidates)} new candidates")
+        for c in candidates:
+            log(f"  {c['symbol']}: RVOL={c['rvol']:.1f}×, gap={c['gap_pct']:+.1%}, "
+                f"open=${c['open_price']:.4f}")
+    else:
+        log("Volume breakout: no new candidates qualified")
+
+    return candidates
+
+
 def backfill_1min_bars(symbols, target_date):
     mkt_open = pd.Timestamp(f"{target_date.date()} {config.MARKET_OPEN}", tz="America/New_York")
     now = pd.Timestamp.now(tz="America/New_York")
@@ -688,7 +839,17 @@ def run_trading_day(target_date):
         pass
 
     candidates = []
-    candidates = scan_gaps(target_date)
+    # Use volume breakout scan if restarting during market hours
+    now_est = dt.datetime.now(_EST)
+    market_open_time = dt.datetime.combine(target_date.date(), dt.time(9, 30), tzinfo=_EST)
+    if now_est >= market_open_time:
+        log("Midday restart detected — using volume breakout scan instead of gap scan")
+        candidates = scan_volume_breakouts(target_date, existing_symbols=set())
+        if not candidates:
+            log("Volume breakout found 0 candidates, falling back to gap scan")
+            candidates = scan_gaps(target_date)
+    else:
+        candidates = scan_gaps(target_date)
     if not candidates:
         # Fallback: restore candidates from previous state if scan finds nothing
         if prev_state_for_restart.get("candidates"):
@@ -768,6 +929,25 @@ def run_trading_day(target_date):
                 entry_count[sp_sym] = entry_count.get(sp_sym, 0) + 1
     except Exception as e:
         log(f"Could not restore positions: {e}")
+
+    # Restore exit tracking from trades_detail (prevent re-buying already-traded stocks)
+    try:
+        with open(_state_file) as f:
+            _restart_state = json.load(f)
+        for t in _restart_state.get("trades_detail", []):
+            sym = t.get("symbol", "")
+            if sym and sym not in _last_exit_ts:
+                _last_exit_ts[sym] = time.time()
+                entry_count[sym] = entry_count.get(sym, 0) + 1
+            reason = t.get("exit_reason", t.get("reason", ""))
+            if "stop" in reason.lower() and sym:
+                _stop_exit_ts[sym] = time.time()
+        if _last_exit_ts:
+            log(f"Restored exit tracking for {len(_last_exit_ts)} symbols from trades_detail "
+                f"(stop_exit: {list(_stop_exit_ts.keys())})")
+    except Exception:
+        pass
+
     entry_rejected = set()  # Stocks rejected by Alpaca (retry when buying power frees)
     daily_trades = 0
     trades_detail = []
@@ -784,35 +964,33 @@ def run_trading_day(target_date):
              "ws_connected": True, "daily_trades": 0, "candidates": candidates,
              "positions": [], "trades_detail": []}
 
-    # Periodic rescan timer (every 30 min, discover new gap stocks intraday)
-    _last_rescan_ts = time.time()
-    _rescan_interval = 1800  # 30 minutes
+    # Periodic volume breakout scan (every 5 min, discover new intraday opportunities)
+    _last_vol_scan_ts = time.time()
+    _vol_scan_interval = getattr(config, "VOLUME_SCAN_INTERVAL", 300)
 
     while True:
         now = dt.datetime.now(_EST)
         if now >= market_close_dt:
             break
 
-        # Periodic rescan: discover new gap stocks every 30 min
-        if time.time() - _last_rescan_ts >= _rescan_interval:
-            _last_rescan_ts = time.time()
+        # Periodic volume breakout scan: discover new intraday opportunities
+        if time.time() - _last_vol_scan_ts >= _vol_scan_interval:
+            _last_vol_scan_ts = time.time()
             try:
-                new_candidates = scan_gaps(target_date)
+                monitored_syms = {c["symbol"] for c in candidates}
+                new_candidates = scan_volume_breakouts(target_date, existing_symbols=monitored_syms)
                 if new_candidates:
-                    old_syms = {c["symbol"] for c in candidates}
-                    added = [c for c in new_candidates if c["symbol"] not in old_syms]
-                    if added:
-                        candidates.extend(added)
-                        new_syms = [c["symbol"] for c in added]
-                        extra = f" ({len(new_syms)-5} more)" if len(new_syms) > 5 else ""
-                        log(f"Rescan: added {len(added)} new candidates: {new_syms[:5]}{extra}")
-                        backfill_1min_bars(new_syms, target_date)
-                        all_syms = [c["symbol"] for c in candidates]
-                        restart_ws_stream(all_syms)
-                    else:
-                        log(f"Rescan: no new candidates ({len(candidates)} total)")
+                    candidates.extend(new_candidates)
+                    new_syms = [c["symbol"] for c in new_candidates]
+                    extra = f" ({len(new_syms)-5} more)" if len(new_syms) > 5 else ""
+                    log(f"Volume breakout: added {len(new_candidates)} new candidates: {new_syms[:5]}{extra}")
+                    backfill_1min_bars(new_syms, target_date)
+                    all_syms = [c["symbol"] for c in candidates]
+                    restart_ws_stream(all_syms)
+                else:
+                    log(f"Volume breakout: no new candidates ({len(candidates)} total)")
             except Exception as e:
-                log(f"Rescan error: {e}")
+                log(f"Volume breakout scan error: {e}")
 
         if now >= force_close_dt:
             log("Force close time reached!")
@@ -1185,12 +1363,15 @@ def main():
 
     log(f"Using {config.DATA_FEED.upper()} data feed")
     log("=" * 60)
-    log(f"stonewang RTG 2.0 Live Trading -- Profit Protection + Progressive Trailing")
+    log(f"stonewang RTG 2.0 Live Trading -- Profit Protection + Progressive Trailing + Volume Breakout")
     log(f"Entry: RTG (vol >= {config.RTG_VOLUME_MULT}x prior) / GapGo DISABLED")
     log(f"Exit: adaptive by RVOL tier | time {config.RTG_TIME_LIMIT_SEC}s")
     log(f"Window: {config.ENTRY_WINDOW_START}-{config.ENTRY_WINDOW_END} EST")
     sizing_str = "/".join(f"{p:.0%}" for _, p in config.RVOL_SIZING_TIERS)
     log(f"Sizing: RVOL-weighted ({sizing_str}) | max {config.MAX_POSITIONS} concurrent | re-entry max {config.RTG_REENTRY_MAX}")
+    vol_int = getattr(config, "VOLUME_SCAN_INTERVAL", 300)
+    log(f"Volume breakout: every {vol_int}s, min RVOL={getattr(config, 'VOLUME_SCAN_MIN_RVOL', 3.0):.1f}×, "
+        f"price ${getattr(config, 'VOLUME_SCAN_PRICE_MIN', 0.5):.2f}-${getattr(config, 'VOLUME_SCAN_PRICE_MAX', 20.0):.2f}")
     log("=" * 60)
 
     if not test_connectivity():

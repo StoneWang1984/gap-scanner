@@ -44,6 +44,14 @@ MAX_CANDIDATES = 40  # Top 40 by RVOL — wide monitoring for full-day trading
 RVOL_LOOKBACK_DAYS = 20  # 20-day average volume for RVOL calculation
 RTG_ONLY = True  # Only trade RTG signals — GapGo has 34% win rate (removed)
 
+# ── Volume breakout scan (intraday opportunity discovery) ───────────
+VOLUME_SCAN_INTERVAL = 300      # seconds between volume breakout scans (5 min)
+VOLUME_SCAN_TOP_N = 30          # top N most active stocks from screener
+VOLUME_SCAN_MOVERS_TOP_N = 20   # top N market movers from screener
+VOLUME_SCAN_MIN_RVOL = 3.0      # minimum intraday RVOL to qualify as breakout
+VOLUME_SCAN_PRICE_MIN = 0.50    # relaxed price floor (vs $1 for gap scan)
+VOLUME_SCAN_PRICE_MAX = 20.0    # same ceiling as gap scan
+
 # ── RVOL-weighted position sizing ────────────────────────────────────
 # (rvol_min, equity_pct) — higher RVOL = bigger conviction = bigger size
 # Concentrate on A+ setups: top traders put 50%+ on the best idea
