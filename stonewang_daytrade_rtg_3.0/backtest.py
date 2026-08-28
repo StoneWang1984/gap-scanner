@@ -217,16 +217,13 @@ def _bar_ts_str(bars_list, idx):
     return "00:00"
 
 
-# ── Entry signal detection (with consecutive green bar check) ─────
+# ── Entry signal detection (same as rtg_2.0) ─────
 
 def find_rtg_entry(bars_list, open_price, start_idx=0, min_volume=None):
     if min_volume is None:
         min_volume = config.RTG_MIN_VOLUME
     entry_start = getattr(config, "ENTRY_WINDOW_START", "09:30")
     entry_end = getattr(config, "ENTRY_WINDOW_END", "15:55")
-    max_green = getattr(config, "MAX_GREEN_BARS_TO_ENTER", 2)
-    min_gain_pct = getattr(config, "RTG_MIN_BAR_GAIN_PCT", 0.01)
-    confirm_bars = getattr(config, "ENTRY_CONFIRM_BARS", 2)
 
     for i in range(max(start_idx, 1), len(bars_list)):
         bar = bars_list[i]
@@ -238,29 +235,10 @@ def find_rtg_entry(bars_list, open_price, start_idx=0, min_volume=None):
         if not (start_time <= bar_time <= end_time):
             continue
 
-        # B: 2.5x volume multiplier (from config)
-        # D: bar must gain >=1% vs open_price
-        if (bar["close"] > open_price * (1 + min_gain_pct)
+        if (bar["close"] > open_price
                 and prev["volume"] > 0
                 and bar["volume"] >= config.RTG_VOLUME_MULT * prev["volume"]
                 and bar["volume"] >= min_volume):
-            # C: Require previous bar also confirms (close > open_price with volume)
-            if confirm_bars >= 2 and i >= 2:
-                prev2 = bars_list[i - 2]
-                if not (prev["close"] > open_price
-                        and prev2["volume"] > 0
-                        and prev["volume"] >= config.RTG_VOLUME_MULT * prev2["volume"]
-                        and prev["volume"] >= min_volume):
-                    continue
-            # Check consecutive green bars before entry (don't chase)
-            consecutive_green = 0
-            for j in range(i - 1, -1, -1):
-                if bars_list[j]["close"] > bars_list[j]["open"]:
-                    consecutive_green += 1
-                else:
-                    break
-            if consecutive_green >= max_green:
-                continue
             entry_price = round(bar["close"] * 1.001, 4)
             return entry_price, i, "rtg"
 
@@ -273,11 +251,8 @@ def find_breakout_entry(bars_list, open_price, start_idx=0, min_volume=None):
     if min_volume is None:
         min_volume = config.RTG_MIN_VOLUME
     min_bars = getattr(config, "BREAKOUT_MIN_BARS", 5)
-    vol_mult = getattr(config, "BREAKOUT_VOLUME_MULT", 2.5)
+    vol_mult = getattr(config, "BREAKOUT_VOLUME_MULT", 1.5)
     entry_at_close = getattr(config, "BREAKOUT_ENTRY_AT_CLOSE", True)
-    max_green = getattr(config, "MAX_GREEN_BARS_TO_ENTER", 2)
-    min_gain_pct = getattr(config, "RTG_MIN_BAR_GAIN_PCT", 0.01)
-    confirm_bars = getattr(config, "ENTRY_CONFIRM_BARS", 2)
 
     day_high = 0.0
     for i in range(max(start_idx, 1), len(bars_list)):
@@ -289,28 +264,9 @@ def find_breakout_entry(bars_list, open_price, start_idx=0, min_volume=None):
             continue
 
         if (bar["close"] > day_high
-                and bar["close"] > open_price * (1 + min_gain_pct)
                 and prev["volume"] > 0
                 and bar["volume"] >= vol_mult * prev["volume"]
                 and bar["volume"] >= min_volume):
-            # C: Require previous bar also confirms
-            if confirm_bars >= 2 and i >= 2:
-                prev2 = bars_list[i - 2]
-                if not (prev["close"] > open_price
-                        and prev2["volume"] > 0
-                        and prev["volume"] >= vol_mult * prev2["volume"]
-                        and prev["volume"] >= min_volume):
-                    day_high = max(day_high, bar["high"])
-                    continue
-            consecutive_green = 0
-            for j in range(i - 1, -1, -1):
-                if bars_list[j]["close"] > bars_list[j]["open"]:
-                    consecutive_green += 1
-                else:
-                    break
-            if consecutive_green >= max_green:
-                day_high = max(day_high, bar["high"])
-                continue
             if entry_at_close:
                 entry_price = round(bar["close"] * 1.001, 4)
             else:
@@ -339,10 +295,22 @@ def find_entry_signal(bars_list, open_price, start_idx=0, min_volume=None):
 class BtResult:
     pass
 
+def _get_rvol_exit_tier(rvol):
+    """Get (stop_pct, target_pct) from RVOL_EXIT_TIERS based on RVOL."""
+    tiers = getattr(config, "RVOL_EXIT_TIERS", [(0.0, 0.05, 0.30)])
+    stop_pct = config.STOP_PCT
+    target_pct = config.TARGET_PCT
+    for rvol_min, s, t in tiers:
+        if rvol >= rvol_min:
+            stop_pct = s
+            target_pct = t
+    return stop_pct, target_pct
+
+
 def evaluate_bar_exit(entry_price, shares, bars_after_entry, symbol="",
                       open_price=0.0, force_close_price=None, entry_bar_idx=0,
-                      signal_type=""):
-    """Bar-based exit: red_bar_exit / green_to_red / three_green_bars / stop / target / force_close."""
+                      signal_type="", rvol=0.0):
+    """Exit: green_to_red (1 red bar) / RVOL-adaptive stop / target / force_close."""
     if not bars_after_entry or entry_price <= 0 or shares <= 0:
         r = BtResult()
         r.symbol = symbol; r.entry_price = entry_price; r.exit_price = entry_price
@@ -352,14 +320,13 @@ def evaluate_bar_exit(entry_price, shares, bars_after_entry, symbol="",
         r.signal_type = signal_type; r.date = ""
         return r
 
-    stop_price = round(entry_price * (1 - config.STOP_PCT), 4)
-    target_price = round(entry_price * (1 + config.TARGET_PCT), 4)
+    # RVOL-adaptive stop/target
+    stop_pct, target_pct = _get_rvol_exit_tier(rvol)
+    stop_price = round(entry_price * (1 - stop_pct), 4)
+    target_price = round(entry_price * (1 + target_pct), 4)
     slippage = getattr(config, "SLIPPAGE_EXIT_PCT", 0.0)
     highest = entry_price
     is_first_bar = True
-    green_bar_count = 0
-    red_bar_count = 0  # E: consecutive red bar counter for green_to_red
-    g2r_consec = getattr(config, "GREEN_TO_RED_CONSEC_BARS", 2)
     exit_price = 0.0
     reason = ""
     exit_bi = 0
@@ -375,23 +342,28 @@ def evaluate_bar_exit(entry_price, shares, bars_after_entry, symbol="",
         is_red = not is_green
         exit_triggered = False
 
-        if is_first_bar and is_red and getattr(config, "EXIT_ON_RED_BAR", True):
-            exit_price = bar_close; reason = "red_bar_exit"; exit_bi = bi; exit_triggered = True
-        # E: green_to_red requires 2 consecutive red bars
-        if not exit_triggered and not is_first_bar and is_red and getattr(config, "EXIT_ON_GREEN_TO_RED", True):
-            red_bar_count += 1
-            if red_bar_count >= g2r_consec:
+        # Green-to-red: any red bar after the first bar → sell
+        if not is_first_bar and is_red and getattr(config, "EXIT_ON_GREEN_TO_RED", True):
+            g2r_consec = getattr(config, "GREEN_TO_RED_CONSEC_BARS", 1)
+            # For 1-bar g2r, exit immediately on any red bar
+            if g2r_consec <= 1:
                 exit_price = bar_close; reason = "green_to_red"; exit_bi = bi; exit_triggered = True
-        elif not exit_triggered and not is_first_bar and is_green:
-            red_bar_count = 0  # Reset on green bar
-        if not exit_triggered and is_green and getattr(config, "EXIT_ON_THREE_GREEN", True):
-            green_bar_count += 1
-            if green_bar_count >= 3:
-                exit_price = bar_close; reason = "three_green_bars"; exit_bi = bi; exit_triggered = True
-        elif not exit_triggered and is_red:
-            green_bar_count = 0
+            else:
+                # Multi-bar g2r (if configured)
+                red_count = 1
+                for k in range(bi - 1, -1, -1):
+                    if bars_after_entry[k]["close"] < bars_after_entry[k]["open"]:
+                        red_count += 1
+                    else:
+                        break
+                if red_count >= g2r_consec:
+                    exit_price = bar_close; reason = "green_to_red"; exit_bi = bi; exit_triggered = True
+
+        # RVOL-adaptive stop loss
         if not exit_triggered and bar_low <= stop_price:
             exit_price = stop_price; reason = "stop_loss"; exit_bi = bi; exit_triggered = True
+
+        # Target
         if not exit_triggered and bar_high >= target_price:
             exit_price = target_price; reason = "target"; exit_bi = bi; exit_triggered = True
 
@@ -407,7 +379,7 @@ def evaluate_bar_exit(entry_price, shares, bars_after_entry, symbol="",
         reason = "force_close"
         exit_bi = len(bars_after_entry) - 1
 
-    if slippage > 0 and reason not in ("stop_loss", "red_bar_exit", "green_to_red", "three_green_bars", "target"):
+    if slippage > 0 and reason not in ("stop_loss", "green_to_red", "target"):
         exit_price = round(exit_price * (1 - slippage), 4)
 
     pnl = round((exit_price - entry_price) * shares, 2)
@@ -518,6 +490,11 @@ def run_backtest(end_date=None, n_days=None):
         scan_idx = 0
         daily_trades_count = 0
         max_daily_trades = getattr(config, "MAX_DAILY_TRADES", 0)
+        # Daily profit protection
+        max_daily_profit = 0.0
+        profit_protect = getattr(config, "DAILY_PROFIT_PROTECT_ENABLED", False)
+        profit_ratio = getattr(config, "DAILY_PROFIT_PROTECT_RATIO", 0.85)
+        profit_min = getattr(config, "DAILY_PROFIT_PROTECT_MIN", 5.0)
 
         while True:
             scan_idx += 1
@@ -525,6 +502,12 @@ def run_backtest(end_date=None, n_days=None):
                 break
             if max_daily_trades > 0 and daily_trades_count >= max_daily_trades:
                 break
+            # Daily profit protection check
+            if profit_protect and max_daily_profit >= profit_min:
+                if daily_loss <= -(max_daily_profit * (1 - profit_ratio)):
+                    print(f"  [Profit Protect] daily P&L ${daily_loss:+,.2f} dropped below "
+                          f"{profit_ratio:.0%} of max ${max_daily_profit:+,.2f}, stopping")
+                    break
 
             # Try top candidates (by RVOL)
             max_attempts = getattr(config, "MAX_ENTRY_ATTEMPTS", 3)
@@ -592,12 +575,13 @@ def run_backtest(end_date=None, n_days=None):
                     max_attempts -= 1
                     continue
 
-                # Evaluate with bar-based exit
+                # Evaluate with bar-based exit (pass rvol for adaptive stop/target)
                 trade_result = evaluate_bar_exit(
                     entry_price=entry_price_actual, shares=shares,
                     bars_after_entry=cycle_bars, symbol=symbol,
                     open_price=open_price, force_close_price=force_close_price,
                     entry_bar_idx=entry_bar_idx, signal_type=signal_type,
+                    rvol=rvol,
                 )
                 trade_result.date = str(date_key)
                 trade_result.open_price = open_price
@@ -624,6 +608,8 @@ def run_backtest(end_date=None, n_days=None):
                 all_trades.append(trade_result)
                 equity += trade_result.pnl
                 daily_loss += trade_result.pnl
+                if daily_loss > max_daily_profit:
+                    max_daily_profit = daily_loss
                 daily_trades_count += 1
                 entered = True
                 break  # One position at a time

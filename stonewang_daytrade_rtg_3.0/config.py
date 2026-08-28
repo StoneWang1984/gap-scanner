@@ -4,9 +4,10 @@ Fundamental design:
   1. Event-driven: scan -> buy -> monitor -> sell -> immediately scan again
   2. Single position: at most ONE position at a time
   3. All-in: buy with ALL available capital (no RVOL tiered sizing)
-  4. Exit rules: red bar exit / green-to-red / 3 green bars / 3% hard stop
-  5. Entry restriction: only buy on 1st or 2nd consecutive green bar
-  6. Full-day trading until force close at 15:59
+  4. Exit: green-to-red (1 red bar) / RVOL-adaptive stop / target
+  5. Entry: RTG signal (close > open, 1.5x volume) + Breakout
+  6. Daily profit protection: same as rtg_2.0
+  7. Full-day trading until force close at 15:59
 """
 
 import os
@@ -52,40 +53,46 @@ ALL_IN_BP_RATIO = 0.95          # Buy with 95% of available buying power
 MAX_POSITIONS = 1               # Exactly one position at a time
 MAX_ENTRY_ATTEMPTS = 3          # Try top 3 candidates per scan
 
-# ── Exit: Bar-based exit rules (rtg_3.0) ─────────────────────────────
-EXIT_ON_RED_BAR = True            # First bar after entry is red → immediate sell
-EXIT_ON_GREEN_TO_RED = True       # Green-to-red transition → sell
-GREEN_TO_RED_CONSEC_BARS = 2      # Require 2 consecutive red bars for green_to_red exit
-EXIT_ON_THREE_GREEN = True        # 3 consecutive green bars → sell
-STOP_PCT = 0.03                  # 3% hard stop (backstop for extreme moves)
-TARGET_PCT = 0.50                # 50% target (safety valve)
+# ── Exit: green-to-red only + RVOL-adaptive stop (same as rtg_2.0) ────
+EXIT_ON_RED_BAR = False           # Disabled — only green_to_red exits
+EXIT_ON_GREEN_TO_RED = True       # Green-to-red transition (1 red bar) → sell
+GREEN_TO_RED_CONSEC_BARS = 1      # 1 red bar = exit immediately
+EXIT_ON_THREE_GREEN = False       # Disabled — let winners run
 
-# ── Entry restriction ────────────────────────────────────────────────
-MAX_GREEN_BARS_TO_ENTER = 2       # Only enter on 1st or 2nd consecutive green bar
+# RVOL-adaptive stop/target (same as rtg_2.0)
+RVOL_EXIT_TIERS = [
+    (10.0, 0.07, 0.50),  # High RVOL: 7% stop, 50% target
+    (5.0,  0.05, 0.30),  # Medium: 5% stop, 30% target
+    (0.0,  0.03, 0.15),  # Low: 3% stop, 15% target
+]
 
-# Legacy trail params (unused in 3.0 bar-based exit, kept for compatibility)
+# Fallback defaults (used when RVOL tier not matched)
+STOP_PCT = 0.05
+TARGET_PCT = 0.30
+
+# ── Entry restriction: disabled (same as rtg_2.0) ────────────────────
+MAX_GREEN_BARS_TO_ENTER = 999    # Effectively no restriction
+
+# Legacy trail params (unused in 3.0, kept for compatibility)
 TRAIL_PCT = 0.01
 TRAIL_ACTIVATE_PCT = 0.005
 
-# ── Intraday breakout signal (rtg_3.0) ──────────────────────────────
-# Detects afternoon breakouts: stock makes new day high + volume spike
-# Catches momentum that develops after the opening drive fades
+# ── Intraday breakout signal ────────────────────────────────────────
 BREAKOUT_ENABLED = True           # Enable intraday breakout signal
 BREAKOUT_MIN_BARS = 5             # Min bars before checking (need history for day_high)
-BREAKOUT_VOLUME_MULT = 2.5        # Volume multiplier (same as RTG)
+BREAKOUT_VOLUME_MULT = 1.5        # Same as RTG (same as rtg_2.0)
 BREAKOUT_ENTRY_AT_CLOSE = True    # Enter at breakout close price (not open)
 
-# ── No daily profit protection (rtg_3.0) ─────────────────────────────
-DAILY_PROFIT_PROTECT_ENABLED = False
-DAILY_PROFIT_PROTECT_RATIO = 0.85
-DAILY_PROFIT_PROTECT_MIN = 5.0
+# ── Daily profit protection (same as rtg_2.0) ────────────────────────
+DAILY_PROFIT_PROTECT_ENABLED = True
+DAILY_PROFIT_PROTECT_RATIO = 0.85    # When profit drops to 85% of max, force close all
+DAILY_PROFIT_PROTECT_MIN = 5.0       # Only activate when max profit >= $5
 
-# ── No progressive trailing (rtg_3.0) ───────────────────────────────
+# ── No progressive trailing (rtg_3.0 uses bar exit, not trailing) ────
 PROGRESSIVE_TRAIL_TIERS = []
 
-# ── RVOL sizing/exit tiers (flat for rtg_3.0) ───────────────────────
+# ── RVOL sizing (flat for rtg_3.0 — always all-in) ──────────────────
 RVOL_SIZING_TIERS = [(0.0, 1.0)]  # Always 100% (all-in)
-RVOL_EXIT_TIERS = [(0.0, 0.03, 0.50, 0.005, 0.01)]  # Flat: 3% stop, 50% target, +0.5% activate, 1% trail
 
 # ── Re-entry: NONE ───────────────────────────────────────────────────
 RTG_REENTRY_ALLOWED = False
@@ -95,23 +102,23 @@ REENTRY_MAX_PRICE_VS_OPEN = 1.15
 REENTRY_MIN_PULLBACK = 0.03
 REENTRY_COOLDOWN_SEC = 120
 
-# ── Entry parameters ─────────────────────────────────────────────────
+# ── Entry parameters (same as rtg_2.0) ───────────────────────────────
 ENTRY_WINDOW_START = "09:30"
-ENTRY_WINDOW_END = "15:55"       # Slightly earlier to avoid late entries
-RTG_VOLUME_MULT = 2.5
+ENTRY_WINDOW_END = "15:55"
+RTG_VOLUME_MULT = 1.5            # Same as rtg_2.0
 RTG_MIN_VOLUME = 30000
 RTG_MIN_PRICE_GAIN = 0.0
-RTG_MIN_BAR_GAIN_PCT = 0.01     # Bar must gain >=1% vs open_price to qualify as RTG signal
+RTG_MIN_BAR_GAIN_PCT = 0.0      # No minimum bar gain (same as rtg_2.0)
 RTG_ENTRY_AT_OPEN = True
-ENTRY_CONFIRM_BARS = 2           # Require 2 consecutive bars confirming RTG signal
+ENTRY_CONFIRM_BARS = 1           # No 2-bar confirmation (same as rtg_2.0)
 
 # GapGo disabled
 GAPGO_MIN_FIRST_BAR_VOL = 99999999
 GAPGO_MIN_BREAKOUT_VOL = 99999999
 
-# ── Exit parameters (defaults — overridden by flat values above) ─────
-RTG_STOP_PCT = 0.03
-RTG_TARGET_PCT = 0.50
+# ── Exit parameters (defaults — overridden by RVOL_EXIT_TIERS) ─────
+RTG_STOP_PCT = 0.05
+RTG_TARGET_PCT = 0.30
 RTG_TIME_LIMIT_SEC = 0
 RTG_TRAIL_ACTIVATE_PCT = 0.005
 RTG_TRAIL_PCT = 0.01

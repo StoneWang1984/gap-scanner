@@ -601,28 +601,8 @@ def check_rtg_entry(symbol, open_price, bars, after_time=None, min_volume=None):
         ph = prev["high"]
         po = prev["open"]
         pc = prev["close"]
-        min_gain_pct = getattr(config, "RTG_MIN_BAR_GAIN_PCT", 0.01)
-        confirm_bars = getattr(config, "ENTRY_CONFIRM_BARS", 2)
-        # B: 2.5x volume, D: min 1% gain vs open_price
-        if bc > open_price * (1 + min_gain_pct) and pv > 0 and bv >= config.RTG_VOLUME_MULT * pv and bv >= min_volume:
-            # C: Require previous bar also confirms (close > open_price with volume)
-            if confirm_bars >= 2 and i >= 2:
-                prev2 = bars[i - 2]
-                if not (prev["close"] > open_price
-                        and prev2["volume"] > 0
-                        and prev["volume"] >= config.RTG_VOLUME_MULT * prev2["volume"]
-                        and prev["volume"] >= min_volume):
-                    continue
-            # Check consecutive green bars before entry (don't chase)
-            max_green = getattr(config, "MAX_GREEN_BARS_TO_ENTER", 2)
-            consecutive_green = 0
-            for j in range(i - 1, -1, -1):
-                if bars[j]["close"] > bars[j]["open"]:
-                    consecutive_green += 1
-                else:
-                    break
-            if consecutive_green >= max_green:
-                continue  # Already riding high, skip this entry
+        # Same as rtg_2.0: close > open_price, 1.5x volume
+        if bc > open_price and pv > 0 and bv >= config.RTG_VOLUME_MULT * pv and bv >= min_volume:
             entry = round(open_price * 1.001, 4) if getattr(config, "RTG_ENTRY_AT_OPEN", True) else round(bc, 4)
             return entry, True, "rtg"
         if pc > po and pv >= config.GAPGO_MIN_FIRST_BAR_VOL and bh > ph and bv >= config.GAPGO_MIN_BREAKOUT_VOL:
@@ -663,30 +643,8 @@ def check_breakout_entry(symbol, bars, min_volume=None):
         bc = bar["close"]
         bv = bar["volume"]
         pv = prev["volume"]
-        min_gain_pct = getattr(config, "RTG_MIN_BAR_GAIN_PCT", 0.01)
-        confirm_bars = getattr(config, "ENTRY_CONFIRM_BARS", 2)
-        # Breakout: close exceeds all previous highs + volume spike + B/D
-        if bc > day_high and bc > open_price * (1 + min_gain_pct) and pv > 0 and bv >= vol_mult * pv and bv >= min_volume:
-            # C: Require previous bar also confirms
-            if confirm_bars >= 2 and i >= 2:
-                prev2 = bars[i - 2]
-                if not (prev["close"] > open_price
-                        and prev2["volume"] > 0
-                        and prev["volume"] >= vol_mult * prev2["volume"]
-                        and prev["volume"] >= min_volume):
-                    day_high = max(day_high, bar["high"])
-                    continue
-            # Check consecutive green bars before entry (don't chase)
-            max_green = getattr(config, "MAX_GREEN_BARS_TO_ENTER", 2)
-            consecutive_green = 0
-            for j in range(i - 1, -1, -1):
-                if bars[j]["close"] > bars[j]["open"]:
-                    consecutive_green += 1
-                else:
-                    break
-            if consecutive_green >= max_green:
-                day_high = max(day_high, bar["high"])
-                continue  # Already riding high, skip this entry
+        # Breakout: close exceeds all previous highs + volume spike (same as rtg_2.0)
+        if bc > day_high and pv > 0 and bv >= vol_mult * pv and bv >= min_volume:
             entry = round(bc * 1.001, 4) if getattr(config, "BREAKOUT_ENTRY_AT_CLOSE", True) else round(bc, 4)
             return entry, True, "breakout"
         day_high = max(day_high, bar["high"])
@@ -837,36 +795,23 @@ def monitor_position(position, force_close_at):
 
         reason = None
 
-        # Exit rule 1: First bar after entry is red → immediate exit
-        if _is_first_bar and is_red and getattr(config, "EXIT_ON_RED_BAR", True):
-            reason = "red_bar_exit"
-            log(f"First bar is RED for {position.symbol} (o=${bar_open:.4f} c=${bar_close:.4f})")
-
-        # Exit rule 2: Green-to-red transition → sell (E: require 2 consecutive red bars)
-        if reason is None and not _is_first_bar and is_red and getattr(config, "EXIT_ON_GREEN_TO_RED", True):
+        # Exit rule 1: Green-to-red (1 red bar) → sell
+        if not _is_first_bar and is_red and getattr(config, "EXIT_ON_GREEN_TO_RED", True):
+            g2r_consec = getattr(config, "GREEN_TO_RED_CONSEC_BARS", 1)
             _red_bar_count += 1
-            if _red_bar_count >= _g2r_consec:
+            if _red_bar_count >= g2r_consec:
                 reason = "green_to_red"
-                log(f"Green→Red for {position.symbol} ({_red_bar_count} consec red bars, o=${bar_open:.4f} c=${bar_close:.4f})")
-        elif reason is None and not _is_first_bar and is_green:
-            _red_bar_count = 0  # Reset on green bar
+                log(f"Green→Red for {position.symbol} (o=${bar_open:.4f} c=${bar_close:.4f})")
+        elif is_green:
+            _red_bar_count = 0
 
-        # Exit rule 3: 3 consecutive green bars → sell
-        if reason is None and is_green and getattr(config, "EXIT_ON_THREE_GREEN", True):
-            _green_bar_count += 1
-            if _green_bar_count >= 3:
-                reason = "three_green_bars"
-                log(f"3 green bars for {position.symbol} (count={_green_bar_count})")
-        elif reason is None and is_red:
-            _green_bar_count = 0  # Reset on red bar
-
-        # Exit rule 4: Hard stop loss (3% backstop)
+        # Exit rule 2: RVOL-adaptive stop loss
         if reason is None:
             stop_price = round(position.entry_price * (1 - position.stop_pct), 4)
             if bar_low <= stop_price:
                 reason = "stop_loss"
 
-        # Exit rule 5: Target (safety valve)
+        # Exit rule 3: Target
         if reason is None:
             target_price = round(position.entry_price * (1 + position.target_pct), 4)
             if bar_high >= target_price:
@@ -937,6 +882,7 @@ def run_trading_day(target_date):
     position = None
     daily_trades = 0
     daily_pnl = 0.0
+    max_daily_profit = 0.0
     trades_detail = []
     candidates = []
     max_daily_loss = equity * config.MAX_DAILY_LOSS_PCT
@@ -960,6 +906,28 @@ def run_trading_day(target_date):
             state["daily_stopped"] = True
             break
 
+        # Daily profit protection (same as rtg_2.0)
+        pp_enabled = getattr(config, "DAILY_PROFIT_PROTECT_ENABLED", False)
+        if pp_enabled and max_daily_profit >= getattr(config, "DAILY_PROFIT_PROTECT_MIN", 5.0):
+            pp_ratio = getattr(config, "DAILY_PROFIT_PROTECT_RATIO", 0.85)
+            if daily_pnl < max_daily_profit * pp_ratio:
+                log(f"Profit protect: P&L ${daily_pnl:+,.2f} dropped below {pp_ratio:.0%} of max ${max_daily_profit:+,.2f}")
+                if position is not None:
+                    sold, fill = force_sell_position(position.symbol, position.shares)
+                    if sold > 0:
+                        pnl = (fill - position.entry_price) * sold if fill > 0 else 0
+                        trades_detail.append({
+                            "cycle_index": -1, "symbol": position.symbol,
+                            "entry": position.entry_price, "exit": round(fill, 4),
+                            "shares": sold, "pnl": round(pnl, 2),
+                            "reason": "profit_protect", "trade_type": position.signal_type,
+                            "hold_duration_sec": round(time.time() - position.entry_ts),
+                        })
+                        daily_pnl += pnl
+                        position = None
+                state["profit_protected"] = True
+                break
+
         if position is not None:
             # ── HAVE POSITION: monitor until exit ──
             force_close_start = force_close_dt - dt.timedelta(seconds=30)
@@ -977,6 +945,8 @@ def run_trading_day(target_date):
                     "hold_duration_sec": hold_dur,
                 })
                 daily_pnl += pnl
+                if daily_pnl > max_daily_profit:
+                    max_daily_profit = daily_pnl
                 log(f"EXIT {position.symbol} {reason} @ ${fill_price:.4f}, P&L=${pnl:+,.2f} (held {hold_dur}s)")
                 position = None
                 # Immediately continue → will scan again in next iteration
@@ -1099,14 +1069,24 @@ def run_trading_day(target_date):
                 continue
 
             # Position opened!
+            # RVOL-adaptive stop/target (same as rtg_2.0)
+            rvol_tiers = getattr(config, "RVOL_EXIT_TIERS", [(0.0, 0.05, 0.30)])
+            stop_pct = config.STOP_PCT
+            target_pct = config.TARGET_PCT
+            for rvol_min, s, t in rvol_tiers:
+                if rvol >= rvol_min:
+                    stop_pct = s
+                    target_pct = t
+                    break
+
             position = Position(
                 symbol=sym, shares=filled, entry_price=fill_price,
                 entry_ts=time.time(), open_price=open_price,
                 gap_pct=cand["gap_pct"], signal_type=signal_type,
                 highest=fill_price, trail_active=False,
                 rvol=rvol,
-                stop_pct=config.STOP_PCT,
-                target_pct=config.TARGET_PCT,
+                stop_pct=stop_pct,
+                target_pct=target_pct,
                 trail_activate_pct=config.TRAIL_ACTIVATE_PCT,
                 trail_pct=config.TRAIL_PCT,
             )
