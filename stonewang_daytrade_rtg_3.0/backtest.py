@@ -225,6 +225,8 @@ def find_rtg_entry(bars_list, open_price, start_idx=0, min_volume=None):
     entry_start = getattr(config, "ENTRY_WINDOW_START", "09:30")
     entry_end = getattr(config, "ENTRY_WINDOW_END", "15:55")
     max_green = getattr(config, "MAX_GREEN_BARS_TO_ENTER", 2)
+    min_gain_pct = getattr(config, "RTG_MIN_BAR_GAIN_PCT", 0.01)
+    confirm_bars = getattr(config, "ENTRY_CONFIRM_BARS", 2)
 
     for i in range(max(start_idx, 1), len(bars_list)):
         bar = bars_list[i]
@@ -236,10 +238,20 @@ def find_rtg_entry(bars_list, open_price, start_idx=0, min_volume=None):
         if not (start_time <= bar_time <= end_time):
             continue
 
-        if (bar["close"] > open_price
+        # B: 2.5x volume multiplier (from config)
+        # D: bar must gain >=1% vs open_price
+        if (bar["close"] > open_price * (1 + min_gain_pct)
                 and prev["volume"] > 0
                 and bar["volume"] >= config.RTG_VOLUME_MULT * prev["volume"]
                 and bar["volume"] >= min_volume):
+            # C: Require previous bar also confirms (close > open_price with volume)
+            if confirm_bars >= 2 and i >= 2:
+                prev2 = bars_list[i - 2]
+                if not (prev["close"] > open_price
+                        and prev2["volume"] > 0
+                        and prev["volume"] >= config.RTG_VOLUME_MULT * prev2["volume"]
+                        and prev["volume"] >= min_volume):
+                    continue
             # Check consecutive green bars before entry (don't chase)
             consecutive_green = 0
             for j in range(i - 1, -1, -1):
@@ -249,7 +261,7 @@ def find_rtg_entry(bars_list, open_price, start_idx=0, min_volume=None):
                     break
             if consecutive_green >= max_green:
                 continue
-            entry_price = round(open_price * 1.001, 4)
+            entry_price = round(bar["close"] * 1.001, 4)
             return entry_price, i, "rtg"
 
     return None
@@ -261,9 +273,11 @@ def find_breakout_entry(bars_list, open_price, start_idx=0, min_volume=None):
     if min_volume is None:
         min_volume = config.RTG_MIN_VOLUME
     min_bars = getattr(config, "BREAKOUT_MIN_BARS", 5)
-    vol_mult = getattr(config, "BREAKOUT_VOLUME_MULT", 1.5)
+    vol_mult = getattr(config, "BREAKOUT_VOLUME_MULT", 2.5)
     entry_at_close = getattr(config, "BREAKOUT_ENTRY_AT_CLOSE", True)
     max_green = getattr(config, "MAX_GREEN_BARS_TO_ENTER", 2)
+    min_gain_pct = getattr(config, "RTG_MIN_BAR_GAIN_PCT", 0.01)
+    confirm_bars = getattr(config, "ENTRY_CONFIRM_BARS", 2)
 
     day_high = 0.0
     for i in range(max(start_idx, 1), len(bars_list)):
@@ -275,9 +289,19 @@ def find_breakout_entry(bars_list, open_price, start_idx=0, min_volume=None):
             continue
 
         if (bar["close"] > day_high
+                and bar["close"] > open_price * (1 + min_gain_pct)
                 and prev["volume"] > 0
                 and bar["volume"] >= vol_mult * prev["volume"]
                 and bar["volume"] >= min_volume):
+            # C: Require previous bar also confirms
+            if confirm_bars >= 2 and i >= 2:
+                prev2 = bars_list[i - 2]
+                if not (prev["close"] > open_price
+                        and prev2["volume"] > 0
+                        and prev["volume"] >= vol_mult * prev2["volume"]
+                        and prev["volume"] >= min_volume):
+                    day_high = max(day_high, bar["high"])
+                    continue
             consecutive_green = 0
             for j in range(i - 1, -1, -1):
                 if bars_list[j]["close"] > bars_list[j]["open"]:
@@ -334,6 +358,8 @@ def evaluate_bar_exit(entry_price, shares, bars_after_entry, symbol="",
     highest = entry_price
     is_first_bar = True
     green_bar_count = 0
+    red_bar_count = 0  # E: consecutive red bar counter for green_to_red
+    g2r_consec = getattr(config, "GREEN_TO_RED_CONSEC_BARS", 2)
     exit_price = 0.0
     reason = ""
     exit_bi = 0
@@ -351,8 +377,13 @@ def evaluate_bar_exit(entry_price, shares, bars_after_entry, symbol="",
 
         if is_first_bar and is_red and getattr(config, "EXIT_ON_RED_BAR", True):
             exit_price = bar_close; reason = "red_bar_exit"; exit_bi = bi; exit_triggered = True
+        # E: green_to_red requires 2 consecutive red bars
         if not exit_triggered and not is_first_bar and is_red and getattr(config, "EXIT_ON_GREEN_TO_RED", True):
-            exit_price = bar_close; reason = "green_to_red"; exit_bi = bi; exit_triggered = True
+            red_bar_count += 1
+            if red_bar_count >= g2r_consec:
+                exit_price = bar_close; reason = "green_to_red"; exit_bi = bi; exit_triggered = True
+        elif not exit_triggered and not is_first_bar and is_green:
+            red_bar_count = 0  # Reset on green bar
         if not exit_triggered and is_green and getattr(config, "EXIT_ON_THREE_GREEN", True):
             green_bar_count += 1
             if green_bar_count >= 3:

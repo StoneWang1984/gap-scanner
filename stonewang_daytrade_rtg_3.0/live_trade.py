@@ -601,7 +601,18 @@ def check_rtg_entry(symbol, open_price, bars, after_time=None, min_volume=None):
         ph = prev["high"]
         po = prev["open"]
         pc = prev["close"]
-        if bc > open_price and pv > 0 and bv >= config.RTG_VOLUME_MULT * pv and bv >= min_volume:
+        min_gain_pct = getattr(config, "RTG_MIN_BAR_GAIN_PCT", 0.01)
+        confirm_bars = getattr(config, "ENTRY_CONFIRM_BARS", 2)
+        # B: 2.5x volume, D: min 1% gain vs open_price
+        if bc > open_price * (1 + min_gain_pct) and pv > 0 and bv >= config.RTG_VOLUME_MULT * pv and bv >= min_volume:
+            # C: Require previous bar also confirms (close > open_price with volume)
+            if confirm_bars >= 2 and i >= 2:
+                prev2 = bars[i - 2]
+                if not (prev["close"] > open_price
+                        and prev2["volume"] > 0
+                        and prev["volume"] >= config.RTG_VOLUME_MULT * prev2["volume"]
+                        and prev["volume"] >= min_volume):
+                    continue
             # Check consecutive green bars before entry (don't chase)
             max_green = getattr(config, "MAX_GREEN_BARS_TO_ENTER", 2)
             consecutive_green = 0
@@ -652,8 +663,19 @@ def check_breakout_entry(symbol, bars, min_volume=None):
         bc = bar["close"]
         bv = bar["volume"]
         pv = prev["volume"]
-        # Breakout: close exceeds all previous highs + volume spike
-        if bc > day_high and pv > 0 and bv >= vol_mult * pv and bv >= min_volume:
+        min_gain_pct = getattr(config, "RTG_MIN_BAR_GAIN_PCT", 0.01)
+        confirm_bars = getattr(config, "ENTRY_CONFIRM_BARS", 2)
+        # Breakout: close exceeds all previous highs + volume spike + B/D
+        if bc > day_high and bc > open_price * (1 + min_gain_pct) and pv > 0 and bv >= vol_mult * pv and bv >= min_volume:
+            # C: Require previous bar also confirms
+            if confirm_bars >= 2 and i >= 2:
+                prev2 = bars[i - 2]
+                if not (prev["close"] > open_price
+                        and prev2["volume"] > 0
+                        and prev["volume"] >= vol_mult * prev2["volume"]
+                        and prev["volume"] >= min_volume):
+                    day_high = max(day_high, bar["high"])
+                    continue
             # Check consecutive green bars before entry (don't chase)
             max_green = getattr(config, "MAX_GREEN_BARS_TO_ENTER", 2)
             consecutive_green = 0
@@ -758,6 +780,8 @@ def monitor_position(position, force_close_at):
     _last_bar_ts = None  # Track which bar we've already processed
     _is_first_bar = True  # Is this the first completed bar after entry?
     _green_bar_count = 0  # Consecutive green bars counter
+    _red_bar_count = 0    # E: Consecutive red bars counter for green_to_red
+    _g2r_consec = getattr(config, "GREEN_TO_RED_CONSEC_BARS", 2)
 
     while dt.datetime.now(_EST) < force_close_at:
         # Check pending async sell
@@ -818,10 +842,14 @@ def monitor_position(position, force_close_at):
             reason = "red_bar_exit"
             log(f"First bar is RED for {position.symbol} (o=${bar_open:.4f} c=${bar_close:.4f})")
 
-        # Exit rule 2: Green-to-red transition → sell
+        # Exit rule 2: Green-to-red transition → sell (E: require 2 consecutive red bars)
         if reason is None and not _is_first_bar and is_red and getattr(config, "EXIT_ON_GREEN_TO_RED", True):
-            reason = "green_to_red"
-            log(f"Green→Red for {position.symbol} (o=${bar_open:.4f} c=${bar_close:.4f})")
+            _red_bar_count += 1
+            if _red_bar_count >= _g2r_consec:
+                reason = "green_to_red"
+                log(f"Green→Red for {position.symbol} ({_red_bar_count} consec red bars, o=${bar_open:.4f} c=${bar_close:.4f})")
+        elif reason is None and not _is_first_bar and is_green:
+            _red_bar_count = 0  # Reset on green bar
 
         # Exit rule 3: 3 consecutive green bars → sell
         if reason is None and is_green and getattr(config, "EXIT_ON_THREE_GREEN", True):

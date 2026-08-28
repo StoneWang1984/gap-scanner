@@ -55,6 +55,7 @@ MAX_ENTRY_ATTEMPTS = 3          # Try top 3 candidates per scan
 # ── Exit: Bar-based exit rules (rtg_3.0) ─────────────────────────────
 EXIT_ON_RED_BAR = True            # First bar after entry is red → immediate sell
 EXIT_ON_GREEN_TO_RED = True       # Green-to-red transition → sell
+GREEN_TO_RED_CONSEC_BARS = 2      # Require 2 consecutive red bars for green_to_red exit
 EXIT_ON_THREE_GREEN = True        # 3 consecutive green bars → sell
 STOP_PCT = 0.03                  # 3% hard stop (backstop for extreme moves)
 TARGET_PCT = 0.50                # 50% target (safety valve)
@@ -71,7 +72,7 @@ TRAIL_ACTIVATE_PCT = 0.005
 # Catches momentum that develops after the opening drive fades
 BREAKOUT_ENABLED = True           # Enable intraday breakout signal
 BREAKOUT_MIN_BARS = 5             # Min bars before checking (need history for day_high)
-BREAKOUT_VOLUME_MULT = 1.5        # Volume multiplier (same as RTG)
+BREAKOUT_VOLUME_MULT = 2.5        # Volume multiplier (same as RTG)
 BREAKOUT_ENTRY_AT_CLOSE = True    # Enter at breakout close price (not open)
 
 # ── No daily profit protection (rtg_3.0) ─────────────────────────────
@@ -97,10 +98,12 @@ REENTRY_COOLDOWN_SEC = 120
 # ── Entry parameters ─────────────────────────────────────────────────
 ENTRY_WINDOW_START = "09:30"
 ENTRY_WINDOW_END = "15:55"       # Slightly earlier to avoid late entries
-RTG_VOLUME_MULT = 1.5
+RTG_VOLUME_MULT = 2.5
 RTG_MIN_VOLUME = 30000
 RTG_MIN_PRICE_GAIN = 0.0
+RTG_MIN_BAR_GAIN_PCT = 0.01     # Bar must gain >=1% vs open_price to qualify as RTG signal
 RTG_ENTRY_AT_OPEN = True
+ENTRY_CONFIRM_BARS = 2           # Require 2 consecutive bars confirming RTG signal
 
 # GapGo disabled
 GAPGO_MIN_FIRST_BAR_VOL = 99999999
