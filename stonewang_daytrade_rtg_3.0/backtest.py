@@ -1,12 +1,12 @@
-"""Backtesting engine — stonewang_daytrade_rtg_3.0: Cycle-based All-in RTG with 1% Trailing Stop.
+"""Backtesting engine — stonewang_daytrade_rtg_3.0: Event-driven All-in RTG with Bar-based Exits.
 
-Key difference from rtg_1.0 backtest:
-  - Cycle-based: every 5 min, scan → pick best → all-in buy → 1% trail → force close → repeat
+Key differences from rtg_1.0 backtest:
+  - Event-driven: scan → buy → monitor (bar-based exit) → sell → immediately scan again
   - Single position at a time (MAX_POSITIONS=1)
   - All-in sizing (95% of equity)
-  - Fixed 1% trailing stop (not RVOL-tiered)
+  - Bar-based exits: red_bar_exit / green_to_red / three_green_bars / 3% hard stop
+  - Entry restriction: skip if >=2 consecutive green bars before entry
   - RTG + Breakout entry signals
-  - No re-entry (cycle model handles this)
 """
 
 import json
@@ -30,17 +30,9 @@ from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.data.enums import Adjustment, DataFeed
 
-# Load scanner and strategy from parent / rtg_1.0
 from scanner import get_data_client, get_tradable_symbols
 
-_strat_spec = importlib.util.spec_from_file_location("strategy", os.path.join(_parent_dir, "stonewang_daytrade_rtg_1.0", "strategy.py"))
-strategy = importlib.util.module_from_spec(_strat_spec)
-_strat_spec.loader.exec_module(strategy)
-sys.modules["strategy"] = strategy
-evaluate_trade_rtg = strategy.evaluate_trade_rtg
-TradeResult = strategy.TradeResult
-
-# ── ETF filters (same as rtg_1.0) ──────────────────────────────────
+# ── ETF filters ───────────────────────────────────────────────────
 _LEV_PATTERN = re.compile(r'(2X|3X|BULL|BEAR)$', re.IGNORECASE)
 _LEV_PREFIXES = (
     "TQQQ", "SQQQ", "UPRO", "SPXU", "TNA", "TZA",
@@ -225,36 +217,14 @@ def _bar_ts_str(bars_list, idx):
     return "00:00"
 
 
-def _bars_to_chart(bars_df):
-    result = []
-    for i in range(len(bars_df)):
-        bar = bars_df.iloc[i]
-        idx = bars_df.index[i]
-        ts = idx[1] if isinstance(idx, tuple) else idx
-        ts = pd.Timestamp(ts)
-        if ts.tzinfo is None:
-            ts = ts.tz_localize("UTC")
-        ts = ts.tz_convert("America/New_York")
-        result.append({
-            "ts": ts.strftime("%H:%M"),
-            "o": round(float(bar["open"]), 4), "h": round(float(bar["high"]), 4),
-            "l": round(float(bar["low"]), 4), "c": round(float(bar["close"]), 4),
-            "v": int(bar["volume"]) if "volume" in bar.index else 0,
-        })
-    return result
-
-
-# ── Entry signal detection ────────────────────────────────────────
+# ── Entry signal detection (with consecutive green bar check) ─────
 
 def find_rtg_entry(bars_list, open_price, start_idx=0, min_volume=None):
-    """Find RTG signal: close > open_price AND vol >= RTG_VOLUME_MULT * prev_vol.
-    Returns (entry_price, bar_idx, signal_type) or None.
-    """
     if min_volume is None:
         min_volume = config.RTG_MIN_VOLUME
-
     entry_start = getattr(config, "ENTRY_WINDOW_START", "09:30")
     entry_end = getattr(config, "ENTRY_WINDOW_END", "15:55")
+    max_green = getattr(config, "MAX_GREEN_BARS_TO_ENTER", 2)
 
     for i in range(max(start_idx, 1), len(bars_list)):
         bar = bars_list[i]
@@ -270,6 +240,15 @@ def find_rtg_entry(bars_list, open_price, start_idx=0, min_volume=None):
                 and prev["volume"] > 0
                 and bar["volume"] >= config.RTG_VOLUME_MULT * prev["volume"]
                 and bar["volume"] >= min_volume):
+            # Check consecutive green bars before entry (don't chase)
+            consecutive_green = 0
+            for j in range(i - 1, -1, -1):
+                if bars_list[j]["close"] > bars_list[j]["open"]:
+                    consecutive_green += 1
+                else:
+                    break
+            if consecutive_green >= max_green:
+                continue
             entry_price = round(open_price * 1.001, 4)
             return entry_price, i, "rtg"
 
@@ -277,28 +256,21 @@ def find_rtg_entry(bars_list, open_price, start_idx=0, min_volume=None):
 
 
 def find_breakout_entry(bars_list, open_price, start_idx=0, min_volume=None):
-    """Find breakout signal: close > day_high_so_far AND vol >= BREAKOUT_VOLUME_MULT * prev_vol.
-    Returns (entry_price, bar_idx, signal_type) or None.
-    """
     if not getattr(config, "BREAKOUT_ENABLED", False):
         return None
     if min_volume is None:
         min_volume = config.RTG_MIN_VOLUME
-
     min_bars = getattr(config, "BREAKOUT_MIN_BARS", 5)
     vol_mult = getattr(config, "BREAKOUT_VOLUME_MULT", 1.5)
     entry_at_close = getattr(config, "BREAKOUT_ENTRY_AT_CLOSE", True)
+    max_green = getattr(config, "MAX_GREEN_BARS_TO_ENTER", 2)
 
     day_high = 0.0
     for i in range(max(start_idx, 1), len(bars_list)):
         bar = bars_list[i]
         prev = bars_list[i - 1]
-
-        # Update day high from bars before this one
         if i > 0:
             day_high = max(day_high, bars_list[i - 1]["high"])
-
-        # Need enough bars for day_high to be meaningful
         if i < min_bars:
             continue
 
@@ -306,6 +278,15 @@ def find_breakout_entry(bars_list, open_price, start_idx=0, min_volume=None):
                 and prev["volume"] > 0
                 and bar["volume"] >= vol_mult * prev["volume"]
                 and bar["volume"] >= min_volume):
+            consecutive_green = 0
+            for j in range(i - 1, -1, -1):
+                if bars_list[j]["close"] > bars_list[j]["open"]:
+                    consecutive_green += 1
+                else:
+                    break
+            if consecutive_green >= max_green:
+                day_high = max(day_high, bar["high"])
+                continue
             if entry_at_close:
                 entry_price = round(bar["close"] * 1.001, 4)
             else:
@@ -316,64 +297,104 @@ def find_breakout_entry(bars_list, open_price, start_idx=0, min_volume=None):
 
 
 def find_entry_signal(bars_list, open_price, start_idx=0, min_volume=None):
-    """Check both RTG and Breakout signals. Return earliest."""
     rtg = find_rtg_entry(bars_list, open_price, start_idx, min_volume)
     brk = find_breakout_entry(bars_list, open_price, start_idx, min_volume)
-
     if rtg is None and brk is None:
         return None
     if rtg is None:
         return brk
     if brk is None:
         return rtg
-    # Return whichever fires first (lower bar index)
     if rtg[1] <= brk[1]:
         return rtg
     return brk
 
 
-# ── Cycle time computation ────────────────────────────────────────
+# ── Bar-based exit evaluation ─────────────────────────────────────
 
-def compute_cycle_times(date_str):
-    """Compute scan cycle start times (every SCAN_INTERVAL_SEC from 09:35)."""
-    scan_sec = getattr(config, "SCAN_INTERVAL_SEC", 300)
-    force_close_str = getattr(config, "FORCE_CLOSE_TIME", "15:59")
-    tz = pd.Timestamp.now(tz="America/New_York").tz
+class BtResult:
+    pass
 
-    first_scan = pd.Timestamp(f"{date_str} 09:35", tz=tz)
-    last_time = pd.Timestamp(f"{date_str} {force_close_str}", tz=tz)
+def evaluate_bar_exit(entry_price, shares, bars_after_entry, symbol="",
+                      open_price=0.0, force_close_price=None, entry_bar_idx=0,
+                      signal_type=""):
+    """Bar-based exit: red_bar_exit / green_to_red / three_green_bars / stop / target / force_close."""
+    if not bars_after_entry or entry_price <= 0 or shares <= 0:
+        r = BtResult()
+        r.symbol = symbol; r.entry_price = entry_price; r.exit_price = entry_price
+        r.shares = shares; r.pnl = 0.0; r.pnl_pct = 0.0; r.exit_reason = "no_bars"
+        r.open_price = open_price; r.stop_price = 0.0; r.target_price = 0.0
+        r.trailing_high = 0.0; r.exit_bar_idx = -1; r.entry_bar_idx = entry_bar_idx
+        r.signal_type = signal_type; r.date = ""
+        return r
 
-    times = []
-    t = first_scan
-    while t <= last_time:
-        times.append(t)
-        t += pd.Timedelta(seconds=scan_sec)
-    return times
+    stop_price = round(entry_price * (1 - config.STOP_PCT), 4)
+    target_price = round(entry_price * (1 + config.TARGET_PCT), 4)
+    slippage = getattr(config, "SLIPPAGE_EXIT_PCT", 0.0)
+    highest = entry_price
+    is_first_bar = True
+    green_bar_count = 0
+    exit_price = 0.0
+    reason = ""
+    exit_bi = 0
+
+    for bi, bar in enumerate(bars_after_entry):
+        bar_high = float(bar["high"])
+        bar_low = float(bar["low"])
+        bar_close = float(bar["close"])
+        bar_open = float(bar["open"])
+        if bar_high > highest:
+            highest = bar_high
+        is_green = bar_close >= bar_open
+        is_red = not is_green
+        exit_triggered = False
+
+        if is_first_bar and is_red and getattr(config, "EXIT_ON_RED_BAR", True):
+            exit_price = bar_close; reason = "red_bar_exit"; exit_bi = bi; exit_triggered = True
+        if not exit_triggered and not is_first_bar and is_red and getattr(config, "EXIT_ON_GREEN_TO_RED", True):
+            exit_price = bar_close; reason = "green_to_red"; exit_bi = bi; exit_triggered = True
+        if not exit_triggered and is_green and getattr(config, "EXIT_ON_THREE_GREEN", True):
+            green_bar_count += 1
+            if green_bar_count >= 3:
+                exit_price = bar_close; reason = "three_green_bars"; exit_bi = bi; exit_triggered = True
+        elif not exit_triggered and is_red:
+            green_bar_count = 0
+        if not exit_triggered and bar_low <= stop_price:
+            exit_price = stop_price; reason = "stop_loss"; exit_bi = bi; exit_triggered = True
+        if not exit_triggered and bar_high >= target_price:
+            exit_price = target_price; reason = "target"; exit_bi = bi; exit_triggered = True
+
+        is_first_bar = False
+        if exit_triggered:
+            break
+        exit_bi = bi
+    else:
+        if force_close_price is not None and force_close_price > 0:
+            exit_price = force_close_price
+        else:
+            exit_price = float(bars_after_entry[-1]["close"])
+        reason = "force_close"
+        exit_bi = len(bars_after_entry) - 1
+
+    if slippage > 0 and reason not in ("stop_loss", "red_bar_exit", "green_to_red", "three_green_bars", "target"):
+        exit_price = round(exit_price * (1 - slippage), 4)
+
+    pnl = round((exit_price - entry_price) * shares, 2)
+    pnl_pct = round(pnl / (entry_price * shares), 4) if entry_price > 0 else 0.0
+
+    r = BtResult()
+    r.symbol = symbol; r.date = ""; r.entry_price = round(entry_price, 4)
+    r.exit_price = round(exit_price, 4); r.shares = shares; r.pnl = pnl
+    r.pnl_pct = pnl_pct; r.exit_reason = reason
+    r.open_price = round(open_price, 4) if open_price else 0.0
+    r.stop_price = stop_price; r.target_price = target_price
+    r.trailing_high = round(highest, 4); r.exit_bar_idx = exit_bi
+    r.position_size = round(entry_price * shares, 2)
+    r.entry_bar_idx = entry_bar_idx; r.signal_type = signal_type
+    return r
 
 
-# ── Exit evaluation (reuse rtg_1.0 strategy with fixed 3.0 params) ─
-
-def evaluate_cycle_trade(entry_price, shares, bars_after_entry, symbol="",
-                         open_price=0.0, force_close_price=None, entry_bar_idx=0,
-                         signal_type=""):
-    """Evaluate trade with rtg_3.0 fixed params: 3% stop, 50% target, 0.5% trail_act, 1% trail."""
-    return evaluate_trade_rtg(
-        entry_price=entry_price,
-        shares=shares,
-        bars_after_entry=bars_after_entry,
-        symbol=symbol,
-        open_price=open_price,
-        force_close_price=force_close_price,
-        entry_bar_idx=entry_bar_idx,
-        signal_type=signal_type,
-        stop_pct=config.STOP_PCT,
-        target_pct=config.TARGET_PCT,
-        trail_activate_pct=config.TRAIL_ACTIVATE_PCT,
-        trail_pct=config.TRAIL_PCT,
-    )
-
-
-# ── Main backtest ─────────────────────────────────────────────────
+# ── Event-driven simulation ───────────────────────────────────────
 
 def save_backtest_charts(chart_entries, filepath="versions/chart_data_rtg3.json"):
     date_parts = sorted(set(v["date"] for v in chart_entries.values()))
@@ -397,20 +418,18 @@ def run_backtest(end_date=None, n_days=None):
         print("No trading days found.")
         return []
 
+    max_green = getattr(config, "MAX_GREEN_BARS_TO_ENTER", 2)
     print(f"[rtg_3.0] Backtesting {len(trading_days)} trading days: "
           f"{trading_days[0].date()} to {trading_days[-1].date()}")
     print(f"Capital: ${config.INITIAL_CAPITAL:,.2f} | ALL-IN ({config.ALL_IN_BP_RATIO:.0%} BP) | "
-          f"Cycle: every {config.SCAN_INTERVAL_SEC//60}min | Max 1 position")
-    print(f"Entry: RTG (close > open, vol >= {config.RTG_VOLUME_MULT}x) + "
-          f"Breakout (close > day_high, vol >= {getattr(config, 'BREAKOUT_VOLUME_MULT', 1.5)}x)")
-    print(f"Exit: {config.STOP_PCT:.0%} stop | {config.TARGET_PCT:.0%} target | "
-          f"{config.TRAIL_ACTIVATE_PCT:.1%} trail act | {config.TRAIL_PCT:.0%} trail")
+          f"Event-driven | Max 1 position")
+    print(f"Entry: RTG + Breakout | Max {max_green} consecutive green bars to enter")
+    print(f"Exit: red_bar / green_to_red / 3_green_bars / {config.STOP_PCT:.0%} stop / {config.TARGET_PCT:.0%} target")
     print(f"Min RVOL: {config.MIN_RVOL_TO_TRADE:.1f}x | Max entry attempts: {config.MAX_ENTRY_ATTEMPTS}")
 
     print("\nLoading tradable symbols...")
     symbols = get_tradable_symbols()
     print(f"Found {len(symbols)} tradable symbols")
-
     symbols = [s for s in symbols if not is_leveraged_etf(s)]
     symbols = [s for s in symbols if not is_crypto_etf(s)]
     print(f"After ETF filters: {len(symbols)} symbols")
@@ -431,17 +450,12 @@ def run_backtest(end_date=None, n_days=None):
         candidates = gap_data[date_key]
         max_cands = getattr(config, "MAX_CANDIDATES", 40)
         candidates = candidates.head(max_cands)
-
-        # Filter by MIN_RVOL_TO_TRADE
         min_rvol = getattr(config, "MIN_RVOL_TO_TRADE", 3.0)
         qualified = candidates[candidates["rvol"] >= min_rvol]
 
         print(f"\n--- {date_key} ({len(candidates)} candidates, {len(qualified)} qualified by RVOL>={min_rvol:.1f}x, equity: ${equity:,.2f}) ---")
         for _, row in candidates.iterrows():
-            sym = row["symbol"]
-            rvol = row.get("rvol", 0)
-            gap_pct = row["gap_pct"]
-            open_p = row["open_price"]
+            sym = row["symbol"]; rvol = row.get("rvol", 0); gap_pct = row["gap_pct"]; open_p = row["open_price"]
             marker = " *" if rvol >= min_rvol else ""
             print(f"  {sym} gap={gap_pct:+.1%} RVOL={rvol:.1f}x open=${open_p:.2f}{marker}")
 
@@ -449,7 +463,6 @@ def run_backtest(end_date=None, n_days=None):
             print("  No qualified candidates, skipping day")
             continue
 
-        # Pre-fetch all 1-min bars for qualified candidates
         cached_bars = {}
         for _, row in qualified.iterrows():
             symbol = row["symbol"]
@@ -459,135 +472,133 @@ def run_backtest(end_date=None, n_days=None):
                 continue
             cached_bars[symbol] = _bars_to_list(bars_1m)
 
-        # ── Cycle-based simulation ──
-        cycle_times = compute_cycle_times(str(date_key))
-        daily_trades = 0
+        # ── Event-driven simulation ──
+        force_close_str = getattr(config, "FORCE_CLOSE_TIME", "15:59")
+        force_close_min_parts = force_close_str.split(":")
+        force_close_min = int(force_close_min_parts[0]) * 60 + int(force_close_min_parts[1])
         daily_loss = 0.0
         max_daily_loss = equity * config.MAX_DAILY_LOSS_PCT
-        traded_symbols = set()  # cooldown: don't re-enter same symbol
+        # Track earliest bar index we can search from (per symbol)
+        # After a trade exits, next entry must be after SCAN_INTERVAL_SEC
+        next_search_idx = {row["symbol"]: 0 for _, row in qualified.iterrows()}
+        # Global: minimum bar timestamp for next entry (simulates scan wait)
+        last_exit_bar_min = 0  # in minutes since midnight
+        scan_interval_min = getattr(config, "SCAN_INTERVAL_SEC", 300) / 60.0
+        scan_idx = 0
+        daily_trades_count = 0
+        max_daily_trades = getattr(config, "MAX_DAILY_TRADES", 0)
 
-        for cycle_idx, cycle_start in enumerate(cycle_times):
-            if max_daily_loss > 0 and daily_loss <= -max_daily_loss:
-                print(f"  Daily loss ${daily_loss:,.2f} exceeded limit, stopping")
+        while True:
+            scan_idx += 1
+            if daily_loss <= -max_daily_loss:
+                break
+            if max_daily_trades > 0 and daily_trades_count >= max_daily_trades:
                 break
 
-            cycle_start_min = cycle_start.hour * 60 + cycle_start.minute
-            # cycle_end = next cycle start or force_close
-            if cycle_idx + 1 < len(cycle_times):
-                cycle_end = cycle_times[cycle_idx + 1]
-            else:
-                force_close_str = getattr(config, "FORCE_CLOSE_TIME", "15:59")
-                cycle_end = pd.Timestamp(f"{date_key} {force_close_str}", tz="America/New_York")
-            cycle_end_min = cycle_end.hour * 60 + cycle_end.minute
-
-            # Try top N candidates
+            # Try top candidates (by RVOL)
             max_attempts = getattr(config, "MAX_ENTRY_ATTEMPTS", 3)
-            attempt_count = 0
             entered = False
 
             for _, row in qualified.iterrows():
-                if entered:
-                    break
-                if attempt_count >= max_attempts:
+                if entered or max_attempts <= 0:
                     break
 
                 symbol = row["symbol"]
                 open_price = row["open_price"]
                 rvol = row.get("rvol", 0)
-
-                if symbol in traded_symbols:
-                    continue
-
                 all_bars = cached_bars.get(symbol)
                 if all_bars is None:
+                    max_attempts -= 1
                     continue
 
-                # Find bar index corresponding to cycle_start
-                start_idx = 0
-                for bi, bar in enumerate(all_bars):
-                    bar_min = bar["timestamp"].hour * 60 + bar["timestamp"].minute
-                    if bar_min >= cycle_start_min:
-                        start_idx = bi
-                        break
-
-                # Find entry signal in this cycle window
-                result = find_entry_signal(all_bars, open_price, start_idx=start_idx)
+                # Find entry signal starting after previous exit for this symbol
+                search_from = next_search_idx.get(symbol, 0)
+                result = find_entry_signal(all_bars, open_price, start_idx=search_from)
                 if result is None:
-                    attempt_count += 1
+                    max_attempts -= 1
                     continue
 
                 entry_price_signal, entry_bar_idx, signal_type = result
 
-                # Check entry is within cycle window
-                entry_bar_min = all_bars[entry_bar_idx]["timestamp"].hour * 60 + all_bars[entry_bar_idx]["timestamp"].minute
-                if entry_bar_min > cycle_end_min:
-                    attempt_count += 1
+                # Check entry bar is after scan cooldown from last exit
+                entry_bar_ts = all_bars[entry_bar_idx]["timestamp"]
+                entry_bar_min_val = entry_bar_ts.hour * 60 + entry_bar_ts.minute
+                if entry_bar_min_val < last_exit_bar_min + scan_interval_min:
+                    max_attempts -= 1
                     continue
 
-                # All-in position sizing
+                # Check entry is before force close
+                if entry_bar_min_val >= force_close_min - 1:
+                    max_attempts -= 1
+                    continue
+
+                # Entry price: use the signal bar's close (not open_price*1.001)
+                # In live, we buy at market when signal triggers
+                entry_bar_close = all_bars[entry_bar_idx]["close"]
                 entry_slippage = getattr(config, "SLIPPAGE_ENTRY_PCT", 0.005)
-                entry_price_actual = round(entry_price_signal * (1 + entry_slippage), 4)
+                entry_price_actual = round(entry_bar_close * (1 + entry_slippage), 4)
+
+                # All-in sizing
                 all_in_ratio = getattr(config, "ALL_IN_BP_RATIO", 0.95)
                 pos_size = equity * all_in_ratio
                 shares = int(pos_size / entry_price_actual)
                 if shares <= 0:
-                    attempt_count += 1
+                    max_attempts -= 1
                     continue
 
-                # Determine bars remaining for this cycle (force close at cycle_end)
+                # Bars after entry, trimmed to force_close
                 remaining_bars = all_bars[entry_bar_idx + 1:]
-                # Find force close bar index
-                force_close_bar_idx = len(remaining_bars) - 1
-                force_close_price = remaining_bars[-1]["close"] if remaining_bars else entry_price_actual
-
-                # Trim bars to cycle_end for trailing stop monitoring
                 cycle_bars = []
-                for bi, bar in enumerate(remaining_bars):
-                    bar_min = bar["timestamp"].hour * 60 + bar["timestamp"].minute
+                force_close_price = remaining_bars[-1]["close"] if remaining_bars else entry_price_actual
+                for bar in remaining_bars:
+                    bar_min_val = bar["timestamp"].hour * 60 + bar["timestamp"].minute
                     cycle_bars.append(bar)
-                    if bar_min >= cycle_end_min:
-                        force_close_bar_idx = len(cycle_bars) - 1
+                    if bar_min_val >= force_close_min:
                         force_close_price = bar["close"]
                         break
 
                 if not cycle_bars:
-                    attempt_count += 1
+                    max_attempts -= 1
                     continue
 
-                # Evaluate trade with fixed 3.0 exit params
-                trade_result = evaluate_cycle_trade(
-                    entry_price=entry_price_actual,
-                    shares=shares,
-                    bars_after_entry=cycle_bars,
-                    symbol=symbol,
-                    open_price=open_price,
-                    force_close_price=force_close_price,
-                    entry_bar_idx=entry_bar_idx,
-                    signal_type=signal_type,
+                # Evaluate with bar-based exit
+                trade_result = evaluate_bar_exit(
+                    entry_price=entry_price_actual, shares=shares,
+                    bars_after_entry=cycle_bars, symbol=symbol,
+                    open_price=open_price, force_close_price=force_close_price,
+                    entry_bar_idx=entry_bar_idx, signal_type=signal_type,
                 )
                 trade_result.date = str(date_key)
                 trade_result.open_price = open_price
 
+                # Update next search index and exit time
+                exit_bar_abs = entry_bar_idx + 1 + trade_result.exit_bar_idx
+                next_search_idx[symbol] = exit_bar_abs + 1
+                # Set cooldown: next entry must be after exit + scan interval
+                if exit_bar_abs < len(all_bars):
+                    exit_ts = all_bars[exit_bar_abs]["timestamp"]
+                    last_exit_bar_min = exit_ts.hour * 60 + exit_ts.minute
+                else:
+                    last_exit_bar_min = force_close_min
+
                 entry_ts = _bar_ts_str(all_bars, entry_bar_idx)
-                exit_bar = entry_bar_idx + 1 + trade_result.exit_bar_idx
-                exit_ts = _bar_ts_str(all_bars, min(exit_bar, len(all_bars) - 1))
+                exit_bar = min(exit_bar_abs, len(all_bars) - 1)
+                exit_ts_str = _bar_ts_str(all_bars, exit_bar)
 
                 print(f"  {symbol} [{signal_type}] entry=${entry_price_actual:.4f}@{entry_ts} "
-                      f"exit=${trade_result.exit_price:.4f}@{exit_ts} ({trade_result.exit_reason}), "
+                      f"exit=${trade_result.exit_price:.4f}@{exit_ts_str} ({trade_result.exit_reason}), "
                       f"P&L=${trade_result.pnl:+,.2f} ({trade_result.pnl_pct:+.2%}) "
-                      f"[RVOL={rvol:.1f}x stop={config.STOP_PCT:.0%} tgt={config.TARGET_PCT:.0%}]")
+                      f"[RVOL={rvol:.1f}x]")
 
                 all_trades.append(trade_result)
                 equity += trade_result.pnl
                 daily_loss += trade_result.pnl
-                daily_trades += 1
+                daily_trades_count += 1
                 entered = True
-                traded_symbols.add(symbol)
+                break  # One position at a time
 
             if not entered:
-                pass  # No entry this cycle
-
-        # Force close at end of day: already handled by cycle_end logic
+                break  # No more entries possible
 
     print(f"\n{'=' * 70}")
     print(f"[rtg_3.0] Backtest complete. Final equity: ${equity:,.2f}")
