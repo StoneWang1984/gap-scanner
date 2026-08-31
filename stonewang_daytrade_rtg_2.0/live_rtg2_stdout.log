@@ -1,14 +1,22 @@
-[11:38:27] Using SIP data feed
-[11:38:27] ============================================================
-[11:38:27] stonewang RTG 2.0 Live Trading -- Profit Protection + Progressive Trailing
-[11:38:27] Entry: RTG (vol >= 1.5x prior) / GapGo DISABLED
-[11:38:27] Exit: adaptive by RVOL tier | time 0s
-[11:38:27] Window: 09:30-15:59 EST
-[11:38:27] Sizing: RVOL-weighted (50%/35%/20%) | max 8 concurrent | re-entry max 0
-[11:38:27] ============================================================
-[11:38:27] Testing data connectivity...
-[11:38:28]   SPY bar received, OK!
-[11:38:28] Connectivity OK!
-[11:38:28] Starting trading day: 2026-08-27 (close 16:00, force_close 15:59)
-[11:38:29] Account equity: $370.14
-[11:38:31] Scanning for gap stocks on 2026-08-27...
+[00:06:49] Using SIP data feed
+[00:06:49] ============================================================
+[00:06:49] stonewang RTG 2.0 Live Trading -- ATR Adaptive Stop + Profit Protection + Volume Breakout
+[00:06:49] Entry: RTG (vol >= 1.5x prior) / GapGo DISABLED
+[00:06:49] Exit: ATR-based adaptive stop (RVOL→ATR mult) | time 0s
+[00:06:49]   Stop: RVOL>10x→3.0×ATR, RVOL>5x→2.5×ATR, RVOL>0x→2.0×ATR | clamp 2%-10%
+[00:06:49]   Trail: 1.5×ATR | Target: 5.0×ATR
+[00:06:49] Window: 09:30-15:59 EST
+[00:06:49] Sizing: RVOL-weighted (50%/35%/20%) | max 8 concurrent | re-entry max 0
+[00:06:49] Volume breakout: every 300s, min RVOL=3.0×, price $0.50-$20.00
+[00:06:49] ============================================================
+[00:06:49] Testing data connectivity...
+[00:06:51]   SPY bar received, OK!
+[00:06:51] Connectivity OK!
+[00:06:51] Next event in 548 min, sleeping...
+[00:16:51] Next event in 538 min, sleeping...
+[00:26:51] Next event in 528 min, sleeping...
+[00:36:51] Next event in 518 min, sleeping...
+[00:46:51] Next event in 508 min, sleeping...
+[00:56:51] Next event in 498 min, sleeping...
+[01:06:51] Next event in 488 min, sleeping...
+[01:16:51] Next event in 478 min, sleeping...

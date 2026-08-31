@@ -1,0 +1,90 @@
+{
+  "date": "2026-08-28",
+  "version": "rtg_2.0",
+  "account_equity_start": 346.49,
+  "account_equity_end": 332.06,
+  "daily_pnl": -14.43,
+  "daily_trades": 8,
+  "candidates": [
+    {
+      "symbol": "AEMD",
+      "open_price": 2.92,
+      "prev_close": 2.17,
+      "gap_pct": 0.34562211981566815,
+      "rvol": 17.27874114299773
+    },
+    {
+      "symbol": "AFRU",
+      "open_price": 13.605,
+      "prev_close": 11.08,
+      "gap_pct": 0.2278880866425994,
+      "rvol": 11.48694665153235
+    },
+    {
+      "symbol": "AIIR",
+      "open_price": 8.97,
+      "prev_close": 7.98,
+      "gap_pct": 0.12406015037593976,
+      "rvol": 2.4335627731686253
+    },
+    {
+      "symbol": "QNRX",
+      "open_price": 7.22,
+      "prev_close": 5.155,
+      "gap_pct": 0.40058195926285145,
+      "rvol": 1.3992096004825858
+    },
+    {
+      "symbol": "IREZ",
+      "open_price": 13.29,
+      "prev_close": 11.63,
+      "gap_pct": 0.1427343078245915,
+      "rvol": 1.2641774386595048
+    },
+    {
+      "symbol": "WHLR",
+      "open_price": 1.445,
+      "prev_close": 1.12,
+      "gap_pct": 0.2901785714285714,
+      "rvol": 0.6291102453611365
+    }
+  ],
+  "trades": [
+    {
+      "symbol": "QNRX",
+      "entry": 6.38,
+      "exit": 6.1877,
+      "shares": 6,
+      "pnl": -1.15,
+      "reason": "stop_loss",
+      "trade_type": "rtg"
+    },
+    {
+      "symbol": "IREZ",
+      "entry": 14.1857,
+      "exit": 14.384,
+      "shares": 2,
+      "pnl": 0.4,
+      "reason": "trail_stop",
+      "trade_type": "rtg"
+    },
+    {
+      "symbol": "AFRU",
+      "entry": 12.6985,
+      "exit": 11.8801,
+      "shares": 7,
+      "pnl": -5.73,
+      "reason": "stop_loss",
+      "trade_type": "rtg"
+    },
+    {
+      "symbol": "AEMD",
+      "entry": 2.7697,
+      "exit": 2.5213,
+      "shares": 32,
+      "pnl": -7.95,
+      "reason": "stop_loss",
+      "trade_type": "rtg"
+    }
+  ]
+}

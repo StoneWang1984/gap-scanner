@@ -1,10 +1,10 @@
 {
   "date": "2026-08-27",
   "version": "rtg_2.0",
-  "account_equity_start": 367.44,
-  "account_equity_end": 367.44,
-  "daily_pnl": 0.0,
-  "daily_trades": 14,
+  "account_equity_start": 374.56,
+  "account_equity_end": 379.17,
+  "daily_pnl": 4.61,
+  "daily_trades": 16,
   "candidates": [
     {
       "symbol": "WNW",
@@ -156,8 +156,53 @@
   ],
   "trades": [
     {
+      "symbol": "BRNX",
+      "entry": 8.171,
+      "exit": 8.4,
+      "shares": 4,
+      "pnl": 0.92,
+      "reason": "trail_stop",
+      "trade_type": "rtg"
+    },
+    {
+      "symbol": "CELU",
+      "entry": 2.325,
+      "exit": 2.2332,
+      "shares": 17,
+      "pnl": -1.56,
+      "reason": "stop_loss",
+      "trade_type": "rtg"
+    },
+    {
+      "symbol": "MIMI",
+      "entry": 2.68,
+      "exit": 2.805,
+      "shares": 34,
+      "pnl": 4.25,
+      "reason": "trail_stop",
+      "trade_type": "rtg"
+    },
+    {
+      "symbol": "YJ",
+      "entry": 3.1097,
+      "exit": 3.1464,
+      "shares": 1,
+      "pnl": 0.04,
+      "reason": "trail_stop",
+      "trade_type": "rtg"
+    },
+    {
+      "symbol": "DAIC",
+      "entry": 4.69,
+      "exit": 4.81,
+      "shares": 8,
+      "pnl": 0.96,
+      "reason": "trail_stop",
+      "trade_type": "rtg"
+    },
+    {
       "symbol": "WNW",
-      "entry": 3.1303,
+      "entry": 3.1172,
       "exit": 0.0,
       "shares": 29,
       "pnl": 0,
@@ -165,26 +210,8 @@
       "trade_type": "rtg"
     },
     {
-      "symbol": "MIMI",
-      "entry": 2.71,
-      "exit": 0.0,
-      "shares": 34,
-      "pnl": 0,
-      "reason": "profit_protect",
-      "trade_type": "rtg"
-    },
-    {
-      "symbol": "DAIC",
-      "entry": 4.7675,
-      "exit": 0.0,
-      "shares": 8,
-      "pnl": 0,
-      "reason": "profit_protect",
-      "trade_type": "rtg"
-    },
-    {
       "symbol": "CRMG",
-      "entry": 9.345,
+      "entry": 9.379,
       "exit": 0.0,
       "shares": 4,
       "pnl": 0,
@@ -193,18 +220,9 @@
     },
     {
       "symbol": "VNCE",
-      "entry": 7.545,
+      "entry": 7.62,
       "exit": 0.0,
-      "shares": 4,
-      "pnl": 0,
-      "reason": "profit_protect",
-      "trade_type": "rtg"
-    },
-    {
-      "symbol": "YJ",
-      "entry": 3.07,
-      "exit": 0.0,
-      "shares": 12,
+      "shares": 5,
       "pnl": 0,
       "reason": "profit_protect",
       "trade_type": "rtg"
