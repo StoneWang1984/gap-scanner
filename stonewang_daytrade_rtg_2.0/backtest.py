@@ -161,13 +161,30 @@ def bulk_scan_gaps(client, trading_days, symbols):
                     avg_vol_20d = sum(prior_vols) / len(prior_vols) if prior_vols else 0
                     rvol = volume / avg_vol_20d if avg_vol_20d > 0 else 0
 
+                    # Calculate 14-day ATR from pre-gap daily bars
+                    atr_period = getattr(config, "ATR_PERIOD", 14)
+                    atr_lookback_start = max(0, i - atr_period - 1)
+                    true_ranges = []
+                    for j in range(atr_lookback_start + 1, i):
+                        if j < 1:
+                            continue
+                        bar_j = sym_df.iloc[j]
+                        bar_jm1 = sym_df.iloc[j - 1]
+                        tr = max(
+                            float(bar_j["high"]) - float(bar_j["low"]),
+                            abs(float(bar_j["high"]) - float(bar_jm1["close"])),
+                            abs(float(bar_j["low"]) - float(bar_jm1["close"])),
+                        )
+                        true_ranges.append(tr)
+                    atr = sum(true_ranges) / len(true_ranges) if true_ranges else 0
+
                     if symbol not in symbol_data:
                         symbol_data[symbol] = []
                     symbol_data[symbol].append({
                         "date": curr_date, "open_price": open_price,
                         "prev_close": prev_close, "gap_pct": gap_pct,
                         "volume": volume, "dollar_volume": dollar_volume,
-                        "rvol": rvol,
+                        "rvol": rvol, "atr": atr,
                     })
             except (KeyError, IndexError):
                 continue
@@ -329,18 +346,35 @@ def get_rvol_exit_params(rvol):
     return 0.05, 0.20, 0.05, 0.03
 
 
+def get_atr_stop_params(rvol, atr, entry_price):
+    """Get stop/target/trail based on ATR and RVOL tier."""
+    atr_mult = 2.0
+    for rvol_min, mult in getattr(config, "ATR_MULT_TIERS", [(10.0, 3.0), (5.0, 2.5), (0.0, 2.0)]):
+        if rvol >= rvol_min:
+            atr_mult = mult
+            break
+    stop_pct = (atr_mult * atr) / entry_price
+    stop_pct = max(getattr(config, "ATR_STOP_MIN_PCT", 0.02),
+                   min(getattr(config, "ATR_STOP_MAX_PCT", 0.10), stop_pct))
+    trail_pct = max(0.005, min(0.05, (getattr(config, "ATR_TRAIL_MULT", 1.5) * atr) / entry_price))
+    target_pct = max(0.05, min(0.50, (getattr(config, "ATR_TARGET_MULT", 5.0) * atr) / entry_price))
+    trail_activate_pct = min(stop_pct * 1.5, 0.10)
+    return stop_pct, target_pct, trail_activate_pct, trail_pct
+
+
 # ── Open position tracker for concurrent bar-by-bar simulation ────
 
 class OpenPosition:
     """Tracks a single open position during bar-by-bar simulation."""
     def __init__(self, symbol, shares, entry_price, entry_bar_idx, open_price,
-                 rvol, stop_pct, target_pct, trail_activate_pct, trail_pct, signal_type):
+                 rvol, atr, stop_pct, target_pct, trail_activate_pct, trail_pct, signal_type):
         self.symbol = symbol
         self.shares = shares
         self.entry_price = entry_price
         self.entry_bar_idx = entry_bar_idx
         self.open_price = open_price
         self.rvol = rvol
+        self.atr = atr
         self.stop_pct = stop_pct
         self.target_pct = target_pct
         self.trail_activate_pct = trail_activate_pct
@@ -485,11 +519,17 @@ def run_backtest(end_date=None, n_days=None):
     sizing_tiers = getattr(config, "RVOL_SIZING_TIERS", [])
     if sizing_tiers:
         print(f"  Sizing tiers: " + ", ".join(f"RVOL>{r:.0f}×→{p:.0%}" for r, p in sizing_tiers))
-    exit_tiers = getattr(config, "RVOL_EXIT_TIERS", [])
-    if exit_tiers:
-        print(f"  Exit tiers: " + ", ".join(
-            f"RVOL>{r:.0f}×→stop{s:.0%}/tgt{t:.0%}/trail{a:.0%}/{tr:.0%}"
-            for r, s, t, a, tr in exit_tiers))
+    atr_mult_tiers = getattr(config, "ATR_MULT_TIERS", [])
+    if atr_mult_tiers:
+        print(f"  Stop: ATR-based (" + ", ".join(f"RVOL>{r:.0f}×→{m:.1f}×ATR" for r, m in atr_mult_tiers) + ")"
+              f" | clamp {getattr(config, 'ATR_STOP_MIN_PCT', 0.02):.0%}-{getattr(config, 'ATR_STOP_MAX_PCT', 0.10):.0%}")
+        print(f"  Trail: {getattr(config, 'ATR_TRAIL_MULT', 1.5):.1f}×ATR | Target: {getattr(config, 'ATR_TARGET_MULT', 5.0):.1f}×ATR")
+    else:
+        exit_tiers = getattr(config, "RVOL_EXIT_TIERS", [])
+        if exit_tiers:
+            print(f"  Exit tiers: " + ", ".join(
+                f"RVOL>{r:.0f}×→stop{s:.0%}/tgt{t:.0%}/trail{a:.0%}/{tr:.0%}"
+                for r, s, t, a, tr in exit_tiers))
     print(f"  Re-entry: {'ON (max ' + str(config.RTG_REENTRY_MAX) + ')' if getattr(config, 'RTG_REENTRY_ALLOWED', False) else 'OFF'}")
     print(f"  Profit Protect: {'ON (ratio=' + f'{profit_ratio:.0%}' + ', min=$' + f'{profit_min:.0f}' + ')' if profit_protect else 'OFF'}")
     if progressive_tiers:
@@ -531,17 +571,23 @@ def run_backtest(end_date=None, n_days=None):
             rvol = row.get("rvol", 0)
             gap_pct = row["gap_pct"]
             open_p = row["open_price"]
-            print(f"  {sym} gap={gap_pct:+.1%} RVOL={rvol:.1f}× open=${open_p:.2f}")
+            atr_v = row.get("atr", 0)
+            atr_str = f" ATR=${atr_v:.3f}" if atr_v > 0 else ""
+            print(f"  {sym} gap={gap_pct:+.1%} RVOL={rvol:.1f}× open=${open_p:.2f}{atr_str}")
 
         # Pre-fetch all 1-min bars and find entry signals
         cached_bars = {}  # symbol -> bars_list
         entry_info = {}   # symbol -> (entry_price, entry_bar_idx, signal_type)
+        candidate_atrs = {}  # symbol -> atr
 
         tier_counts = {}
         for _, r in candidates.iterrows():
             rvol_r = r.get("rvol", 0)
             tier_key = _get_rvol_tier(rvol_r)[0]
             tier_counts[tier_key] = tier_counts.get(tier_key, 0) + 1
+            atr_v = r.get("atr", 0)
+            if atr_v > 0:
+                candidate_atrs[r["symbol"]] = atr_v
 
         for _, row in candidates.iterrows():
             symbol = row["symbol"]
@@ -593,7 +639,11 @@ def run_backtest(end_date=None, n_days=None):
                 break
 
             same_tier = tier_counts.get(_get_rvol_tier(rvol)[0], 1)
-            stop_p, target_p, trail_act_p, trail_p = get_rvol_exit_params(rvol)
+            atr = candidate_atrs.get(symbol, 0)
+            if atr > 0:
+                stop_p, target_p, trail_act_p, trail_p = get_atr_stop_params(rvol, atr, entry_price)
+            else:
+                stop_p, target_p, trail_act_p, trail_p = get_rvol_exit_params(rvol)
 
             entry_price_actual = round(entry_price * (1 + entry_slippage), 4)
             pos_size = get_rvol_sizing(rvol, equity, same_tier_count=same_tier)
@@ -605,6 +655,7 @@ def run_backtest(end_date=None, n_days=None):
             pos = OpenPosition(
                 symbol=symbol, shares=shares, entry_price=entry_price_actual,
                 entry_bar_idx=entry_bar_idx, open_price=open_price, rvol=rvol,
+                atr=atr,
                 stop_pct=stop_p, target_pct=target_p,
                 trail_activate_pct=trail_act_p, trail_pct=trail_p,
                 signal_type=signal_type,
@@ -723,10 +774,11 @@ def run_backtest(end_date=None, n_days=None):
             entry_ts = _bar_ts_str(bars, pos.entry_bar_idx)
             exit_ts = _bar_ts_str(bars, min(pos.exit_bar_idx, len(bars) - 1))
 
+            atr_info = f" ATR=${pos.atr:.3f}" if pos.atr > 0 else ""
             print(f"  {pos.symbol} [{pos.signal_type}] entry=${pos.entry_price:.4f}@{entry_ts} "
                   f"exit=${pos.exit_price:.4f}@{exit_ts} ({pos.exit_reason}), "
                   f"P&L=${pos.pnl:+,.2f} ({pos.pnl_pct:+.2%}) "
-                  f"[RVOL={pos.rvol:.1f}× stop={pos.stop_pct:.0%} tgt={pos.target_pct:.0%}]")
+                  f"[RVOL={pos.rvol:.1f}× stop={pos.stop_pct:.1%}{atr_info} tgt={pos.target_pct:.0%}]")
 
             all_trades.append(result)
             equity += result.pnl

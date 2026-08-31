@@ -61,11 +61,22 @@ RVOL_SIZING_TIERS = [
     (0.0,  0.20),   # RVOL < 5× → 20% of equity (marginal setup)
 ]
 
-# ── RVOL-adaptive exit tiers ─────────────────────────────────────────
+# ── ATR-based adaptive stop loss ──────────────────────────────────────
+# Stop = entry_price - ATR_MULT × ATR (clamp to min/max pct)
+# RVOL controls the ATR multiplier: higher RVOL = wider stop (more room to breathe)
+ATR_PERIOD = 14                # 14-day ATR (pre-gap daily bars)
+ATR_MULT_TIERS = [             # (rvol_min, atr_mult) — higher RVOL = wider stop
+    (10.0, 3.0),               # RVOL > 10x → 3.0× ATR stop (A+ setup, give room)
+    (5.0,  2.5),               # RVOL > 5x → 2.5× ATR stop
+    (0.0,  2.0),               # RVOL < 5x → 2.0× ATR stop
+]
+ATR_STOP_MIN_PCT = 0.02        # Stop at least 2% (prevent ATR too small → stop too tight)
+ATR_STOP_MAX_PCT = 0.10        # Stop at most 10% (prevent ATR too large → stop too wide)
+ATR_TRAIL_MULT = 1.5           # Trailing stop width = 1.5× ATR (as pct of entry)
+ATR_TARGET_MULT = 5.0          # Target price = entry + 5× ATR
+
+# ── RVOL-adaptive exit tiers (FALLBACK when ATR unavailable) ──────────
 # (rvol_min, stop_pct, target_pct, trail_activate_pct, trail_pct)
-# Key insight: gap-momentum stocks have 5-10% normal intraday swings.
-# 2% trail gets stopped out on first pullback, missing 80%+ of the move.
-# High RVOL gap stocks need 5%+ trail to ride the opening drive.
 RVOL_EXIT_TIERS = [
     (10.0, 0.07, 0.50, 0.05, 0.05),  # High RVOL: 7% stop, 50% target, trail +5%/5%
     (5.0,  0.05, 0.30, 0.04, 0.04),  # Medium: 5% stop, 30% target, trail +4%/4%

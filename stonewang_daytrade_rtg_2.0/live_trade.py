@@ -113,6 +113,31 @@ def get_rvol_exit_params(rvol):
     return 0.03, 0.15, 0.03, 0.02
 
 
+def get_atr_stop_params(rvol, atr, entry_price):
+    """Get stop/target/trail based on ATR and RVOL tier.
+    Returns (stop_pct, target_pct, trail_activate_pct, trail_pct).
+    """
+    # Get ATR multiplier from RVOL tier
+    atr_mult = 2.0
+    for rvol_min, mult in getattr(config, "ATR_MULT_TIERS", [(10.0, 3.0), (5.0, 2.5), (0.0, 2.0)]):
+        if rvol >= rvol_min:
+            atr_mult = mult
+            break
+
+    # ATR-based stop
+    stop_pct = (atr_mult * atr) / entry_price
+    # Clamp to min/max
+    stop_pct = max(getattr(config, "ATR_STOP_MIN_PCT", 0.02),
+                   min(getattr(config, "ATR_STOP_MAX_PCT", 0.10), stop_pct))
+
+    # ATR-based trail and target
+    trail_pct = max(0.005, min(0.05, (getattr(config, "ATR_TRAIL_MULT", 1.5) * atr) / entry_price))
+    target_pct = max(0.05, min(0.50, (getattr(config, "ATR_TARGET_MULT", 5.0) * atr) / entry_price))
+    trail_activate_pct = min(stop_pct * 1.5, 0.10)  # Activate trail after 1.5x stop distance
+
+    return stop_pct, target_pct, trail_activate_pct, trail_pct
+
+
 def log(msg):
     ts = dt.datetime.now(_EST).strftime("%H:%M:%S")
     line = f"[{ts}] {msg}"
@@ -134,6 +159,7 @@ class Position:
     highest: float = 0.0
     trail_active: bool = False
     rvol: float = 0.0
+    atr: float = 0.0
     stop_pct: float = 0.0
     target_pct: float = 0.0
     trail_activate_pct: float = 0.0
@@ -469,9 +495,11 @@ def save_state(state):
 
 
 def _fetch_20d_avg_volumes(symbols, target_date):
-    """Fetch 20-day average daily volume from Alpaca for RVOL calculation."""
-    lookback = target_date - pd.Timedelta(days=30)
+    """Fetch 20-day average daily volume and 14-day ATR from Alpaca."""
+    lookback = target_date - pd.Timedelta(days=45)  # Extra lookback for ATR
     avg_vols = {}
+    atrs = {}
+    atr_period = getattr(config, "ATR_PERIOD", 14)
     batch_size = 50
     for i in range(0, len(symbols), batch_size):
         batch = symbols[i:i + batch_size]
@@ -495,11 +523,26 @@ def _fetch_20d_avg_volumes(symbols, target_date):
                     if not sym_df.empty:
                         recent = sym_df["volume"].tail(getattr(config, "RVOL_LOOKBACK_DAYS", 20))
                         avg_vols[sym] = float(recent.mean())
+                        # Calculate ATR from daily bars
+                        if len(sym_df) >= 2:
+                            daily_bars = sym_df.sort_index().tail(atr_period + 1)
+                            true_ranges = []
+                            for j in range(1, len(daily_bars)):
+                                curr = daily_bars.iloc[j]
+                                prev = daily_bars.iloc[j - 1]
+                                tr = max(
+                                    float(curr["high"]) - float(curr["low"]),
+                                    abs(float(curr["high"]) - float(prev["close"])),
+                                    abs(float(curr["low"]) - float(prev["close"])),
+                                )
+                                true_ranges.append(tr)
+                            if true_ranges:
+                                atrs[sym] = sum(true_ranges) / len(true_ranges)
                 except Exception:
                     pass
         except Exception as e:
-            log(f"20d volume fetch error batch {i}: {e}")
-    return avg_vols
+            log(f"20d volume/ATR fetch error batch {i}: {e}")
+    return avg_vols, atrs
 
 
 def scan_gaps(target_date):
@@ -552,10 +595,10 @@ def scan_gaps(target_date):
         return []
     results = pd.concat(all_results, ignore_index=True)
 
-    # Fetch real 20-day average volumes for proper RVOL calculation
+    # Fetch real 20-day average volumes and ATR for proper RVOL/stop calculation
     gap_symbols = results["symbol"].tolist()
-    avg_vols = _fetch_20d_avg_volumes(gap_symbols, target_date)
-    log(f"Fetched 20d avg volume for {len(avg_vols)}/{len(gap_symbols)} symbols")
+    avg_vols, atrs = _fetch_20d_avg_volumes(gap_symbols, target_date)
+    log(f"Fetched 20d avg volume for {len(avg_vols)}/{len(gap_symbols)} symbols, ATR for {len(atrs)}")
 
     candidates = []
     for _, row in results.iterrows():
@@ -568,16 +611,18 @@ def scan_gaps(target_date):
             rvol = prev_vol / row["avg_volume_20d"]
         else:
             rvol = 0.0
+        atr = atrs.get(sym, 0)
         candidates.append({
             "symbol": sym, "open_price": float(row["open_price"]),
             "prev_close": float(row["prev_close"]), "gap_pct": float(row["gap_pct"]),
-            "rvol": float(rvol),
+            "rvol": float(rvol), "atr": float(atr),
         })
     candidates.sort(key=lambda c: c["rvol"], reverse=True)
     candidates = candidates[:config.MAX_CANDIDATES]
     log(f"Top {len(candidates)} candidates by RVOL: {[c['symbol'] for c in candidates]}")
     for c in candidates:
-        log(f"  {c['symbol']}: gap +{c['gap_pct']:.1%}, RVOL={c['rvol']:.1f}×, open=${c['open_price']:.4f}")
+        atr_str = f", ATR=${c['atr']:.3f}" if c.get("atr", 0) > 0 else ""
+        log(f"  {c['symbol']}: gap +{c['gap_pct']:.1%}, RVOL={c['rvol']:.1f}×, open=${c['open_price']:.4f}{atr_str}")
     return candidates
 
 
@@ -669,7 +714,7 @@ def scan_volume_breakouts(target_date, existing_symbols=None):
     total_min = mkt_close_min - mkt_open_min  # 390
     fraction_of_day = elapsed_min / total_min
 
-    avg_vols = _fetch_20d_avg_volumes(new_symbols, target_date)
+    avg_vols, atrs = _fetch_20d_avg_volumes(new_symbols, target_date)
 
     candidates = []
     for sym in new_symbols:
@@ -705,12 +750,14 @@ def scan_volume_breakouts(target_date, existing_symbols=None):
             continue
         gap_pct = (open_price / prev_close) - 1.0
 
+        atr = atrs.get(sym, 0)
         candidates.append({
             "symbol": sym,
             "open_price": open_price,
             "prev_close": prev_close,
             "gap_pct": gap_pct,
             "rvol": intraday_rvol,
+            "atr": float(atr),
         })
 
     candidates.sort(key=lambda c: c["rvol"], reverse=True)
@@ -900,7 +947,12 @@ def run_trading_day(target_date):
             sp = prev_positions.get(sym, {})
             cand = next((c for c in candidates if c["symbol"] == sym), None)
             rvol = sp.get("rvol", cand.get("rvol", 0) if cand else 0)
-            stop_p, target_p, trail_act_p, trail_p = get_rvol_exit_params(rvol)
+            atr = sp.get("atr", cand.get("atr", 0) if cand else 0)
+            entry_p = float(ep.avg_entry_price)
+            if atr > 0:
+                stop_p, target_p, trail_act_p, trail_p = get_atr_stop_params(rvol, atr, entry_p)
+            else:
+                stop_p, target_p, trail_act_p, trail_p = get_rvol_exit_params(rvol)
             pos = Position(
                 symbol=sym, shares=int(float(ep.qty)),
                 entry_price=float(ep.avg_entry_price), entry_ts=time.time(),
@@ -909,7 +961,7 @@ def run_trading_day(target_date):
                 signal_type=sp.get("signal_type", "rtg"),
                 highest=float(ep.current_price),
                 trail_active=sp.get("trail_active", False),
-                rvol=rvol,
+                rvol=rvol, atr=atr,
                 stop_pct=sp.get("stop_pct", stop_p),
                 target_pct=sp.get("target_pct", target_p),
                 trail_activate_pct=sp.get("trail_activate_pct", trail_act_p),
@@ -1253,13 +1305,19 @@ def run_trading_day(target_date):
                     continue
                 if fill_price <= 0:
                     fill_price = entry_price
-                # Get adaptive exit params
-                stop_p, target_p, trail_act_p, trail_p = get_rvol_exit_params(rvol)
+                # Get adaptive exit params (ATR-based if available, fallback to RVOL)
+                atr = c.get("atr", 0)
+                if atr > 0:
+                    stop_p, target_p, trail_act_p, trail_p = get_atr_stop_params(rvol, atr, fill_price)
+                    stop_src = f"ATR=${atr:.3f}"
+                else:
+                    stop_p, target_p, trail_act_p, trail_p = get_rvol_exit_params(rvol)
+                    stop_src = "RVOL"
                 sig_label = signal_type + ("_re" if is_reentry else "")
                 pos = Position(symbol=sym, shares=filled, entry_price=fill_price,
                                entry_ts=time.time(), open_price=open_price,
                                gap_pct=c["gap_pct"], signal_type=sig_label, highest=fill_price,
-                               rvol=rvol, stop_pct=stop_p, target_pct=target_p,
+                               rvol=rvol, atr=atr, stop_pct=stop_p, target_pct=target_p,
                                trail_activate_pct=trail_act_p, trail_pct=trail_p)
                 positions.append(pos)
                 entry_checked.add(sym)
@@ -1267,7 +1325,7 @@ def run_trading_day(target_date):
                 daily_trades += 1
                 live_bp -= fill_price * filled  # Track remaining buying power
                 log(f"ENTRY {sym} [{sig_label}] {filled}sh @ ${fill_price:.4f} "
-                    f"[RVOL={rvol:.1f}× stop={stop_p:.0%} tgt={target_p:.0%}]")
+                    f"[RVOL={rvol:.1f}× stop={stop_p:.1%}({stop_src}) tgt={target_p:.0%}]")
 
         # WS health — restart if not running OR no bars for 60s
         # Add 30s cooldown between restarts to avoid tight loop
@@ -1289,7 +1347,7 @@ def run_trading_day(target_date):
             "updated": dt.datetime.now().isoformat(), "ws_connected": _stream_state["running"],
             "daily_trades": daily_trades,
             "positions": [{"symbol": p.symbol, "shares": p.shares, "entry_price": p.entry_price,
-                           "signal_type": p.signal_type, "rvol": p.rvol,
+                           "signal_type": p.signal_type, "rvol": p.rvol, "atr": p.atr,
                            "open_price": p.open_price, "gap_pct": p.gap_pct,
                            "stop_pct": p.stop_pct, "target_pct": p.target_pct,
                            "trail_activate_pct": p.trail_activate_pct, "trail_pct": p.trail_pct,
@@ -1363,9 +1421,12 @@ def main():
 
     log(f"Using {config.DATA_FEED.upper()} data feed")
     log("=" * 60)
-    log(f"stonewang RTG 2.0 Live Trading -- Profit Protection + Progressive Trailing + Volume Breakout")
+    log(f"stonewang RTG 2.0 Live Trading -- ATR Adaptive Stop + Profit Protection + Volume Breakout")
     log(f"Entry: RTG (vol >= {config.RTG_VOLUME_MULT}x prior) / GapGo DISABLED")
-    log(f"Exit: adaptive by RVOL tier | time {config.RTG_TIME_LIMIT_SEC}s")
+    log(f"Exit: ATR-based adaptive stop (RVOL→ATR mult) | time {config.RTG_TIME_LIMIT_SEC}s")
+    atr_mult_str = ", ".join(f"RVOL>{r:.0f}x→{m:.1f}×ATR" for r, m in config.ATR_MULT_TIERS)
+    log(f"  Stop: {atr_mult_str} | clamp {config.ATR_STOP_MIN_PCT:.0%}-{config.ATR_STOP_MAX_PCT:.0%}")
+    log(f"  Trail: {config.ATR_TRAIL_MULT:.1f}×ATR | Target: {config.ATR_TARGET_MULT:.1f}×ATR")
     log(f"Window: {config.ENTRY_WINDOW_START}-{config.ENTRY_WINDOW_END} EST")
     sizing_str = "/".join(f"{p:.0%}" for _, p in config.RVOL_SIZING_TIERS)
     log(f"Sizing: RVOL-weighted ({sizing_str}) | max {config.MAX_POSITIONS} concurrent | re-entry max {config.RTG_REENTRY_MAX}")
