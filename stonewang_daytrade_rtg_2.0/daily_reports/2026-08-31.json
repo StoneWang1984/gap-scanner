@@ -1,0 +1,171 @@
+{
+  "date": "2026-08-31",
+  "version": "rtg_2.0",
+  "account_equity_start": 329.81,
+  "account_equity_end": 318.19,
+  "daily_pnl": -11.62,
+  "daily_trades": 16,
+  "candidates": [
+    {
+      "symbol": "RDHL",
+      "open_price": 1.36,
+      "prev_close": 0.661,
+      "gap_pct": 1.0574886535552195,
+      "rvol": 32050.32814411695,
+      "atr": 0.0395714285714286
+    },
+    {
+      "symbol": "WBUY",
+      "open_price": 0.9997,
+      "prev_close": 0.83,
+      "gap_pct": 0.20445783132530138,
+      "rvol": 6736.784020171431,
+      "atr": 0.059385714285714285
+    },
+    {
+      "symbol": "YDDL",
+      "open_price": 2.375,
+      "prev_close": 1.65,
+      "gap_pct": 0.43939393939393945,
+      "rvol": 2141.4537055979667,
+      "atr": 0.0971857142857143
+    },
+    {
+      "symbol": "AEHL",
+      "open_price": 6.76,
+      "prev_close": 3.54,
+      "gap_pct": 0.9096045197740112,
+      "rvol": 358.95618494598,
+      "atr": 1.126407142857143
+    },
+    {
+      "symbol": "COOT",
+      "open_price": 0.5801,
+      "prev_close": 0.46,
+      "gap_pct": 0.26108695652173886,
+      "rvol": 236.44025728623637,
+      "atr": 0.033350000000000005
+    },
+    {
+      "symbol": "NCRA",
+      "open_price": 2.39,
+      "prev_close": 1.89,
+      "gap_pct": 0.26455026455026465,
+      "rvol": 224.92591814609153,
+      "atr": 0.20978571428571438
+    },
+    {
+      "symbol": "LGPS",
+      "open_price": 1.27,
+      "prev_close": 1.06,
+      "gap_pct": 0.19811320754716988,
+      "rvol": 138.67153127651727,
+      "atr": 0.15788571428571427
+    },
+    {
+      "symbol": "WETO",
+      "open_price": 7.21,
+      "prev_close": 5.72,
+      "gap_pct": 0.26048951048951063,
+      "rvol": 22.657723163588514,
+      "atr": 9.569271428571428
+    },
+    {
+      "symbol": "PCG",
+      "open_price": 13.26,
+      "prev_close": 16.6,
+      "gap_pct": -0.20120481927710854,
+      "rvol": 15.810297453826305,
+      "atr": 0.6711499999999998
+    },
+    {
+      "symbol": "RZLV",
+      "open_price": 3.03,
+      "prev_close": 2.97,
+      "gap_pct": 0.02020202020202011,
+      "rvol": 8.228764622215744,
+      "atr": 0.159642857142857
+    },
+    {
+      "symbol": "NCPL",
+      "open_price": 0.7,
+      "prev_close": 0.6916,
+      "gap_pct": 0.012145748987854255,
+      "rvol": 4.904145504989795,
+      "atr": 0.14176428571428573
+    },
+    {
+      "symbol": "GPRO",
+      "open_price": 0.61,
+      "prev_close": 0.5999,
+      "gap_pct": 0.016836139356559476,
+      "rvol": 9.628590496919196,
+      "atr": 0.047992857142857163
+    }
+  ],
+  "trades": [
+    {
+      "symbol": "WETO",
+      "entry": 10.965,
+      "exit": 10.125,
+      "shares": 3,
+      "pnl": -2.52,
+      "reason": "stop_loss",
+      "trade_type": "rtg"
+    },
+    {
+      "symbol": "NCRA",
+      "entry": 2.735,
+      "exit": 2.4801,
+      "shares": 14,
+      "pnl": -3.57,
+      "reason": "stop_loss",
+      "trade_type": "rtg"
+    },
+    {
+      "symbol": "COOT",
+      "entry": 0.5941,
+      "exit": 0.664,
+      "shares": 67,
+      "pnl": 4.68,
+      "reason": "trail_stop",
+      "trade_type": "rtg"
+    },
+    {
+      "symbol": "NCPL",
+      "entry": 0.813402,
+      "exit": 0.726,
+      "shares": 61,
+      "pnl": -5.33,
+      "reason": "stop_loss",
+      "trade_type": "rtg"
+    },
+    {
+      "symbol": "YDDL",
+      "entry": 2.3599,
+      "exit": 2.125,
+      "shares": 17,
+      "pnl": -3.99,
+      "reason": "stop_loss",
+      "trade_type": "rtg"
+    },
+    {
+      "symbol": "AEHL",
+      "entry": 6.81,
+      "exit": 7.455,
+      "shares": 5,
+      "pnl": 3.23,
+      "reason": "trail_stop",
+      "trade_type": "rtg"
+    },
+    {
+      "symbol": "WBUY",
+      "entry": 1.085,
+      "exit": 0.9705,
+      "shares": 36,
+      "pnl": -4.12,
+      "reason": "stop_loss",
+      "trade_type": "rtg"
+    }
+  ]
+}

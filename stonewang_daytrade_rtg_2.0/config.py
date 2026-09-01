@@ -1,11 +1,14 @@
 """Config — stonewang_daytrade_rtg_2.0: RTG + Profit Protection + Progressive Trailing.
 
 New rules vs rtg_1.0:
-  1. Daily profit protection: when today's profit drops to 85% of max profit reached, force close all
+  1. Daily profit protection: when today's profit drops to 70% of max profit reached, force close all
   2. Progressive trailing stop:
      - stock profit > 5%  -> trail = 1.5%
      - stock profit > 10% -> trail = 1%
      - stock profit > 15% -> trail = 0.5%
+  3. Gap-adaptive stop: stop width = max(ATR_stop, gap × 0.3), clamp 2%~8%
+  4. No target price — exit managed entirely by trail + progressive trail
+  5. vol_surge signal uses tighter stops than rtg signal
 """
 
 import os
@@ -48,7 +51,7 @@ RTG_ONLY = True  # Only trade RTG signals — GapGo has 34% win rate (removed)
 VOLUME_SCAN_INTERVAL = 300      # seconds between volume breakout scans (5 min)
 VOLUME_SCAN_TOP_N = 30          # top N most active stocks from screener
 VOLUME_SCAN_MOVERS_TOP_N = 20   # top N market movers from screener
-VOLUME_SCAN_MIN_RVOL = 3.0      # minimum intraday RVOL to qualify as breakout
+VOLUME_SCAN_MIN_REL_VOL_RATIO = 3.0  # min relative 5-min vol ratio (current/prev bar)
 VOLUME_SCAN_PRICE_MIN = 0.50    # relaxed price floor (vs $1 for gap scan)
 VOLUME_SCAN_PRICE_MAX = 20.0    # same ceiling as gap scan
 
@@ -62,8 +65,8 @@ RVOL_SIZING_TIERS = [
 ]
 
 # ── ATR-based adaptive stop loss ──────────────────────────────────────
-# Stop = entry_price - ATR_MULT × ATR (clamp to min/max pct)
-# RVOL controls the ATR multiplier: higher RVOL = wider stop (more room to breathe)
+# Stop = max(ATR_MULT × ATR, |gap_pct| × GAP_STOP_FACTOR) / entry, clamp to min/max pct
+# Gap expansion: gap stocks have much wider opening oscillation than historical ATR
 ATR_PERIOD = 14                # 14-day ATR (pre-gap daily bars)
 ATR_MULT_TIERS = [             # (rvol_min, atr_mult) — higher RVOL = wider stop
     (10.0, 3.0),               # RVOL > 10x → 3.0× ATR stop (A+ setup, give room)
@@ -71,9 +74,16 @@ ATR_MULT_TIERS = [             # (rvol_min, atr_mult) — higher RVOL = wider st
     (0.0,  2.0),               # RVOL < 5x → 2.0× ATR stop
 ]
 ATR_STOP_MIN_PCT = 0.02        # Stop at least 2% (prevent ATR too small → stop too tight)
-ATR_STOP_MAX_PCT = 0.10        # Stop at most 10% (prevent ATR too large → stop too wide)
-ATR_TRAIL_MULT = 1.5           # Trailing stop width = 1.5× ATR (as pct of entry)
-ATR_TARGET_MULT = 5.0          # Target price = entry + 5× ATR
+ATR_STOP_MAX_PCT = 0.08        # Stop at most 8% (gap stocks need wider stops)
+GAP_STOP_FACTOR = 0.3          # Stop covers at least 30% of the gap magnitude
+ATR_TRAIL_MULT = 2.0           # Trailing stop width = 2.0× ATR (wider initial trail)
+ATR_TARGET_MULT = 0.0          # Target price DISABLED — trail + progressive trail manage exit
+
+# ── vol_surge exit parameters (tighter than rtg) ──────────────────────
+# Volume scan candidates are intraday momentum, not opening drive — tighter management
+VOL_SURGE_STOP_MAX_PCT = 0.05  # 5% max stop (no gap expansion — intraday stocks are stable)
+VOL_SURGE_TRAIL_MULT = 1.5     # Tighter trail (1.5× ATR vs 2.0× for rtg)
+VOL_SURGE_TRAIL_MAX_PCT = 0.03 # Max trail 3% (lock profit faster)
 
 # ── RVOL-adaptive exit tiers (FALLBACK when ATR unavailable) ──────────
 # (rvol_min, stop_pct, target_pct, trail_activate_pct, trail_pct)
@@ -85,8 +95,9 @@ RVOL_EXIT_TIERS = [
 
 # ── Daily profit protection (rtg_2.0) ──────────────────────────────────
 DAILY_PROFIT_PROTECT_ENABLED = True   # When today's profit drops to X% of max, force close all
-DAILY_PROFIT_PROTECT_RATIO = 0.85    # 85% — e.g. max profit $25, force close when profit drops to $21.25
-DAILY_PROFIT_PROTECT_MIN = 5.0       # Only activate when max profit >= $5 (avoid triggering on noise)
+DAILY_PROFIT_PROTECT_RATIO = 0.70    # 70% — allow 30% drawdown from peak profit
+DAILY_PROFIT_PROTECT_MIN = 10.0      # Only activate when max profit >= $10
+DAILY_PROFIT_PROTECT_DELAY_SEC = 1800  # Don't activate until 30 min after market open
 
 # ── Progressive trailing stop (rtg_2.0) ────────────────────────────────
 # As stock profit grows, tighten trailing stop to lock in gains
@@ -123,16 +134,16 @@ GAPGO_MIN_BREAKOUT_VOL = 99999999    # Effectively disabled
 
 # ── Exit parameters (defaults — overridden by RVOL_EXIT_TIERS) ──────
 RTG_STOP_PCT = 0.05           # 5% hard stop loss (default)
-RTG_TARGET_PCT = 0.30         # 30% profit target (default)
+RTG_TARGET_PCT = 0.0          # No target — trail manages exit
 RTG_TIME_LIMIT_SEC = 0          # No time limit — let trail/stop manage the trade (Cam Connor)
 RTG_TRAIL_ACTIVATE_PCT = 0.03 # Activate trailing stop after +3% gain
 RTG_TRAIL_PCT = 0.02          # 2% trailing stop
 
 # ── Position sizing ──────────────────────────────────────────────────
-INITIAL_CAPITAL = 377.29      # Account equity (updated 2026-08-22)
+INITIAL_CAPITAL = 329.81      # Account equity (updated 2026-09-01)
 MIN_POSITION_SIZE = 40        # Min $40 per position (fractional shares)
 MAX_POSITION_SIZE = 9999      # No hard cap — RVOL tiers control sizing
-MAX_POSITIONS = 8             # Max 8 concurrent positions
+MAX_POSITIONS = 4             # Max 4 concurrent positions — concentrate capital
 EXCLUDE_SYMBOLS = {"AEI", "LITZ", "VOGX", "WEAV"}  # Managed by external OCO orders
 MAX_DAILY_TRADES = 0          # 0 = no limit
 MAX_DAILY_LOSS_PCT = 0.04     # 4% daily loss circuit breaker (tighter)
@@ -149,8 +160,8 @@ POLL_INTERVAL = 3             # Main loop poll interval (seconds)
 DRY_RUN_POLL_INTERVAL = 5
 
 # ── Slippage model ───────────────────────────────────────────────────
-SLIPPAGE_ENTRY_PCT = 0.005    # 0.5% entry slippage (market buy)
-SLIPPAGE_EXIT_PCT = 0.005     # 0.5% exit slippage (market sell)
+SLIPPAGE_ENTRY_PCT = 0.005    # 0.2% entry slippage (market buy)
+SLIPPAGE_EXIT_PCT = 0.005     # 0.2% exit slippage (market sell)
 SLIPPAGE_FORCE_CLOSE_PCT = 0.01
 
 # ── Order parameters ─────────────────────────────────────────────────

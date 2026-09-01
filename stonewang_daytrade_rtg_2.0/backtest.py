@@ -346,18 +346,33 @@ def get_rvol_exit_params(rvol):
     return 0.05, 0.20, 0.05, 0.03
 
 
-def get_atr_stop_params(rvol, atr, entry_price):
-    """Get stop/target/trail based on ATR and RVOL tier."""
+def get_atr_stop_params(rvol, atr, entry_price, gap_pct=0, signal_type="rtg"):
+    """Get stop/trail based on ATR, RVOL tier, and gap magnitude."""
     atr_mult = 2.0
     for rvol_min, mult in getattr(config, "ATR_MULT_TIERS", [(10.0, 3.0), (5.0, 2.5), (0.0, 2.0)]):
         if rvol >= rvol_min:
             atr_mult = mult
             break
-    stop_pct = (atr_mult * atr) / entry_price
-    stop_pct = max(getattr(config, "ATR_STOP_MIN_PCT", 0.02),
-                   min(getattr(config, "ATR_STOP_MAX_PCT", 0.10), stop_pct))
-    trail_pct = max(0.005, min(0.05, (getattr(config, "ATR_TRAIL_MULT", 1.5) * atr) / entry_price))
-    target_pct = max(0.05, min(0.50, (getattr(config, "ATR_TARGET_MULT", 5.0) * atr) / entry_price))
+
+    atr_stop_pct = (atr_mult * atr) / entry_price
+
+    gap_factor = getattr(config, "GAP_STOP_FACTOR", 0.3)
+    gap_stop_pct = abs(gap_pct) * gap_factor
+
+    if signal_type == "vol_surge":
+        stop_pct = atr_stop_pct
+        stop_max = getattr(config, "VOL_SURGE_STOP_MAX_PCT", 0.05)
+        stop_pct = max(getattr(config, "ATR_STOP_MIN_PCT", 0.02), min(stop_max, stop_pct))
+        trail_mult = getattr(config, "VOL_SURGE_TRAIL_MULT", 1.5)
+        trail_max = getattr(config, "VOL_SURGE_TRAIL_MAX_PCT", 0.03)
+        trail_pct = max(0.005, min(trail_max, (trail_mult * atr) / entry_price))
+    else:
+        stop_pct = max(atr_stop_pct, gap_stop_pct)
+        stop_pct = max(getattr(config, "ATR_STOP_MIN_PCT", 0.02),
+                       min(getattr(config, "ATR_STOP_MAX_PCT", 0.08), stop_pct))
+        trail_pct = max(0.005, min(0.05, (getattr(config, "ATR_TRAIL_MULT", 2.0) * atr) / entry_price))
+
+    target_pct = 0.0  # Disabled — trail + progressive trail manage exit
     trail_activate_pct = min(stop_pct * 1.5, 0.10)
     return stop_pct, target_pct, trail_activate_pct, trail_pct
 
@@ -382,7 +397,7 @@ class OpenPosition:
         self.signal_type = signal_type
 
         self.stop_price = round(entry_price * (1 - stop_pct), 4)
-        self.target_price = round(entry_price * (1 + target_pct), 4)
+        self.target_price = round(entry_price * (1 + target_pct), 4) if target_pct > 0 else 0
         self.trail_activate = entry_price * (1 + trail_activate_pct)
 
         self.highest = entry_price
@@ -443,8 +458,8 @@ class OpenPosition:
                 self.closed = True
                 return True
 
-        # 3. Target
-        if bar_high >= self.target_price:
+        # 3. Target (disabled — trail manages exit)
+        if self.target_price > 0 and bar_high >= self.target_price:
             self.exit_price = self.target_price
             self.exit_reason = "target"
             self.exit_bar_idx = bar_idx
@@ -522,8 +537,9 @@ def run_backtest(end_date=None, n_days=None):
     atr_mult_tiers = getattr(config, "ATR_MULT_TIERS", [])
     if atr_mult_tiers:
         print(f"  Stop: ATR-based (" + ", ".join(f"RVOL>{r:.0f}×→{m:.1f}×ATR" for r, m in atr_mult_tiers) + ")"
-              f" | clamp {getattr(config, 'ATR_STOP_MIN_PCT', 0.02):.0%}-{getattr(config, 'ATR_STOP_MAX_PCT', 0.10):.0%}")
-        print(f"  Trail: {getattr(config, 'ATR_TRAIL_MULT', 1.5):.1f}×ATR | Target: {getattr(config, 'ATR_TARGET_MULT', 5.0):.1f}×ATR")
+              f" + gap×{getattr(config, 'GAP_STOP_FACTOR', 0.3):.1f}"
+              f" | clamp {getattr(config, 'ATR_STOP_MIN_PCT', 0.02):.0%}-{getattr(config, 'ATR_STOP_MAX_PCT', 0.08):.0%}")
+        print(f"  Trail: {getattr(config, 'ATR_TRAIL_MULT', 2.0):.1f}×ATR | Target: DISABLED (trail manages exit)")
     else:
         exit_tiers = getattr(config, "RVOL_EXIT_TIERS", [])
         if exit_tiers:
@@ -611,7 +627,7 @@ def run_backtest(end_date=None, n_days=None):
             entry_at_open, entry_at_close, entry_bar_idx, confirmed, signal_type = find_rtg_entry_1min(
                 bars_1m, open_price, min_volume=min_vol)
             if confirmed and entry_at_open > 0:
-                entry_info[symbol] = (entry_at_open, entry_bar_idx, signal_type, rvol, open_price)
+                entry_info[symbol] = (entry_at_open, entry_bar_idx, signal_type, rvol, open_price, abs(row.get("gap_pct", 0)))
 
         if not entry_info:
             continue
@@ -619,6 +635,8 @@ def run_backtest(end_date=None, n_days=None):
         # ── Bar-by-bar concurrent simulation ──
         # Build timeline: union of all bar timestamps
         # Each symbol enters at its RTG signal, then we track all open positions bar by bar
+        # Compounding: track current equity including intraday realized P&L
+        daily_start_equity = equity
         max_daily_loss = equity * config.MAX_DAILY_LOSS_PCT
         daily_realized_pnl = 0.0
         max_daily_pnl = 0.0
@@ -632,7 +650,7 @@ def run_backtest(end_date=None, n_days=None):
         entered_symbols = set()
         entry_slippage = getattr(config, "SLIPPAGE_ENTRY_PCT", 0.005)
 
-        for symbol, (entry_price, entry_bar_idx, signal_type, rvol, open_price) in sorted_entries:
+        for symbol, (entry_price, entry_bar_idx, signal_type, rvol, open_price, gap_p) in sorted_entries:
             if symbol in entered_symbols:
                 continue
             if len(entered_symbols) >= config.MAX_POSITIONS:
@@ -641,12 +659,14 @@ def run_backtest(end_date=None, n_days=None):
             same_tier = tier_counts.get(_get_rvol_tier(rvol)[0], 1)
             atr = candidate_atrs.get(symbol, 0)
             if atr > 0:
-                stop_p, target_p, trail_act_p, trail_p = get_atr_stop_params(rvol, atr, entry_price)
+                stop_p, target_p, trail_act_p, trail_p = get_atr_stop_params(rvol, atr, entry_price, gap_pct=gap_p)
             else:
                 stop_p, target_p, trail_act_p, trail_p = get_rvol_exit_params(rvol)
 
+            # Compounding: size based on current equity (start of day + realized P&L so far)
+            current_equity = daily_start_equity + sum(p.pnl for p in closed_trades)
             entry_price_actual = round(entry_price * (1 + entry_slippage), 4)
-            pos_size = get_rvol_sizing(rvol, equity, same_tier_count=same_tier)
+            pos_size = get_rvol_sizing(rvol, current_equity, same_tier_count=same_tier)
             pos_size = max(config.MIN_POSITION_SIZE, pos_size)
             shares = int(pos_size / entry_price_actual)
             if shares <= 0:
@@ -713,7 +733,12 @@ def run_backtest(end_date=None, n_days=None):
                 if total_pnl > max_daily_pnl:
                     max_daily_pnl = total_pnl
 
-                if max_daily_pnl >= profit_min and total_pnl <= max_daily_pnl * profit_ratio:
+                # Delay activation — don't trigger in first 30 min
+                protect_delay = getattr(config, "DAILY_PROFIT_PROTECT_DELAY_SEC", 1800)
+                mkt_open_ts = pd.Timestamp(f"{date.date()} 09:30", tz="America/New_York")
+                elapsed_sec = (ts - mkt_open_ts).total_seconds()
+
+                if elapsed_sec >= protect_delay and max_daily_pnl >= profit_min and total_pnl <= max_daily_pnl * profit_ratio:
                     # Trigger profit protect: force close all open positions
                     for p in open_positions:
                         if not p.closed:
@@ -727,9 +752,10 @@ def run_backtest(end_date=None, n_days=None):
                           f"max_pnl=${max_daily_pnl:+,.2f}, cur_pnl=${total_pnl:+,.2f}, "
                           f"ratio={total_pnl/max_daily_pnl:.0%} ***")
 
-            # Check daily loss limit
+            # Check daily loss limit (compounding: recompute limit from current equity)
             realized_so_far = sum(p.pnl for p in closed_trades)
-            if max_daily_loss > 0 and realized_so_far <= -max_daily_loss:
+            current_max_loss = (daily_start_equity + realized_so_far) * config.MAX_DAILY_LOSS_PCT
+            if current_max_loss > 0 and realized_so_far <= -current_max_loss:
                 for p in open_positions:
                     if not p.closed:
                         bar = bars_this_min.get(p.symbol, {})

@@ -113,8 +113,14 @@ def get_rvol_exit_params(rvol):
     return 0.03, 0.15, 0.03, 0.02
 
 
-def get_atr_stop_params(rvol, atr, entry_price):
-    """Get stop/target/trail based on ATR and RVOL tier.
+def get_atr_stop_params(rvol, atr, entry_price, gap_pct=0, signal_type="rtg"):
+    """Get stop/trail based on ATR, RVOL tier, and gap magnitude.
+
+    Gap expansion: stop = max(ATR_stop, |gap_pct| × GAP_STOP_FACTOR)
+    This ensures gap stocks get wider stops to survive opening oscillation.
+
+    vol_surge signals get tighter parameters (no gap expansion, tighter trail).
+
     Returns (stop_pct, target_pct, trail_activate_pct, trail_pct).
     """
     # Get ATR multiplier from RVOL tier
@@ -125,15 +131,31 @@ def get_atr_stop_params(rvol, atr, entry_price):
             break
 
     # ATR-based stop
-    stop_pct = (atr_mult * atr) / entry_price
-    # Clamp to min/max
-    stop_pct = max(getattr(config, "ATR_STOP_MIN_PCT", 0.02),
-                   min(getattr(config, "ATR_STOP_MAX_PCT", 0.10), stop_pct))
+    atr_stop_pct = (atr_mult * atr) / entry_price
 
-    # ATR-based trail and target
-    trail_pct = max(0.005, min(0.05, (getattr(config, "ATR_TRAIL_MULT", 1.5) * atr) / entry_price))
-    target_pct = max(0.05, min(0.50, (getattr(config, "ATR_TARGET_MULT", 5.0) * atr) / entry_price))
-    trail_activate_pct = min(stop_pct * 1.5, 0.10)  # Activate trail after 1.5x stop distance
+    # Gap expansion: gap stocks need wider stops
+    gap_factor = getattr(config, "GAP_STOP_FACTOR", 0.3)
+    gap_stop_pct = abs(gap_pct) * gap_factor
+
+    if signal_type == "vol_surge":
+        # Volume scan: tighter stops (intraday stocks are more stable, no gap expansion)
+        stop_pct = atr_stop_pct
+        stop_max = getattr(config, "VOL_SURGE_STOP_MAX_PCT", 0.05)
+        stop_pct = max(getattr(config, "ATR_STOP_MIN_PCT", 0.02), min(stop_max, stop_pct))
+        trail_mult = getattr(config, "VOL_SURGE_TRAIL_MULT", 1.5)
+        trail_max = getattr(config, "VOL_SURGE_TRAIL_MAX_PCT", 0.03)
+        trail_pct = max(0.005, min(trail_max, (trail_mult * atr) / entry_price))
+    else:
+        # RTG signal: gap expansion applies, wider trail
+        stop_pct = max(atr_stop_pct, gap_stop_pct)
+        stop_pct = max(getattr(config, "ATR_STOP_MIN_PCT", 0.02),
+                       min(getattr(config, "ATR_STOP_MAX_PCT", 0.08), stop_pct))
+        trail_pct = max(0.005, min(0.05, (getattr(config, "ATR_TRAIL_MULT", 2.0) * atr) / entry_price))
+
+    # Target disabled — trail + progressive trail manage exit
+    target_pct = 0.0
+
+    trail_activate_pct = min(stop_pct * 1.5, 0.10)
 
     return stop_pct, target_pct, trail_activate_pct, trail_pct
 
@@ -346,6 +368,10 @@ def place_sell_market(symbol, shares):
         return filled, price
     except Exception as e:
         log(f"SELL market failed: {symbol} {shares}sh. - {e}")
+        # If position already gone externally, return immediately
+        if "position not found" in str(e).lower():
+            log(f"  Position {symbol} already gone (closed externally)")
+            return shares, 0.0  # Treat as filled (position no longer exists)
         # Fallback: use close_position() which handles T+1 locked shares
         try:
             log(f"  Retrying {symbol} via close_position()...")
@@ -372,6 +398,9 @@ def place_sell_market(symbol, shares):
             return shares, fill_price
         except Exception as e2:
             log(f"SELL close_position also failed: {symbol} - {e2}")
+            if "position not found" in str(e2).lower():
+                log(f"  Position {symbol} already gone (closed externally)")
+                return shares, 0.0  # Position no longer exists
             return 0, 0.0
 
 
@@ -399,6 +428,10 @@ def place_sell_async(symbol, shares):
         return str(order.id)
     except Exception as e:
         log(f"SELL market failed: {symbol} {shares}sh. - {e}")
+        # If "position not found" — position already closed externally, mark as gone
+        if "position not found" in str(e).lower():
+            log(f"  Position {symbol} already gone (closed externally), marking as removed")
+            return "position_gone"
         # Fallback: close_position (async, fire and forget)
         try:
             trading_client.close_position(symbol_or_asset_id=symbol)
@@ -406,6 +439,9 @@ def place_sell_async(symbol, shares):
             return f"close_{symbol}"
         except Exception as e2:
             log(f"SELL close_position also failed: {symbol} - {e2}")
+            if "position not found" in str(e2).lower():
+                log(f"  Position {symbol} already gone (closed externally), marking as removed")
+                return "position_gone"
             return None
 
 
@@ -414,6 +450,8 @@ def check_sell_filled(order_id, symbol, shares):
     Returns (filled_qty, fill_price) or (0, 0) if still pending."""
     if order_id == "dry_run":
         return shares, 0.0
+    if order_id == "position_gone":
+        return shares, 0.0  # Position already closed externally
     if order_id and order_id.startswith("close_"):
         # close_position was used — check if position still exists
         try:
@@ -486,6 +524,9 @@ def force_sell_position(symbol, shares):
         return shares, fill_price
     except Exception as e:
         log(f"Force close failed: {symbol} - {e}")
+        if "position not found" in str(e).lower():
+            log(f"  Position {symbol} already gone (closed externally)")
+            return shares, 0.0  # Position no longer exists — treat as closed
         return 0, 0.0
 
 
@@ -627,10 +668,13 @@ def scan_gaps(target_date):
 
 
 def scan_volume_breakouts(target_date, existing_symbols=None):
-    """Scan for intraday volume breakouts using Alpaca Screener API.
+    """Scan for intraday volume surges using relative 5-min volume ratio.
 
-    Uses get_most_actives() and get_market_movers() to discover stocks
-    with unusual intraday volume that weren't caught by the gap scan.
+    Instead of intraday RVOL (which is always high for gap stocks at open),
+    uses the ratio of current 5-min bar volume to previous 5-min bar volume.
+    This detects SUDDEN volume spikes — the actual RTG signal pattern.
+
+    Also requires the current 5-min bar to be bullish (close > open).
 
     Returns list of candidate dicts: {"symbol", "open_price", "prev_close", "gap_pct", "rvol"}
     """
@@ -639,7 +683,7 @@ def scan_volume_breakouts(target_date, existing_symbols=None):
 
     top_n = getattr(config, "VOLUME_SCAN_TOP_N", 30)
     movers_top_n = getattr(config, "VOLUME_SCAN_MOVERS_TOP_N", 20)
-    min_rvol = getattr(config, "VOLUME_SCAN_MIN_RVOL", 3.0)
+    min_rel_vol_ratio = getattr(config, "VOLUME_SCAN_MIN_REL_VOL_RATIO", 3.0)
     price_min = getattr(config, "VOLUME_SCAN_PRICE_MIN", 0.50)
     price_max = getattr(config, "VOLUME_SCAN_PRICE_MAX", 20.0)
 
@@ -657,10 +701,10 @@ def scan_volume_breakouts(target_date, existing_symbols=None):
     try:
         req2 = MarketMoversRequest(market_type=MarketType.STOCKS, top=movers_top_n)
         movers = screener_client.get_market_movers(req2)
-        for m in movers.gainer:
+        for m in movers.gainers:
             if m.symbol not in active_symbols:
                 active_symbols[m.symbol] = 0
-        log(f"Volume scan: {len(movers.gainer)} top gainers from screener")
+        log(f"Volume scan: {len(movers.gainers)} top gainers from screener")
     except Exception as e:
         log(f"Volume scan: market-movers error: {e}")
 
@@ -686,11 +730,53 @@ def scan_volume_breakouts(target_date, existing_symbols=None):
 
     log(f"Volume scan: {len(new_symbols)} new symbols to evaluate (from {len(active_symbols)})")
 
-    # ── Get snapshots for open_price, prev_close, current volume ──
+    # ── Fetch last two 5-min bars for relative volume ratio ──
+    now_est = dt.datetime.now(_EST)
+    # Align to 5-min boundary: current bar and previous bar
+    current_5min = now_est.replace(minute=(now_est.minute // 5) * 5, second=0, microsecond=0)
+    prev_5min = current_5min - dt.timedelta(minutes=5)
+
+    from alpaca.data.requests import StockBarsRequest
+    from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+
+    bar_vols = {}  # symbol -> {"current": vol, "prev": vol, "close": price, "open": price}
+    batch_size = 50
+    for i in range(0, len(new_symbols), batch_size):
+        batch = new_symbols[i:i + batch_size]
+        try:
+            req = StockBarsRequest(
+                symbol_or_symbols=batch,
+                timeframe=TimeFrame(5, TimeFrameUnit.Minute),
+                start=prev_5min - dt.timedelta(minutes=5),  # fetch 3 bars to be safe
+                end=current_5min + dt.timedelta(minutes=1),
+                adjustment=Adjustment.RAW,
+                feed=getattr(config, "DATA_FEED_OBJ", DataFeed.SIP),
+            )
+            result = data_client.get_stock_bars(req)
+            df = result.df if hasattr(result, 'df') else None
+            if df is None or df.empty:
+                continue
+            for sym in batch:
+                sym_df = df.loc[sym] if sym in df.index.get_level_values(0) else None
+                if sym_df is None or len(sym_df) < 2:
+                    continue
+                sym_df = sym_df.sort_index()
+                # Last two bars
+                last = sym_df.iloc[-1]
+                prev = sym_df.iloc[-2]
+                bar_vols[sym] = {
+                    "current_vol": int(last.get("volume", 0)),
+                    "prev_vol": int(prev.get("volume", 0)),
+                    "close": float(last.get("close", 0)),
+                    "open": float(last.get("open", 0)),
+                }
+        except Exception as e:
+            log(f"Volume scan: 5min bars error batch {i}: {e}")
+
+    # ── Get snapshots for open_price, prev_close ──
     from alpaca.data.requests import StockSnapshotRequest
 
     snapshots = {}
-    batch_size = 50
     for i in range(0, len(new_symbols), batch_size):
         batch = new_symbols[i:i + batch_size]
         try:
@@ -701,54 +787,57 @@ def scan_volume_breakouts(target_date, existing_symbols=None):
         except Exception as e:
             log(f"Volume scan: snapshot error batch {i}: {e}")
 
-    if not snapshots:
-        log("Volume scan: no snapshots returned")
-        return []
-
-    # ── Compute intraday RVOL ──
-    now_est = dt.datetime.now(_EST)
-    mkt_open_min = 9 * 60 + 30   # 570
-    mkt_close_min = 16 * 60      # 960
-    current_min = now_est.hour * 60 + now_est.minute
-    elapsed_min = max(1, current_min - mkt_open_min)
-    total_min = mkt_close_min - mkt_open_min  # 390
-    fraction_of_day = elapsed_min / total_min
-
     avg_vols, atrs = _fetch_20d_avg_volumes(new_symbols, target_date)
 
+    # ── Compute relative 5-min volume ratio ──
     candidates = []
     for sym in new_symbols:
+        bv = bar_vols.get(sym)
+        if not bv:
+            continue
+        current_vol = bv["current_vol"]
+        prev_vol = bv["prev_vol"]
+        bar_close = bv["close"]
+        bar_open = bv["open"]
+
+        # Must be bullish bar (close > open) — RTG direction
+        if bar_close <= bar_open:
+            continue
+
+        # Relative 5-min volume ratio
+        if prev_vol <= 0:
+            continue
+        rel_vol_ratio = current_vol / prev_vol
+
+        if rel_vol_ratio < min_rel_vol_ratio:
+            continue
+
+        # Price filter
+        if not (price_min <= bar_close <= price_max):
+            continue
+
+        # Get open_price and prev_close from snapshot
         snap = snapshots.get(sym)
-        if not snap or not snap.daily_bar or not snap.previous_daily_bar:
+        if snap and snap.daily_bar and snap.previous_daily_bar:
+            open_price = float(snap.daily_bar.open)
+            prev_close = float(snap.previous_daily_bar.close)
+        else:
             continue
 
-        daily_bar = snap.daily_bar
-        prev_bar = snap.previous_daily_bar
-
-        open_price = float(daily_bar.open)
-        prev_close = float(prev_bar.close)
-        current_volume = float(daily_bar.volume)
-        prev_avg_vol = avg_vols.get(sym, float(prev_bar.volume))
-
-        current_price = float(daily_bar.close) if daily_bar.close else open_price
-        if not (price_min <= current_price <= price_max):
-            continue
         if not (price_min <= open_price <= price_max):
             continue
-
-        if prev_avg_vol <= 0:
-            continue
-        expected_vol = prev_avg_vol * fraction_of_day
-        if expected_vol <= 0:
-            continue
-        intraday_rvol = current_volume / expected_vol
-
-        if intraday_rvol < min_rvol:
-            continue
-
         if prev_close <= 0:
             continue
         gap_pct = (open_price / prev_close) - 1.0
+
+        # Compute intraday RVOL for sizing/stop tier (not for filtering)
+        current_daily_vol = float(snap.daily_bar.volume) if snap.daily_bar else 0
+        prev_avg_vol = avg_vols.get(sym, float(snap.previous_daily_bar.volume))
+        now_min = now_est.hour * 60 + now_est.minute
+        elapsed_min = max(1, now_min - 570)
+        fraction_of_day = elapsed_min / 390
+        expected_vol = prev_avg_vol * fraction_of_day
+        intraday_rvol = current_daily_vol / expected_vol if expected_vol > 0 else 1.0
 
         atr = atrs.get(sym, 0)
         candidates.append({
@@ -756,18 +845,20 @@ def scan_volume_breakouts(target_date, existing_symbols=None):
             "open_price": open_price,
             "prev_close": prev_close,
             "gap_pct": gap_pct,
-            "rvol": intraday_rvol,
+            "rvol": intraday_rvol,  # Used for sizing/stop tiers
+            "rel_vol_ratio": rel_vol_ratio,  # The actual filtering metric
             "atr": float(atr),
         })
 
-    candidates.sort(key=lambda c: c["rvol"], reverse=True)
+    candidates.sort(key=lambda c: c.get("rel_vol_ratio", 0), reverse=True)
     max_candidates = getattr(config, "MAX_CANDIDATES", 40)
     candidates = candidates[:max_candidates]
 
     if candidates:
-        log(f"Volume breakout: {len(candidates)} new candidates")
+        log(f"Volume breakout: {len(candidates)} new candidates (rel 5min vol ratio)")
         for c in candidates:
-            log(f"  {c['symbol']}: RVOL={c['rvol']:.1f}×, gap={c['gap_pct']:+.1%}, "
+            log(f"  {c['symbol']}: relVol={c.get('rel_vol_ratio', 0):.1f}× "
+                f"RVOL={c['rvol']:.1f}× gap={c['gap_pct']:+.1%} "
                 f"open=${c['open_price']:.4f}")
     else:
         log("Volume breakout: no new candidates qualified")
@@ -1001,6 +1092,7 @@ def run_trading_day(target_date):
         pass
 
     entry_rejected = set()  # Stocks rejected by Alpaca (retry when buying power frees)
+    entry_halted = set()   # Stocks with trading halt — skip for rest of day
     daily_trades = 0
     trades_detail = []
     daily_loss = 0.0
@@ -1087,34 +1179,48 @@ def run_trading_day(target_date):
                 state["daily_stopped"] = True
                 break
 
-        # Daily profit protection (rtg_2.0): force close when profit drops to 85% of max
+        # Daily profit protection (rtg_2.0): force close when profit drops to 70% of max
         if getattr(config, "DAILY_PROFIT_PROTECT_ENABLED", False) and positions:
-            # Calculate current total profit (realized + unrealized)
-            current_profit = daily_loss  # daily_loss is negative for losses, positive for wins
-            for pos in positions:
-                bars = _accumulator.get_1min_bars(pos.symbol)
-                if bars:
-                    cur = float(bars[-1]["close"])
-                    current_profit += (cur - pos.entry_price) * pos.shares
-            if current_profit > max_daily_profit:
-                max_daily_profit = current_profit
-            protect_min = getattr(config, "DAILY_PROFIT_PROTECT_MIN", 5.0)
-            if max_daily_profit >= protect_min and current_profit < max_daily_profit * config.DAILY_PROFIT_PROTECT_RATIO:
-                log(f"Profit protection! Max profit was ${max_daily_profit:+,.2f}, now ${current_profit:+,.2f} < {config.DAILY_PROFIT_PROTECT_RATIO:.0%}")
-                for pos in positions[:]:
-                    sold, fill = force_sell_position(pos.symbol, pos.shares)
-                    if sold > 0:
-                        pnl = (fill - pos.entry_price) * sold if fill > 0 else 0
-                        trades_detail.append({"symbol": pos.symbol, "entry": pos.entry_price, "exit": fill,
-                                              "shares": sold, "pnl": round(pnl, 2), "reason": "profit_protect",
-                                              "trade_type": pos.signal_type})
-                        daily_loss += pnl
-                        daily_trades += 1
-                        positions.remove(pos)
-                        _last_exit_ts[pos.symbol] = time.time()
-                        log(f"Profit protect close {pos.symbol}, P&L=${pnl:+,.2f}")
-                state["daily_stopped"] = True
-                break
+            # Delay activation — don't trigger in the first 30 min after open
+            protect_delay = getattr(config, "DAILY_PROFIT_PROTECT_DELAY_SEC", 1800)
+            mkt_open_ts = dt.datetime.combine(target_date.date(), _parse_time(config.MARKET_OPEN), tzinfo=_EST)
+            if (now - mkt_open_ts).total_seconds() < protect_delay:
+                # Still in delay window — only track max profit, don't protect
+                current_profit = daily_loss
+                for pos in positions:
+                    bars = _accumulator.get_1min_bars(pos.symbol)
+                    if bars:
+                        cur = float(bars[-1]["close"])
+                        current_profit += (cur - pos.entry_price) * pos.shares
+                if current_profit > max_daily_profit:
+                    max_daily_profit = current_profit
+            else:
+                # Calculate current total profit (realized + unrealized)
+                current_profit = daily_loss  # daily_loss is negative for losses, positive for wins
+                for pos in positions:
+                    bars = _accumulator.get_1min_bars(pos.symbol)
+                    if bars:
+                        cur = float(bars[-1]["close"])
+                        current_profit += (cur - pos.entry_price) * pos.shares
+                if current_profit > max_daily_profit:
+                    max_daily_profit = current_profit
+                protect_min = getattr(config, "DAILY_PROFIT_PROTECT_MIN", 10.0)
+                if max_daily_profit >= protect_min and current_profit < max_daily_profit * config.DAILY_PROFIT_PROTECT_RATIO:
+                    log(f"Profit protection! Max profit was ${max_daily_profit:+,.2f}, now ${current_profit:+,.2f} < {config.DAILY_PROFIT_PROTECT_RATIO:.0%}")
+                    for pos in positions[:]:
+                        sold, fill = force_sell_position(pos.symbol, pos.shares)
+                        if sold > 0:
+                            pnl = (fill - pos.entry_price) * sold if fill > 0 else 0
+                            trades_detail.append({"symbol": pos.symbol, "entry": pos.entry_price, "exit": fill,
+                                                  "shares": sold, "pnl": round(pnl, 2), "reason": "profit_protect",
+                                                  "trade_type": pos.signal_type})
+                            daily_loss += pnl
+                            daily_trades += 1
+                            positions.remove(pos)
+                            _last_exit_ts[pos.symbol] = time.time()
+                            log(f"Profit protect close {pos.symbol}, P&L=${pnl:+,.2f}")
+                    state["daily_stopped"] = True
+                    break
 
         # Exit monitoring
         # Check pending async sells from previous iterations
@@ -1186,10 +1292,8 @@ def run_trading_day(target_date):
                     if bar_low <= trail_stop:
                         reason = "trail_stop"
                 if reason is None:
-                    target_price = round(pos.entry_price * (1 + pos.target_pct), 4)
-                    if bar_high >= target_price:
-                        reason = "target"
-                    elif config.RTG_TIME_LIMIT_SEC > 0 and time.time() - pos.entry_ts >= config.RTG_TIME_LIMIT_SEC:
+                    # Target price disabled — trail + progressive trail manage exit
+                    if config.RTG_TIME_LIMIT_SEC > 0 and time.time() - pos.entry_ts >= config.RTG_TIME_LIMIT_SEC:
                         reason = "time_limit"
 
             if reason is None:
@@ -1199,7 +1303,13 @@ def run_trading_day(target_date):
             if pos.symbol in _pending_sells:
                 continue  # Already have a pending sell for this symbol
             order_id = place_sell_async(pos.symbol, pos.shares)
-            if order_id:
+            if order_id == "position_gone":
+                # Position already closed externally — remove from local state
+                log(f"EXIT {pos.symbol} position_gone (closed externally), P&L unknown")
+                _last_exit_ts[pos.symbol] = time.time()
+                positions = [p for p in positions if p.symbol != pos.symbol]
+                continue
+            elif order_id:
                 _pending_sells[pos.symbol] = {"order_id": order_id, "reason": reason, "submit_time": time.time()}
                 log(f"Async SELL submitted for {pos.symbol} ({reason}), order={order_id}")
             else:
@@ -1248,6 +1358,10 @@ def run_trading_day(target_date):
                 if sym in EXCLUDE_SYMBOLS:
                     entry_checked.add(sym)
                     continue
+                # Skip halted symbols
+                if sym in entry_halted:
+                    entry_checked.add(sym)
+                    continue
                 # Skip crypto ETFs
                 if is_crypto_etf(sym):
                     entry_checked.add(sym)
@@ -1263,13 +1377,34 @@ def run_trading_day(target_date):
                     break
                 open_price = c["open_price"]
                 bars = _accumulator.get_1min_bars(sym)
-                # RVOL-adaptive min volume: high RVOL relaxes liquidity floor
-                min_vol = config.RTG_MIN_VOLUME
-                if rvol >= 10:
-                    min_vol = max(config.RTG_MIN_VOLUME // 3, 5000)
-                elif rvol >= 5:
-                    min_vol = max(config.RTG_MIN_VOLUME // 2, 10000)
-                entry_price, confirmed, signal_type = check_rtg_entry(sym, open_price, bars, after_time=after_time, min_volume=min_vol)
+                # Volume scan candidates: skip RTG check — 5min vol surge IS the signal
+                if c.get("rel_vol_ratio", 0) >= getattr(config, "VOLUME_SCAN_MIN_REL_VOL_RATIO", 3.0):
+                    # Use latest bar close as entry price
+                    if bars and bars[-1]["close"] > 0:
+                        entry_price = bars[-1]["close"]
+                        confirmed = True
+                        signal_type = "vol_surge"
+                    else:
+                        # Fallback to snapshot price
+                        try:
+                            from alpaca.data.requests import StockLatestTradeRequest
+                            req = StockLatestTradeRequest(symbol_or_symbols=[sym],
+                                                          feed=getattr(config, "DATA_FEED_OBJ", DataFeed.SIP))
+                            trade = data_client.get_stock_latest_trade(req)
+                            entry_price = float(trade[sym].price) if sym in trade else 0
+                        except Exception:
+                            entry_price = 0
+                        confirmed = entry_price > 0
+                        signal_type = "vol_surge"
+                else:
+                    # Gap scan candidate: wait for RTG signal
+                    # RVOL-adaptive min volume: high RVOL relaxes liquidity floor
+                    min_vol = config.RTG_MIN_VOLUME
+                    if rvol >= 10:
+                        min_vol = max(config.RTG_MIN_VOLUME // 3, 5000)
+                    elif rvol >= 5:
+                        min_vol = max(config.RTG_MIN_VOLUME // 2, 10000)
+                    entry_price, confirmed, signal_type = check_rtg_entry(sym, open_price, bars, after_time=after_time, min_volume=min_vol)
                 if not confirmed or entry_price <= 0:
                     continue
                 # Re-entry price guards (after RTG signal confirmed)
@@ -1297,7 +1432,10 @@ def run_trading_day(target_date):
                 order, _, reject = place_buy_market(sym, shares)
                 if order is None:
                     log(f"Entry rejected: {sym} - {reject}")
-                    entry_rejected.add(sym)
+                    if "trading halt" in str(reject).lower():
+                        entry_halted.add(sym)
+                    else:
+                        entry_rejected.add(sym)
                     continue
                 filled, fill_price = wait_order_filled(str(order.id), timeout=15)
                 if filled <= 0:
@@ -1307,8 +1445,9 @@ def run_trading_day(target_date):
                     fill_price = entry_price
                 # Get adaptive exit params (ATR-based if available, fallback to RVOL)
                 atr = c.get("atr", 0)
+                gap_p = abs(c.get("gap_pct", 0))
                 if atr > 0:
-                    stop_p, target_p, trail_act_p, trail_p = get_atr_stop_params(rvol, atr, fill_price)
+                    stop_p, target_p, trail_act_p, trail_p = get_atr_stop_params(rvol, atr, fill_price, gap_pct=gap_p, signal_type=signal_type)
                     stop_src = f"ATR=${atr:.3f}"
                 else:
                     stop_p, target_p, trail_act_p, trail_p = get_rvol_exit_params(rvol)
@@ -1431,7 +1570,7 @@ def main():
     sizing_str = "/".join(f"{p:.0%}" for _, p in config.RVOL_SIZING_TIERS)
     log(f"Sizing: RVOL-weighted ({sizing_str}) | max {config.MAX_POSITIONS} concurrent | re-entry max {config.RTG_REENTRY_MAX}")
     vol_int = getattr(config, "VOLUME_SCAN_INTERVAL", 300)
-    log(f"Volume breakout: every {vol_int}s, min RVOL={getattr(config, 'VOLUME_SCAN_MIN_RVOL', 3.0):.1f}×, "
+    log(f"Volume breakout: every {vol_int}s, min relVol={getattr(config, 'VOLUME_SCAN_MIN_REL_VOL_RATIO', 3.0):.1f}×, "
         f"price ${getattr(config, 'VOLUME_SCAN_PRICE_MIN', 0.5):.2f}-${getattr(config, 'VOLUME_SCAN_PRICE_MAX', 20.0):.2f}")
     log("=" * 60)
 
