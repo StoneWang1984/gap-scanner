@@ -1,4 +1,4 @@
-"""RTG 3.0 策略 — Streamlit Web UI (交易显示 + 回测)"""
+"""RTG 2.0 策略 — Streamlit Web UI (交易显示 + 回测)"""
 
 import json
 import time
@@ -8,20 +8,20 @@ import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
 
-VERSION_DIR = Path("/Users/stonewang2014/gap-scanner/stonewang_daytrade_rtg_3.0")
-STATE_FILE = Path("/Users/stonewang2014/gap-scanner/live_rtg3_state.json")
+VERSION_DIR = Path("/Users/stonewang2014/gap-scanner/stonewang_daytrade_rtg_2.0")
+STATE_FILE = Path("/Users/stonewang2014/gap-scanner/live_state.json")
 import importlib.util, sys
 _spec = importlib.util.spec_from_file_location("config", VERSION_DIR / "config.py")
 config = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(config)
 sys.modules["config"] = config
 
-st.set_page_config(page_title="RTG 3.0 交易", page_icon="📊", layout="wide")
+st.set_page_config(page_title="RTG 2.0 交易", page_icon="📊", layout="wide")
 
 # ── Sidebar ──────────────────────────────────────────────────────
 
-st.sidebar.title("RTG 3.0 交易")
-st.sidebar.caption("Cycle-based All-in + 1% Trailing Stop")
+st.sidebar.title("RTG 2.0 交易")
+st.sidebar.caption("RVOL加权仓位 + 利润保护 + 渐进Trailing")
 
 tab = st.sidebar.radio("导航", ["实盘交易", "策略概览", "交易详情"])
 
@@ -88,9 +88,10 @@ if tab == "实盘交易":
     st.divider()
     st.subheader("当前持仓")
 
-    # rtg_3.0 uses single position (dict), not array
-    state_position = state.get("position") if state else None
-    state_positions_list = [state_position] if state_position else (state.get("positions", []) if state else [])
+    # rtg_2.0 uses positions array
+    state_positions_list = state.get("positions", []) if state else []
+    if state and not state_positions_list and state.get("position"):
+        state_positions_list = [state["position"]]
     state_positions = {p["symbol"]: p for p in state_positions_list}
 
     if alpaca_positions:
@@ -221,7 +222,7 @@ if tab == "实盘交易":
         st.info("今日暂无交易记录")
 
     if not state:
-        st.warning("未找到 live_rtg3_state.json，实盘未运行")
+        st.warning("未找到 live_state.json，实盘未运行")
 
     # ── Auto refresh ──
     st.divider()
@@ -235,79 +236,115 @@ if tab == "实盘交易":
 # ══════════════════════════════════════════════════════════════════
 
 elif tab == "策略概览":
-    st.title("RTG 3.0 策略概览")
+    st.title("RTG 2.0 策略概览")
 
     col1, col2 = st.columns(2)
 
     with col1:
-        st.subheader("扫描条件 (事件驱动)")
-        scan_sec = getattr(config, "SCAN_INTERVAL_SEC", 300)
-        min_rvol = getattr(config, "MIN_RVOL_TO_TRADE", 3.0)
-        max_green = getattr(config, "MAX_GREEN_BARS_TO_ENTER", 2)
+        st.subheader("盘前扫描 (9:25启动)")
         st.markdown(f"""
-        - 跳空幅度 > **{config.GAP_THRESHOLD:.0%}**
+        - 跳空幅度 > **{config.GAP_THRESHOLD:.0%}** (正跳空)
         - 盘前成交量 > **{config.MIN_VOLUME:,}** 股
         - 最低成交额 > **${config.MIN_DOLLAR_VOLUME:,.0f}**
         - 价格区间 **${config.PRICE_MIN}** ~ **${config.PRICE_MAX}**
-        - 杠杆ETF过滤: **启用**
-        - Crypto ETF过滤: **启用**
-        - 候选股: **Top {config.MAX_CANDIDATES} by RVOL**
-        - 最低RVOL: **{min_rvol:.1f}×** (低RVOL不入场)
-        - 扫描模式: **事件驱动** (交易完成即扫描，无信号等{scan_sec//60}分钟)
+        - 杠杆ETF / Crypto ETF: **已过滤**
+        - 候选股: **Top 5 by RVOL**
         """)
 
-        st.subheader("仓位管理 (All-in)")
-        max_daily = config.MAX_DAILY_TRADES if config.MAX_DAILY_TRADES > 0 else "无限制"
-        all_in_ratio = getattr(config, "ALL_IN_BP_RATIO", 0.95)
+        st.subheader("盘中扫描 (每5分钟)")
+        vol_min_ratio = getattr(config, "VOLUME_SCAN_MIN_REL_VOL_RATIO", 3.0)
         st.markdown(f"""
-        - 初始资金: **${config.INITIAL_CAPITAL:,.2f}**
-        - 仓位: **ALL-IN** (购买力 × {all_in_ratio:.0%})
-        - 最大同时持仓: **{config.MAX_POSITIONS}** 只
-        - 每次扫描尝试: **Top 3** 候选股
+        - 数据源: most-actives + market gainers
+        - 相对5分钟量比 ≥ **{vol_min_ratio:.0f}×**
+        - 要求阳线 (close > open) + 涨幅 > **0.5%**
+        - 过滤负跳空 (gap ≤ 0 → 跳过)
+        - 信号类型: **vol_surge** (直接入场, 无需RTG)
         """)
+
+        st.subheader("入场信号")
+        st.markdown(f"""
+        - **RTG** (盘前候选): close > open_price AND vol ≥ {config.RTG_VOLUME_MULT}x prior
+        - **vol_surge** (盘中候选): 5min量比 ≥ {vol_min_ratio:.0f}× + 阳线 + 涨幅>0.5%
+        - GapGo: **禁用** (胜率34%)
+        - 入场窗口: **{config.ENTRY_WINDOW_START} ~ {config.ENTRY_WINDOW_END} EST**
+        """)
+
+        st.subheader("仓位管理")
+        max_daily = config.MAX_DAILY_TRADES if config.MAX_DAILY_TRADES > 0 else "无限制"
+        rvol_cap = getattr(config, "RVOL_SIZING_CAP", 10.0)
+        st.markdown(f"""
+        - 当前权益: **${config.INITIAL_CAPITAL:,.2f}**
+        - 最大同时持仓: **{config.MAX_POSITIONS}** 只 (集中资金)
+        - 每日交易上限: **{max_daily}**
+        - 日损失熔断: **{config.MAX_DAILY_LOSS_PCT:.0%}**
+        - RVOL封顶: **{rvol_cap:.0f}×** (防止intraday RVOL膨胀)
+        """)
+        st.subheader("RVOL仓位分级")
+        for rvol_min, eq_pct in config.RVOL_SIZING_TIERS:
+            st.markdown(f"- RVOL ≥ {rvol_min:.0f}× → **{eq_pct:.0%}** 权益")
 
     with col2:
-        st.subheader("入场规则 (RTG + Breakout + 限制)")
-        min_gain = getattr(config, 'RTG_MIN_BAR_GAIN_PCT', 0.01)
-        confirm = getattr(config, 'ENTRY_CONFIRM_BARS', 2)
+        st.subheader("ATR自适应止损 + Gap扩展")
+        gap_factor = getattr(config, "GAP_STOP_FACTOR", 0.3)
         st.markdown(f"""
-        - RTG信号: close > open_price×(1+{min_gain:.0%}) AND vol >= {config.RTG_VOLUME_MULT}x prior AND vol >= {config.RTG_MIN_VOLUME:,}
-        - 突破信号: close > 今日最高价 AND vol >= {getattr(config, 'BREAKOUT_VOLUME_MULT', 2.5)}x prior (盘中量价齐升)
-        - 连续确认: **{confirm}根bar** 均满足RTG条件才入场 (过滤单bar假突破)
-        - 入场限制: 前{max_green}根连续绿bar后才触发则**不买入** (防追高)
-        - 入场窗口: **{config.ENTRY_WINDOW_START} ~ {config.ENTRY_WINDOW_END} EST**
-        - 选股: 最高RVOL优先
+        - **止损 = max(ATR_MULT × ATR, |gap| × {gap_factor}) / entry**
+        - 钳位: **{config.ATR_STOP_MIN_PCT:.0%}** ~ **{config.ATR_STOP_MAX_PCT:.0%}**
+        - Gap扩展: 跳空股开盘振荡远大于历史ATR, 需要额外空间
+        """)
+        st.markdown("**ATR乘数分级 (RVOL→乘数):**")
+        for rvol_min, atr_mult in config.ATR_MULT_TIERS:
+            st.markdown(f"- RVOL ≥ {rvol_min:.0f}× → **{atr_mult:.1f}× ATR** 止损")
+
+        st.subheader("vol_surge 紧止损 (vs rtg)")
+        vs_stop = getattr(config, "VOL_SURGE_STOP_MAX_PCT", 0.05)
+        vs_trail = getattr(config, "VOL_SURGE_TRAIL_MULT", 1.5)
+        vs_trail_max = getattr(config, "VOL_SURGE_TRAIL_MAX_PCT", 0.03)
+        st.markdown(f"""
+        - 最大止损: **{vs_stop:.0%}** (无gap扩展, 盘中股票波动小)
+        - 追踪止损: **{vs_trail:.1f}× ATR** (clamp 0.5%~{vs_trail_max:.0%}%)
+        - 对比rtg: 止损8% / 追踪2.0×ATR
         """)
 
-        st.subheader("出场规则 (Bar-based)")
-        stop_pct = getattr(config, "STOP_PCT", 0.03)
-        exit_red = getattr(config, "EXIT_ON_RED_BAR", True)
-        exit_g2r = getattr(config, "EXIT_ON_GREEN_TO_RED", True)
-        exit_3g = getattr(config, "EXIT_ON_THREE_GREEN", True)
-        g2r_consec = getattr(config, "GREEN_TO_RED_CONSEC_BARS", 2)
+        st.subheader("追踪止损 (无目标价)")
         st.markdown(f"""
-        - 首根红bar退出: **{'启用' if exit_red else '关闭'}** (买入后第一根bar是红bar→立即卖出)
-        - 绿转红退出: **{'启用' if exit_g2r else '关闭'}** (连续{g2r_consec}根红bar→卖出)
-        - 3根绿bar退出: **{'启用' if exit_3g else '关闭'}** (连续3根阳线→确认退出)
-        - 硬止损: **{stop_pct:.0%}** (极端行情兜底)
-        - 目标: **{config.TARGET_PCT:.0%}** (安全阀)
-        - 强制平仓: **{config.FORCE_CLOSE_TIME} EST**
-        - 全天交易至3:59 (下午不停止)
-        - 日损失熔断: **{config.MAX_DAILY_LOSS_PCT:.0%}**
+        - Trail宽度: **{config.ATR_TRAIL_MULT:.1f}× ATR** (clamp 0.5%~5%)
+        - Trail激活: 盈利 > **+{config.RTG_TRAIL_ACTIVATE_PCT:.0%}** 后开始追踪
+        - 目标价: **禁用** — 完全由trail + 渐进trail管理退出
+        """)
+
+        st.subheader("渐进Trailing Stop")
+        for profit_pct, trail_pct in config.PROGRESSIVE_TRAIL_TIERS:
+            st.markdown(f"- 利润 > {profit_pct:.0%} → Trail收紧至 **{trail_pct:.1%}**")
+
+        profit_protect = config.DAILY_PROFIT_PROTECT_ENABLED
+        protect_delay = getattr(config, "DAILY_PROFIT_PROTECT_DELAY_SEC", 1800)
+        st.subheader("日利润保护")
+        st.markdown(f"""
+        - 启用: **{'是' if profit_protect else '否'}**
+        - 触发: 利润跌至峰值的 **{config.DAILY_PROFIT_PROTECT_RATIO:.0%}**
+        - 最低激活: **${config.DAILY_PROFIT_PROTECT_MIN:.0f}** (避免小波动触发)
+        - 延迟: 开盘后 **{protect_delay//60}分钟** 不激活
+        """)
+
+        st.subheader("强制平仓 & Re-entry")
+        st.markdown(f"""
+        - EOD强平: **{config.FORCE_CLOSE_TIME} EST**
+        - Re-entry: **禁用** (opening drive is your only edge)
         """)
 
     st.divider()
-    st.subheader("RTG 3.0 设计理念")
-    st.markdown(f"""
-    - **Event-Driven**: 交易完成→立即扫描→选股→买入→监控→卖出→立即扫描，不浪费等待时间
-    - **All-in**: 每次只用1只股票，95%购买力全仓，集中火力打最强标的
-    - **Bar-based Exit**: 首根红bar退出 / 连续{g2r_consec}根红bar绿转红退出 / 3根绿bar确认退出
-    - **3% Hard Stop**: 极端行情兜底保护
-    - **Entry Quality**: 2.5×量比 + {min_gain:.0%}最小涨幅 + {confirm}bar连续确认 + 前{max_green}根绿bar限制
-    - **RTG Signal**: 跳空高开股出现Red-to-Green(量价突破)→市价入场，过滤假突破
-    - **Breakout Signal**: 盘中创新高+放量突破，捕获下午量价齐升机会
-    - **Min RVOL 3×**: 低于3倍相对成交量的股票不入场，避免低信心标的
-    - **全天交易**: 从开盘到{config.FORCE_CLOSE_TIME}持续交易，下午不停止
+    st.subheader("RTG 2.0 设计理念")
+    st.markdown("""
+    - **ATR自适应止损**: 止损宽度与实际波动挂钩, 不再用RVOL固定百分比
+    - **Gap扩展**: stop = max(ATR_stop, |gap|×0.3), 跳空股开盘需要更大止损空间
+    - **RVOL封顶10×**: 防止intraday RVOL=1260×导致50%仓位单笔巨亏
+    - **无目标价**: trail比固定target更灵活, 盈利股让利润奔跑
+    - **渐进Trailing**: 利润>5%→1.5%, >10%→1%, >15%→0.5%, 逐步锁利
+    - **日利润保护**: 峰值利润回撤30%→全仓强平, 30分钟延迟避免开盘误触
+    - **vol_surge紧止损**: 盘中信号5%止损/1.5×ATR trail, 区别于rtg的8%/2×ATR
+    - **负跳空过滤**: gap≤0的股票不入场做多
+    - **No Re-entry**: 首笔退出后不再入场
+    - **集中持仓4只**: 50%仓位给A+设定, 不分散火力
     """)
 
 # ══════════════════════════════════════════════════════════════════
