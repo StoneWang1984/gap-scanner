@@ -141,7 +141,7 @@ RTG_TRAIL_ACTIVATE_PCT = 0.03 # Activate trailing stop after +3% gain
 RTG_TRAIL_PCT = 0.02          # 2% trailing stop
 
 # ── Position sizing ──────────────────────────────────────────────────
-INITIAL_CAPITAL = 329.81      # Account equity (updated 2026-09-01)
+INITIAL_CAPITAL = 306.24      # Account equity (updated 2026-09-02)
 MIN_POSITION_SIZE = 40        # Min $40 per position (fractional shares)
 MAX_POSITION_SIZE = 9999      # No hard cap — RVOL tiers control sizing
 MAX_POSITIONS = 4             # Max 4 concurrent positions — concentrate capital

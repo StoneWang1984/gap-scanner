@@ -1,0 +1,291 @@
+{
+  "date": "2026-09-01",
+  "version": "rtg_2.0",
+  "account_equity_start": 307.51,
+  "account_equity_end": 312.83,
+  "daily_pnl": 5.32,
+  "daily_trades": 15,
+  "candidates": [
+    {
+      "symbol": "SOWG",
+      "open_price": 3.4,
+      "prev_close": 3.29,
+      "gap_pct": 0.033434650455927084,
+      "rvol": 18.429101462371943,
+      "rel_vol_ratio": 7.211864406779661,
+      "atr": 0.16750000000000007
+    },
+    {
+      "symbol": "RDAC",
+      "open_price": 4.9,
+      "prev_close": 4.56,
+      "gap_pct": 0.07456140350877205,
+      "rvol": 20.224856398308788,
+      "rel_vol_ratio": 6.542705923367033,
+      "atr": 1.834428571428571
+    },
+    {
+      "symbol": "PETZ",
+      "open_price": 1.35,
+      "prev_close": 1.15,
+      "gap_pct": 0.17391304347826098,
+      "rvol": 41.811935004217744,
+      "rel_vol_ratio": 3.4037814452812047,
+      "atr": 0.10977857142857148
+    },
+    {
+      "symbol": "PXS",
+      "open_price": 5.93,
+      "prev_close": 5.36,
+      "gap_pct": 0.10634328358208944,
+      "rvol": 35.8940873940486,
+      "rel_vol_ratio": 10.114305750350631,
+      "atr": 0.22832857142857158
+    },
+    {
+      "symbol": "PSIG",
+      "open_price": 1.59,
+      "prev_close": 1.63,
+      "gap_pct": -0.024539877300613355,
+      "rvol": 0.2995643343652272,
+      "rel_vol_ratio": 5.200917899031107,
+      "atr": 0.4361428571428571
+    },
+    {
+      "symbol": "DAMD",
+      "open_price": 1.72,
+      "prev_close": 1.65,
+      "gap_pct": 0.042424242424242475,
+      "rvol": 2.094691573719343,
+      "rel_vol_ratio": 10.297569452710263,
+      "atr": 0.1271428571428571
+    },
+    {
+      "symbol": "MIRA",
+      "open_price": 0.74,
+      "prev_close": 0.7702,
+      "gap_pct": -0.03921059465074006,
+      "rvol": 189.76651361870947,
+      "rel_vol_ratio": 3.313343467258523,
+      "atr": 0.050235714285714286
+    },
+    {
+      "symbol": "GYGY",
+      "open_price": 1.35,
+      "prev_close": 1.19,
+      "gap_pct": 0.13445378151260523,
+      "rvol": 25.329022943018295,
+      "rel_vol_ratio": 3.8877199218055805,
+      "atr": 0.38421428571428573
+    },
+    {
+      "symbol": "RDIB",
+      "open_price": 13.69,
+      "prev_close": 15.1,
+      "gap_pct": -0.09337748344370866,
+      "rvol": 0.26741123586120125,
+      "rel_vol_ratio": 3.070588235294118,
+      "atr": 1.9485714285714282
+    },
+    {
+      "symbol": "SSM",
+      "open_price": 3.75,
+      "prev_close": 2.68,
+      "gap_pct": 0.39925373134328357,
+      "rvol": 110.32426212440468,
+      "rel_vol_ratio": 3.251759911078177,
+      "atr": 0.24892142857142852
+    },
+    {
+      "symbol": "FLYE",
+      "open_price": 1.8,
+      "prev_close": 1.36,
+      "gap_pct": 0.32352941176470584,
+      "rvol": 13690.830161228097,
+      "rel_vol_ratio": 7.114193453691472,
+      "atr": 0.10525714285714287
+    },
+    {
+      "symbol": "OLOX",
+      "open_price": 1.02,
+      "prev_close": 0.9926,
+      "gap_pct": 0.02760427160991341,
+      "rvol": 3.339069250167637,
+      "rel_vol_ratio": 4.795833238760312,
+      "atr": 0.4085142857142858
+    },
+    {
+      "symbol": "NVD",
+      "open_price": 4.08,
+      "prev_close": 3.93,
+      "gap_pct": 0.03816793893129766,
+      "rvol": 1.4175387948093952,
+      "rel_vol_ratio": 13.34022067794812,
+      "atr": 0.2653571428571428
+    },
+    {
+      "symbol": "NOK",
+      "open_price": 10.06,
+      "prev_close": 10.14,
+      "gap_pct": -0.007889546351084853,
+      "rvol": 0.9585769612459636,
+      "rel_vol_ratio": 5.364029719706997,
+      "atr": 0.46782142857142833
+    },
+    {
+      "symbol": "RZLV",
+      "open_price": 2.52,
+      "prev_close": 2.89,
+      "gap_pct": -0.12802768166089973,
+      "rvol": 4.841503126340848,
+      "rel_vol_ratio": 9.73781024306192,
+      "atr": 0.16678571428571415
+    },
+    {
+      "symbol": "FRVO",
+      "open_price": 16.47,
+      "prev_close": 15.38,
+      "gap_pct": 0.07087126137841349,
+      "rvol": 9.835545221380356,
+      "rel_vol_ratio": 4.035502036637212,
+      "atr": 1.835335714285714
+    },
+    {
+      "symbol": "PCG",
+      "open_price": 13.3,
+      "prev_close": 13.27,
+      "gap_pct": 0.0022607385079127518,
+      "rvol": 2.538580594413276,
+      "rel_vol_ratio": 3.4159107186378135,
+      "atr": 0.8868642857142858
+    },
+    {
+      "symbol": "NIO",
+      "open_price": 4.08,
+      "prev_close": 4.23,
+      "gap_pct": -0.03546099290780147,
+      "rvol": 2.7468804173066905,
+      "rel_vol_ratio": 3.9579595873782645,
+      "atr": 0.11999999999999991
+    },
+    {
+      "symbol": "NWGL",
+      "open_price": 0.8502,
+      "prev_close": 0.8501,
+      "gap_pct": 0.00011763321962110496,
+      "rvol": 5.175426126731661,
+      "rel_vol_ratio": 4.00686218337353,
+      "atr": 0.11817857142857144
+    },
+    {
+      "symbol": "TSLG",
+      "open_price": 4.77,
+      "prev_close": 4.97,
+      "gap_pct": -0.04024144869215296,
+      "rvol": 1.5050711111491826,
+      "rel_vol_ratio": 9.548316919271704,
+      "atr": 0.3406500000000001
+    },
+    {
+      "symbol": "BIAF",
+      "open_price": 7.72,
+      "prev_close": 4.56,
+      "gap_pct": 0.692982456140351,
+      "rvol": 5.333352071288719,
+      "rel_vol_ratio": 3.2648096885813147,
+      "atr": 0.6176857142857143
+    },
+    {
+      "symbol": "WFCF",
+      "open_price": 13.82,
+      "prev_close": 12.85,
+      "gap_pct": 0.07548638132295715,
+      "rvol": 1.343928174482888,
+      "rel_vol_ratio": 12.813333333333333,
+      "atr": 0.847107142857143
+    },
+    {
+      "symbol": "PLUG",
+      "open_price": 2.11,
+      "prev_close": 2.16,
+      "gap_pct": -0.02314814814814825,
+      "rvol": 0.657018787501043,
+      "rel_vol_ratio": 5.951447730810681,
+      "atr": 0.1296428571428571
+    }
+  ],
+  "trades": [
+    {
+      "symbol": "RDAC",
+      "entry": 6.07,
+      "exit": 6.4285,
+      "shares": 12,
+      "pnl": 4.3,
+      "reason": "trail_stop",
+      "trade_type": "vol_surge"
+    },
+    {
+      "symbol": "PSIG",
+      "entry": 1.945,
+      "exit": 1.945,
+      "shares": 32,
+      "pnl": 0.0,
+      "reason": "stop_loss",
+      "trade_type": "vol_surge"
+    },
+    {
+      "symbol": "PXS",
+      "entry": 6.3195,
+      "exit": 5.985,
+      "shares": 6,
+      "pnl": -2.01,
+      "reason": "stop_loss",
+      "trade_type": "vol_surge"
+    },
+    {
+      "symbol": "PETZ",
+      "entry": 1.39,
+      "exit": 1.4743,
+      "shares": 36,
+      "pnl": 3.03,
+      "reason": "trail_stop",
+      "trade_type": "vol_surge"
+    },
+    {
+      "symbol": "GPRO",
+      "entry": 1.5987,
+      "exit": 0.0,
+      "shares": 34,
+      "pnl": 0,
+      "reason": "force_close",
+      "trade_type": "rtg"
+    },
+    {
+      "symbol": "DAMD",
+      "entry": 1.7377,
+      "exit": 0.0,
+      "shares": 22,
+      "pnl": 0,
+      "reason": "force_close",
+      "trade_type": "vol_surge"
+    },
+    {
+      "symbol": "MIRA",
+      "entry": 0.877,
+      "exit": 0.0,
+      "shares": 45,
+      "pnl": 0,
+      "reason": "force_close",
+      "trade_type": "vol_surge"
+    },
+    {
+      "symbol": "GYGY",
+      "entry": 1.3497,
+      "exit": 0.0,
+      "shares": 29,
+      "pnl": 0,
+      "reason": "force_close",
+      "trade_type": "vol_surge"
+    }
+  ]
+}
