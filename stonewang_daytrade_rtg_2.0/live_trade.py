@@ -87,6 +87,7 @@ def is_crypto_etf(symbol):
 
 
 def _get_rvol_tier(rvol):
+    rvol = min(rvol, getattr(config, "RVOL_SIZING_CAP", 10.0))
     tiers = getattr(config, "RVOL_SIZING_TIERS", [(10.0, 0.50), (5.0, 0.30), (0.0, 0.15)])
     for rvol_min, pct in tiers:
         if rvol >= rvol_min:
@@ -521,6 +522,11 @@ def force_sell_position(symbol, shares):
                         break
         except Exception:
             pass
+        # Fallback: if fill_price still 0, use latest bar from accumulator
+        if fill_price <= 0:
+            bars = _accumulator.get_1min_bars(symbol)
+            if bars:
+                fill_price = float(bars[-1]["close"])
         return shares, fill_price
     except Exception as e:
         log(f"Force close failed: {symbol} - {e}")
@@ -829,6 +835,8 @@ def scan_volume_breakouts(target_date, existing_symbols=None):
         if prev_close <= 0:
             continue
         gap_pct = (open_price / prev_close) - 1.0
+        if gap_pct <= 0:
+            continue  # Negative gap — skip for long-only strategy
 
         # Compute intraday RVOL for sizing/stop tier (not for filtering)
         current_daily_vol = float(snap.daily_bar.volume) if snap.daily_bar else 0
@@ -981,11 +989,16 @@ def run_trading_day(target_date):
     now_est = dt.datetime.now(_EST)
     market_open_time = dt.datetime.combine(target_date.date(), dt.time(9, 30), tzinfo=_EST)
     if now_est >= market_open_time:
-        log("Midday restart detected — using volume breakout scan instead of gap scan")
-        candidates = scan_volume_breakouts(target_date, existing_symbols=set())
-        if not candidates:
-            log("Volume breakout found 0 candidates, falling back to gap scan")
-            candidates = scan_gaps(target_date)
+        log("Midday restart detected — running gap scan + volume breakout scan")
+        gap_candidates = scan_gaps(target_date)
+        volume_candidates = scan_volume_breakouts(target_date, existing_symbols=set())
+        # Merge: gap candidates first (RTG priority), then volume candidates
+        seen = set(c["symbol"] for c in gap_candidates)
+        for vc in volume_candidates:
+            if vc["symbol"] not in seen:
+                gap_candidates.append(vc)
+        candidates = gap_candidates
+        log(f"Midday restart: {len(gap_candidates)-len(volume_candidates)+len([vc for vc in volume_candidates if vc['symbol'] in seen])} gap + {len([vc for vc in volume_candidates if vc['symbol'] not in seen])} volume candidates = {len(candidates)} total")
     else:
         candidates = scan_gaps(target_date)
     if not candidates:
@@ -1142,7 +1155,7 @@ def run_trading_day(target_date):
             for pos in positions[:]:
                 sold, fill = force_sell_position(pos.symbol, pos.shares)
                 if sold > 0:
-                    pnl = (fill - pos.entry_price) * sold if fill > 0 else 0
+                    pnl = (fill - pos.entry_price) * sold
                     trades_detail.append({"symbol": pos.symbol, "entry": pos.entry_price, "exit": fill,
                                           "shares": sold, "pnl": round(pnl, 2), "reason": "force_close",
                                           "trade_type": pos.signal_type})
@@ -1170,7 +1183,7 @@ def run_trading_day(target_date):
                 for pos in positions[:]:
                     sold, fill = force_sell_position(pos.symbol, pos.shares)
                     if sold > 0:
-                        pnl = (fill - pos.entry_price) * sold if fill > 0 else 0
+                        pnl = (fill - pos.entry_price) * sold
                         trades_detail.append({"symbol": pos.symbol, "entry": pos.entry_price, "exit": fill,
                                               "shares": sold, "pnl": round(pnl, 2), "reason": "circuit_breaker",
                                               "trade_type": pos.signal_type})
@@ -1210,7 +1223,7 @@ def run_trading_day(target_date):
                     for pos in positions[:]:
                         sold, fill = force_sell_position(pos.symbol, pos.shares)
                         if sold > 0:
-                            pnl = (fill - pos.entry_price) * sold if fill > 0 else 0
+                            pnl = (fill - pos.entry_price) * sold
                             trades_detail.append({"symbol": pos.symbol, "entry": pos.entry_price, "exit": fill,
                                                   "shares": sold, "pnl": round(pnl, 2), "reason": "profit_protect",
                                                   "trade_type": pos.signal_type})
@@ -1379,8 +1392,11 @@ def run_trading_day(target_date):
                 bars = _accumulator.get_1min_bars(sym)
                 # Volume scan candidates: skip RTG check — 5min vol surge IS the signal
                 if c.get("rel_vol_ratio", 0) >= getattr(config, "VOLUME_SCAN_MIN_REL_VOL_RATIO", 3.0):
-                    # Use latest bar close as entry price
+                    # Momentum confirmation: require close > open * 1.005 (min 0.5% gain)
                     if bars and bars[-1]["close"] > 0:
+                        entry_price = bars[-1]["close"]
+                        if entry_price <= open_price * 1.005:
+                            continue  # Insufficient momentum
                         entry_price = bars[-1]["close"]
                         confirmed = True
                         signal_type = "vol_surge"

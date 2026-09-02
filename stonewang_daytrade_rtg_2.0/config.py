@@ -25,7 +25,7 @@ DRY_RUN = False
 ALPACA_BASE_URL = "https://api.alpaca.markets"
 ALPACA_DATA_URL = "https://data.alpaca.markets"
 
-# Data feed: SIP
+# Data feed: SIP (full market data)
 DATA_FEED = "sip"
 from alpaca.data.enums import DataFeed as _DF
 DATA_FEED_OBJ = _DF.SIP
@@ -63,6 +63,7 @@ RVOL_SIZING_TIERS = [
     (5.0,  0.35),   # RVOL 5-10× → 35% of equity
     (0.0,  0.20),   # RVOL < 5× → 20% of equity (marginal setup)
 ]
+RVOL_SIZING_CAP = 10.0        # Cap RVOL at 10× for sizing (intraday RVOL can be 1000×+)
 
 # ── ATR-based adaptive stop loss ──────────────────────────────────────
 # Stop = max(ATR_MULT × ATR, |gap_pct| × GAP_STOP_FACTOR) / entry, clamp to min/max pct

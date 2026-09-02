@@ -321,6 +321,7 @@ def find_rtg_entry_1min(bars_1m, open_price, min_volume=None):
 
 
 def _get_rvol_tier(rvol):
+    rvol = min(rvol, getattr(config, "RVOL_SIZING_CAP", 10.0))
     tiers = getattr(config, "RVOL_SIZING_TIERS", [(10.0, 0.50), (5.0, 0.30), (0.0, 0.15)])
     for rvol_min, pct in tiers:
         if rvol >= rvol_min:
