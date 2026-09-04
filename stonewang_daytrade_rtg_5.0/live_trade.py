@@ -243,7 +243,9 @@ def start_ws_stream(symbols):
         )
         for sym in symbols:
             _ws_stream.subscribe_bars(_on_bar, sym)
-            _ws_stream.subscribe_trades(_on_trade, sym)
+            # Don't subscribe to trades — bars already provide OHLCV.
+            # Dual subscription causes duplicate bars in accumulator, breaking
+            # prev-bar volume comparison in check_orb_entry.
         _stream_state["symbols"] = set(symbols)
         _stream_state["running"] = True
         _stream_state["last_bar_ts"] = time.time()
