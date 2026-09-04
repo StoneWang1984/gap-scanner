@@ -112,7 +112,7 @@ def get_rvol_exit_params(rvol):
     return 0.03, 0.15, 0.03, 0.02
 
 
-def get_atr_stop_params(rvol, atr, entry_price, gap_pct=0, signal_type="rtg"):
+def get_atr_stop_params(rvol, atr, entry_price, gap_pct=0):
     """ATR-based stop with gap expansion. stop = max(ATR×mult, |gap|×0.3) / entry."""
     atr_mult = 2.0
     for rvol_min, mult in getattr(config, "ATR_MULT_TIERS", [(10.0, 3.0), (5.0, 2.5), (0.0, 2.0)]):
@@ -650,10 +650,12 @@ def check_rtg_entry(symbol, open_price, bars, after_time=None, min_volume=None):
     return 0.0, False, ""
 
 
-def check_orb_entry(symbol, open_price, bars, min_volume=None):
+def check_orb_entry(symbol, open_price, bars, min_volume=None, after_time=None):
     """Opening Range Breakout entry. Phase 1: build range from first ORB_BARS bars.
     Phase 2: enter on breakout above range high with volume confirmation."""
     orb_bars = getattr(config, "ORB_BARS", 3)
+    if orb_bars < 1:
+        orb_bars = 1
     if len(bars) < orb_bars + 1:
         return 0.0, False, ""
     if min_volume is None:
@@ -681,6 +683,11 @@ def check_orb_entry(symbol, open_price, bars, min_volume=None):
             ts.time() if hasattr(ts, "time") else None)
         if bar_time is None or bar_time > entry_end:
             continue
+        # Skip bars before after_time (for re-entry filtering)
+        if after_time is not None:
+            bar_ts_epoch = ts.timestamp() if isinstance(ts, dt.datetime) else None
+            if bar_ts_epoch is not None and bar_ts_epoch < after_time:
+                continue
         bc = bar["close"]
         bv = bar["volume"]
         pv = prev["volume"]
@@ -796,11 +803,11 @@ def run_trading_day(target_date):
                 stop_p, target_p, trail_act_p, trail_p = get_rvol_exit_params(rvol)
             pos = Position(
                 symbol=sym, shares=int(float(ep.qty)),
-                entry_price=entry_px, entry_ts=time.time(),
+                entry_price=entry_px, entry_ts=sp.get("entry_ts", time.time()),
                 open_price=sp.get("open_price", cand.get("open_price", 0) if cand else 0),
                 gap_pct=gap_pct,
                 signal_type=sp.get("signal_type", "rtg"),
-                highest=float(ep.current_price),
+                highest=sp.get("highest", float(ep.current_price)),
                 trail_active=sp.get("trail_active", False),
                 rvol=rvol,
                 atr=atr_val,
@@ -931,6 +938,7 @@ def run_trading_day(target_date):
                             _last_exit_ts[pos.symbol] = time.time()
                             log(f"Profit protect close {pos.symbol}, P&L=${pnl:+,.2f}")
                     state["daily_stopped"] = True
+                    break
 
         # Exit monitoring
         for pos in positions[:]:
@@ -1045,7 +1053,7 @@ def run_trading_day(target_date):
                 sym = c["symbol"]
                 rvol = c.get("rvol", 0)
                 # Skip low RVOL (< 1.0) — below average volume, no momentum
-                if rvol < getattr(config, "MIN_ENTRY_RVOL", 1.0):
+                if rvol < getattr(config, "MIN_ENTRY_RVOL", 2.0):
                     continue
                 # Skip entries too close to force close (min 30 min before)
                 no_entry_before_close_min = getattr(config, "NO_ENTRY_BEFORE_CLOSE_MIN", 30)
@@ -1090,7 +1098,7 @@ def run_trading_day(target_date):
                     min_vol = max(config.RTG_MIN_VOLUME // 2, 10000)
                 # Use ORB entry if enabled, else fallback to RTG
                 if getattr(config, "ORB_ENABLED", True):
-                    entry_price, confirmed, signal_type = check_orb_entry(sym, open_price, bars, min_volume=min_vol)
+                    entry_price, confirmed, signal_type = check_orb_entry(sym, open_price, bars, min_volume=min_vol, after_time=after_time)
                 else:
                     entry_price, confirmed, signal_type = check_rtg_entry(sym, open_price, bars, after_time=after_time, min_volume=min_vol)
                 if not confirmed or entry_price <= 0:
@@ -1193,7 +1201,8 @@ def run_trading_day(target_date):
                            "open_price": p.open_price, "gap_pct": p.gap_pct,
                            "stop_pct": p.stop_pct, "target_pct": p.target_pct,
                            "trail_activate_pct": p.trail_activate_pct, "trail_pct": p.trail_pct,
-                           "highest": p.highest, "trail_active": p.trail_active} for p in positions],
+                           "highest": p.highest, "trail_active": p.trail_active,
+                           "entry_ts": p.entry_ts} for p in positions],
             "trades_detail": trades_detail,
         })
         save_state(state)
