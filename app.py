@@ -1,4 +1,4 @@
-"""RTG 4.0 策略 — Streamlit Web UI (交易显示 + 回测)"""
+"""RTG 5.0 策略 — Streamlit Web UI (交易显示 + 回测)"""
 
 import json
 import time
@@ -8,7 +8,7 @@ import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
 
-VERSION_DIR = Path("/Users/stonewang2014/gap-scanner/stonewang_daytrade_rtg_4.0")
+VERSION_DIR = Path("/Users/stonewang2014/gap-scanner/stonewang_daytrade_rtg_5.0")
 STATE_FILE = Path("/Users/stonewang2014/gap-scanner/live_state.json")
 import importlib.util, sys
 _spec = importlib.util.spec_from_file_location("config", VERSION_DIR / "config.py")
@@ -16,12 +16,12 @@ config = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(config)
 sys.modules["config"] = config
 
-st.set_page_config(page_title="RTG 4.0 交易", page_icon="📊", layout="wide")
+st.set_page_config(page_title="RTG 5.0 交易", page_icon="📊", layout="wide")
 
 # ── Sidebar ──────────────────────────────────────────────────────
 
-st.sidebar.title("RTG 4.0 交易")
-st.sidebar.caption("RVOL加权仓位 + RVOL自适应出场 + 6项Bug修复")
+st.sidebar.title("RTG 5.0 交易")
+st.sidebar.caption("ORB + ATR止损 + 渐进Trailing + 利润保护")
 
 tab = st.sidebar.radio("导航", ["实盘交易", "策略概览", "交易详情"])
 
@@ -236,7 +236,7 @@ if tab == "实盘交易":
 # ══════════════════════════════════════════════════════════════════
 
 elif tab == "策略概览":
-    st.title("RTG 4.0 策略概览")
+    st.title("RTG 5.0 策略概览")
 
     col1, col2 = st.columns(2)
 
@@ -253,9 +253,11 @@ elif tab == "策略概览":
 
         st.subheader("入场信号")
         st.markdown(f"""
-        - **RTG** (盘前候选): close > open_price AND vol ≥ {config.RTG_VOLUME_MULT}× prior
+        - **ORB** (Opening Range Breakout): 等{config.ORB_BARS}根1min bar建立区间, 突破区间高点+放量入场
         - GapGo: **禁用** (胜率34%)
-        - 入场窗口: **{config.ENTRY_WINDOW_START} ~ {config.ENTRY_WINDOW_END} EST**
+        - 入场窗口: **{config.ENTRY_WINDOW_START} ~ {config.ENTRY_WINDOW_END} EST** (动量窗口)
+        - 最低RVOL: **{config.MIN_ENTRY_RVOL:.0f}×**
+        - 最低价格: **${config.MIN_ENTRY_PRICE:.0f}**
         """)
 
         st.subheader("仓位管理")
@@ -271,10 +273,29 @@ elif tab == "策略概览":
             st.markdown(f"- RVOL ≥ {rvol_min:.0f}× → **{eq_pct:.0%}** 权益")
 
     with col2:
-        st.subheader("RVOL自适应出场分级")
-        st.markdown("**止损 / 目标 / 追踪激活 / 追踪宽度:**")
-        for rvol_min, stop_pct, tgt_pct, trail_act, trail_pct in config.RVOL_EXIT_TIERS:
-            st.markdown(f"- RVOL ≥ {rvol_min:.0f}× → 止损 **{stop_pct:.0%}** / 目标 **{tgt_pct:.0%}** / 追踪激活 +{trail_act:.0%} / 追踪 **{trail_pct:.0%}**")
+        st.subheader("ATR止损 + Gap扩展")
+        st.markdown(f"""
+        - 止损 = max(ATR×乘数, |gap|×{config.GAP_STOP_FACTOR:.0%}) / 入场价
+        - 钳位: **{config.ATR_STOP_MIN_PCT:.0%}** ~ **{config.ATR_STOP_MAX_PCT:.0%}**
+        - RVOL ≥ 10× → ATR×{config.ATR_MULT_TIERS[0][1]:.1f} | ≥ 5× → ATR×{config.ATR_MULT_TIERS[1][1]:.1f} | else → ATR×{config.ATR_MULT_TIERS[2][1]:.1f}
+        - 追踪宽度 = ATR×{config.ATR_TRAIL_MULT:.1f} / 入场价, 钳位 0.5%~5%
+        """)
+
+        st.subheader("渐进Trailing")
+        for tier_profit, tier_trail in config.PROGRESSIVE_TRAIL_TIERS:
+            st.markdown(f"- 利润 > {tier_profit:.0%} → trail = **{tier_trail:.1%}**")
+
+        st.subheader("Failed-Entry快速止损")
+        st.markdown(f"""
+        - {config.FAILED_ENTRY_MAX_SECONDS}秒内未涨 **{config.FAILED_ENTRY_MIN_GAIN_PCT:.0%}** → 立即出场
+        """)
+
+        st.subheader("日利润保护")
+        st.markdown(f"""
+        - 利润从峰值回撤到 **{config.DAILY_PROFIT_PROTECT_RATIO:.0%}** → 全仓强平
+        - 激活阈值: 峰值 ≥ ${config.DAILY_PROFIT_PROTECT_MIN:.0f}
+        - 延迟: 开盘后{config.DAILY_PROFIT_PROTECT_DELAY_SEC // 60}分钟
+        """)
 
         st.subheader("强制平仓 & Re-entry")
         st.markdown(f"""
@@ -283,18 +304,18 @@ elif tab == "策略概览":
         """)
 
     st.divider()
-    st.subheader("RTG 4.0 设计理念")
+    st.subheader("RTG 5.0 设计理念 (基于Cam Connor / Brian Shannon)")
     st.markdown("""
-    - **RVOL加权仓位**: 高RVOL=A+设定, 50%权益集中投入
-    - **RVOL自适应出场**: 高RVOL宽止损(7%)/宽追踪(5%), 低RVOL紧止损(3%)/紧追踪(2%)
-    - **目标价退出**: 高RVOL 50%目标让利润奔跑, 低RVOL 15%快速锁定
-    - **No Re-entry**: 首笔退出后不再入场 (backtest: 首笔+$37.70/83%WR, re-entry-$39.50/35%WR)
-    - **集中持仓8只**: 分散配置, 同时捕捉多只跳空股
-    - **全日入场窗口**: 09:30-15:59, RTG信号可随时触发
-    - **最低RVOL 1.0×**: 低于平均成交量的跳空股无动量, 跳过
-    - **尾盘保护**: 15:29后不再入场 (距强平30分钟)
-    - **仓位同步**: 卖出失败时检测Alpaca仓位是否存在, desync自动移除
-    - **买入验证**: 成交后验证Alpaca仓位存在才加入追踪
+    - **ORB入场**: 等3根bar建立开盘区间, 突破区间高点+放量才入场, 过滤开盘噪声
+    - **ATR自适应止损**: stop=max(ATR×mult, |gap|×30%), 钳位2%-8%, 跳空股给宽止损
+    - **Gap扩展**: 止损覆盖30%的跳空幅度, 防止开盘震荡触发止损
+    - **Failed-entry快速止损**: 3分钟不涨1%→立即出场, 不等全止损
+    - **渐进Trailing**: 利润>5%→1.5%, >10%→1%, >15%→0.5%, 让赢家奔跑
+    - **日利润保护**: 峰值利润回撤30%→全仓强平, 30分钟延迟
+    - **动量窗口**: 仅09:30-10:30入场, gap动量半衰期~30分钟
+    - **集中仓位**: 最多3仓, A+设定50%权益
+    - **高质量过滤**: RVOL≥2.0×, 价格≥$2, 仅Top 5候选
+    - **No Re-entry**: 首笔退出后不再入场
     """)
 
 # ══════════════════════════════════════════════════════════════════
