@@ -772,6 +772,7 @@ def run_trading_day(target_date):
     entry_count = {}  # symbol -> count of entries (for re-entry)
     _last_exit_ts = {}  # symbol -> timestamp of last exit
     _stop_exit_ts = {}  # symbol -> timestamp of stop_loss exit (cooldown)
+    _orb_diag = {}  # symbol_key -> timestamp of last ORB diagnostic log
     _sell_stuck_until = {}  # symbol -> timestamp until which sell retries are throttled
 
     # Restore existing Alpaca positions (survive restart)
@@ -1102,6 +1103,17 @@ def run_trading_day(target_date):
                 else:
                     entry_price, confirmed, signal_type = check_rtg_entry(sym, open_price, bars, after_time=after_time, min_volume=min_vol)
                 if not confirmed or entry_price <= 0:
+                    # Log why ORB didn't trigger (diagnostic, every 30s per symbol)
+                    _orb_diag_key = f"{sym}_orb_diag"
+                    if time.time() - _orb_diag.get(_orb_diag_key, 0) > 30:
+                        _orb_diag[_orb_diag_key] = time.time()
+                        n_bars = len(bars)
+                        if n_bars >= 4:
+                            r3 = bars[:3]
+                            rh = max(b["high"] for b in r3)
+                            rl = min(b["low"] for b in r3)
+                            rw = (rh - rl) / rh if rh > 0 else 0
+                            log(f"ORB skip {sym}: {n_bars} bars range=[{rl:.2f}-{rh:.2f}] width={rw:.1%} confirmed={confirmed}")
                     continue
                 # Re-entry price guards (after RTG signal confirmed)
                 if is_reentry:
