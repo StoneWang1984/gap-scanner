@@ -108,15 +108,15 @@ PULLBACK_STOP_THRESHOLD = 0.15
 MAX_DAILY_LOSS_PCT = 0.05
 
 # Position management
-MAX_POSITIONS_PER_DAY = 5  # max 5 stocks bought per day
-MAX_CANDIDATES = 10  # monitor up to 10 candidates, buy whichever confirms
-MAX_DAILY_TRADES = 5
-EQUITY_POSITION_RATIO = 0.80
+MAX_POSITIONS_PER_DAY = 0  # 0=不限
+MAX_CANDIDATES = 20  # monitor up to 20 candidates, buy whichever confirms
+MAX_DAILY_TRADES = 0  # 0 = no limit
+EQUITY_POSITION_RATIO = 1.0
 
 # Invariant checker — 实盘状态一致性验证
 INVARIANT_CHECK_INTERVAL = 4  # 每4轮轮询检查一次（避免API限频）
-MAX_POSITION_SIZE = 100000
-MIN_POSITION_SIZE = 250  # minimum $250 per position (aligned with backtest)
+MAX_POSITION_SIZE = 100  # max $100 per position
+MIN_POSITION_SIZE = 40  # minimum $40 per position
 FORCE_QTY = 0  # 0 = dynamic position sizing based on equity; >0 = fixed shares (test mode)
 INITIAL_CAPITAL = 500
 FORCE_CLOSE_TIME = "15:50"

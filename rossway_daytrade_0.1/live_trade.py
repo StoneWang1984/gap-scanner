@@ -34,6 +34,7 @@ from alpaca.trading.requests import (
 )
 from alpaca.trading.enums import (
     OrderSide, TimeInForce, QueryOrderStatus, OrderStatus, OrderClass,
+    OrderType,
 )
 from alpaca.data.historical.stock import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, StockSnapshotRequest
@@ -54,13 +55,11 @@ config = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(config)
 sys.modules["config"] = config
 
-from scanner import get_tradable_symbols, scan_gaps_for_symbols
+from scanner import get_tradable_symbols, scan_gaps_for_symbols, scan_gaps_batch
 from strategy import calc_atr
 
 # ── Constants from config ──
-STOP_LOSS_MIN_CENTS = getattr(config, "STOP_LOSS_MIN_CENTS", 0.15)
-STOP_LOSS_PCT = getattr(config, "STOP_LOSS_PCT", 0.015)
-REWARD_RISK_RATIO = getattr(config, "REWARD_RISK_RATIO", 2.5)
+STOP_TIERS = getattr(config, "STOP_TIERS", None)
 STOP_LIMIT_BUFFER = getattr(config, "STOP_LIMIT_BUFFER", 0.03)
 MAX_POSITIONS = getattr(config, "MAX_POSITIONS", 5)
 MIN_POSITION_SIZE = getattr(config, "MIN_POSITION_SIZE", 40)
@@ -217,11 +216,15 @@ def _dry_run_get_price(symbol):
 
 # ── Stop/Target calculation ──
 def calc_stop_and_target(entry_price: float) -> tuple[float, float]:
-    """止损 = max($0.15, entry×1.5%), 止盈 = entry + (entry - stop) × 2.5"""
-    stop_amount = max(STOP_LOSS_MIN_CENTS, entry_price * STOP_LOSS_PCT)
-    stop_price = round(entry_price - stop_amount, 2)
-    target_price = round(entry_price + stop_amount * REWARD_RISK_RATIO, 2)
-    return stop_price, target_price
+    """按价格分档止损止盈"""
+    if STOP_TIERS:
+        for min_p, max_p, stop_pct, target_pct in STOP_TIERS:
+            if min_p <= entry_price < max_p:
+                stop_price = round(entry_price * (1 - stop_pct), 2)
+                target_price = round(entry_price * (1 + target_pct), 2)
+                return stop_price, target_price
+    # Fallback
+    return round(entry_price * 0.97, 2), round(entry_price * 1.03, 2)
 
 
 # ── Bar accumulator ──
@@ -595,9 +598,9 @@ def place_oco_exit(symbol, shares, target_price, stop_price):
 
 # ── Force sell (for EOD / circuit breaker) ──
 def force_sell_position(symbol, shares):
-    """Market sell all shares. Returns actual shares sold."""
+    """Market sell all shares. Returns (actual_shares_sold, fill_price)."""
     if shares <= 0:
-        return 0
+        return 0, 0
 
     if DRY_RUN:
         oid = f"DRY-FS-{uuid4().hex[:8]}"
@@ -608,7 +611,7 @@ def force_sell_position(symbol, shares):
                          filled_qty=shares, filled_price=fill_price)
         dry_run_orders[oid] = mock
         log(f"[DRY] FORCE SELL {symbol} {shares} @ ~${fill_price:.2f}")
-        return shares
+        return shares, fill_price
 
     # Cancel any open orders for this symbol first
     try:
@@ -632,14 +635,14 @@ def force_sell_position(symbol, shares):
                 actual = get_order_filled_qty(str(order.id))
                 fill_price = get_order_filled_price(str(order.id))
                 log(f"FORCE SELL CONFIRMED: {symbol} {actual}sh @ ${fill_price:.4f}")
-                return actual
+                return actual, fill_price
             else:
                 log(f"{YELLOW}FORCE SELL TIMEOUT: {symbol} attempt {attempt+1}{RESET}")
         except Exception as e:
             analysis = analyze_alpaca_rejection(e)
             log(f"FORCE SELL REJECTED {symbol}: {analysis['detail']}")
             if analysis["category"] == "no_position":
-                return shares  # Alpaca already cleared it
+                return shares, 0  # Alpaca already cleared it
             if analysis["category"] in ("rate_limit", "network") and attempt < 2:
                 time.sleep(3)
                 continue
@@ -648,10 +651,10 @@ def force_sell_position(symbol, shares):
     try:
         result = trading_client.close_position(symbol)
         log(f"CLOSE POSITION {symbol}: {result}")
-        return shares
+        return shares, 0
     except Exception as e:
         log(f"{RED}CLOSE POSITION FAILED {symbol}: {e}{RESET}")
-        return 0
+        return 0, 0
 
 
 # ── Check OCO fill ──
@@ -683,12 +686,45 @@ def check_oco_fill(oco_order_id, symbol):
         if order.status == OrderStatus.FILLED:
             fill_price = float(order.filled_avg_price) if order.filled_avg_price else 0
             fill_qty = int(float(order.filled_qty)) if order.filled_qty else 0
-            # Determine which leg filled by comparing fill price to target/stop
-            # OCO: if fill_price closer to target → take_profit, else → stop_loss
-            leg = "take_profit"  # default assumption for limit fills
+            leg = "take_profit"  # limit fill = take profit
             return True, leg, fill_price, fill_qty
         elif order.status in (OrderStatus.CANCELED, OrderStatus.REJECTED, OrderStatus.EXPIRED):
-            return True, "canceled", 0, 0
+            # OCO LIMIT canceled — check if the companion STOP_LIMIT filled (stop loss)
+            # When stop loss triggers, Alpaca cancels the LIMIT leg and fills the STOP_LIMIT leg
+            try:
+                closed_orders = trading_client.get_orders(
+                    GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=50))
+                for o in closed_orders:
+                    if (o.symbol == symbol and o.side == OrderSide.SELL
+                            and o.status == OrderStatus.FILLED
+                            and getattr(o, 'order_class', None) == OrderClass.OCO
+                            and o.order_type in (OrderType.STOP_LIMIT, OrderType.STOP)):
+                        fill_price = float(o.filled_avg_price) if o.filled_avg_price else 0
+                        fill_qty = int(float(o.filled_qty)) if o.filled_qty else 0
+                        if fill_qty > 0:
+                            return True, "stop_loss", fill_price, fill_qty
+            except Exception:
+                pass
+            # No filled companion found — check if position still exists
+            try:
+                pos = trading_client.get_open_position(symbol)
+                # Position still exists → genuine external cancellation
+                return True, "canceled", 0, 0
+            except Exception:
+                # Position gone → OCO filled but we couldn't find the fill
+                # Look for any recent filled sell for this symbol
+                try:
+                    for o in closed_orders:
+                        if (o.symbol == symbol and o.side == OrderSide.SELL
+                                and o.status == OrderStatus.FILLED):
+                            fill_price = float(o.filled_avg_price) if o.filled_avg_price else 0
+                            fill_qty = int(float(o.filled_qty)) if o.filled_qty else 0
+                            if fill_qty > 0:
+                                leg = "stop_loss"  # assume stop loss if not take profit
+                                return True, leg, fill_price, fill_qty
+                except Exception:
+                    pass
+                return True, "canceled", 0, 0
         return False, None, 0, 0
     except Exception:
         return False, None, 0, 0
@@ -704,7 +740,7 @@ def scan_gaps():
 
         today = pd.Timestamp.now(tz="America/New_York")
         client = StockHistoricalDataClient(config.ALPACA_API_KEY, config.ALPACA_SECRET_KEY)
-        df = scan_gaps_for_symbols(client, today, all_symbols)
+        df = scan_gaps_batch(client, today, all_symbols, batch_size=500)
 
         if df.empty:
             return []
@@ -911,9 +947,10 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str, today_info:
                 log(f"EOD: Force closing {pos.symbol} {pos.shares}sh")
                 if pos.oco_order_id:
                     cancel_order(pos.oco_order_id)
-                sold = force_sell_position(pos.symbol, pos.shares)
+                sold, fill_price = force_sell_position(pos.symbol, pos.shares)
                 if sold > 0:
-                    fill_price = get_order_filled_price("") or pos.entry_price
+                    if fill_price <= 0:
+                        fill_price = pos.entry_price
                     pnl = (fill_price - pos.entry_price) * sold
                     trades_detail.append({
                         "symbol": pos.symbol, "entry": pos.entry_price,
@@ -959,13 +996,14 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str, today_info:
             elif filled and leg == "canceled":
                 # OCO was canceled externally — force sell
                 log(f"{YELLOW}OCO CANCELED: {pos.symbol} — force selling{RESET}")
-                sold = force_sell_position(pos.symbol, pos.shares)
+                sold, sell_price = force_sell_position(pos.symbol, pos.shares)
                 if sold > 0:
                     daily_trades += 1
+                    pnl = (sell_price - pos.entry_price) * sold
                     trades_detail.append({
                         "symbol": pos.symbol, "entry": pos.entry_price,
-                        "exit": pos.entry_price, "shares": sold,
-                        "pnl": 0, "reason": "oco_canceled",
+                        "exit": sell_price, "shares": sold,
+                        "pnl": round(pnl, 2), "reason": "oco_canceled",
                         "trade_type": pos.trade_type,
                     })
                 positions.remove(pos)
@@ -1067,12 +1105,13 @@ def run_trading_day(force_close_time: dt.time, force_close_str: str, today_info:
                     if oco_err:
                         # OCO failed — place trailing stop as fallback, then force sell
                         log(f"{YELLOW}OCO failed for {sym}, force selling{RESET}")
-                        sold = force_sell_position(sym, actual_shares)
+                        sold, fs_price = force_sell_position(sym, actual_shares)
                         if sold > 0:
-                            pnl = (fill_price * 0.99 - fill_price) * sold  # approximate
+                            actual_exit = fs_price if fs_price > 0 else fill_price * 0.99
+                            pnl = (actual_exit - fill_price) * sold
                             trades_detail.append({
                                 "symbol": sym, "entry": fill_price,
-                                "exit": fill_price * 0.99, "shares": sold,
+                                "exit": actual_exit, "shares": sold,
                                 "pnl": round(pnl, 2), "reason": "oco_failed",
                                 "trade_type": "first",
                             })
@@ -1208,8 +1247,7 @@ def main():
     mode = "DRY RUN" if DRY_RUN else "LIVE"
     log("=" * 60)
     log(f"rossway_daytrade_0.1 — {mode} Trading")
-    log(f"Stop: max(${STOP_LOSS_MIN_CENTS}, entry×{STOP_LOSS_PCT*100:.1f}%)")
-    log(f"Target: stop × {REWARD_RISK_RATIO} (fixed reward/risk)")
+    log(f"Stop/Target: tiered by price ({len(STOP_TIERS)} tiers)" if STOP_TIERS else "Stop/Target: 3%/3%")
     log(f"Max positions: {MAX_POSITIONS} | EOD: {config.FORCE_CLOSE_TIME}")
     log(f"Entry: {config.ENTRY_WINDOW_START}-{config.ENTRY_WINDOW_END} | 3-bar confirmation")
     log("=" * 60)

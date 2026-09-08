@@ -12,7 +12,56 @@ Priority: stop > red_bar > trailing > target (checked in this order per bar).
 """
 
 from dataclasses import dataclass
+from collections import deque
 import config
+
+
+# ── EMA / MACD 计算 ────────────────────────────────────────────────
+
+def ema_update(value, prev_ema, period):
+    """Incremental EMA update. Returns new EMA value."""
+    if prev_ema is None:
+        return value
+    k = 2.0 / (period + 1)
+    return value * k + prev_ema * (1 - k)
+
+
+class MACDCalculator:
+    """Incremental MACD calculator fed bar-by-bar."""
+
+    def __init__(self, fast=12, slow=26, signal=9):
+        self.fast = fast
+        self.slow = slow
+        self.signal = signal
+        self._ema_fast = None
+        self._ema_slow = None
+        self._ema_signal = None
+        self._prev_macd = None
+        self.macd = 0.0
+        self.signal_line = 0.0
+        self.histogram = 0.0
+
+    def update(self, close_price):
+        """Feed a new bar close price. Updates MACD, signal, histogram."""
+        self._ema_fast = ema_update(close_price, self._ema_fast, self.fast)
+        self._ema_slow = ema_update(close_price, self._ema_slow, self.slow)
+        self.macd = self._ema_fast - self._ema_slow
+        self._ema_signal = ema_update(self.macd, self._ema_signal, self.signal)
+        self.signal_line = self._ema_signal
+        self.histogram = self.macd - self.signal_line
+        self._prev_macd = self.macd
+
+    def is_bullish(self, mode="above_zero"):
+        """Check if MACD confirms bullish entry."""
+        if mode == "above_zero":
+            return self.macd > 0
+        elif mode == "cross_signal":
+            return self.histogram > 0  # MACD above signal line
+        return True
+
+    def is_bullish_cross(self):
+        """MACD just crossed above signal line (golden cross)."""
+        return self.histogram > 0 and self._prev_macd is not None
 
 
 @dataclass

@@ -211,6 +211,7 @@ _ws_stream = None
 
 async def _on_bar(bar):
     _stream_state["last_bar_ts"] = time.time()
+    _stream_state["restart_count"] = 0  # Reset backoff on successful data
     sym = bar.symbol
     ts = bar.timestamp
     if hasattr(ts, "timestamp"):
@@ -224,6 +225,7 @@ async def _on_bar(bar):
 
 async def _on_trade(trade):
     _stream_state["last_bar_ts"] = time.time()
+    _stream_state["restart_count"] = 0  # Reset backoff on successful data
     sym = trade.symbol
     ts = trade.timestamp
     if hasattr(ts, "timestamp"):
@@ -1192,19 +1194,44 @@ def run_trading_day(target_date):
                     f"[RVOL={rvol:.1f}×{atr_str} stop={stop_p:.0%} tgt={target_p:.0%}]")
 
         # WS health — restart if not running OR no bars for 60s
-        # Add 30s cooldown between restarts to avoid tight loop
+        # Add exponential backoff and market-closed detection
         ws_stale = time.time() - _stream_state["last_bar_ts"] > 60
         ws_needs_restart = not _stream_state["running"] or ws_stale
-        if ws_needs_restart and time.time() - _stream_state.get("last_restart_ts", 0) > 30:
-            if not _stream_state["running"]:
-                log("WebSocket: not running, restarting...")
+        # Exponential backoff: 30s → 60s → 120s → 300s → 600s (max)
+        _ws_restart_count = _stream_state.get("restart_count", 0)
+        _ws_backoff = min(30 * (2 ** min(_ws_restart_count, 4)), 600)
+        if ws_needs_restart and time.time() - _stream_state.get("last_restart_ts", 0) > _ws_backoff:
+            # Check if market is actually open before restarting
+            _ws_now = dt.datetime.now(_EST)
+            _ws_mkt_open = dt.datetime.combine(_ws_now.date(), dt.time(9, 30), tzinfo=_EST)
+            _ws_mkt_close = dt.datetime.combine(_ws_now.date(), dt.time(16, 0), tzinfo=_EST)
+            if _ws_now < _ws_mkt_open or _ws_now >= _ws_mkt_close or _ws_now.weekday() >= 5 or _is_market_holiday(_ws_now.date()):
+                if _ws_restart_count == 0:
+                    log("WebSocket: market not open, skipping restart (will check again)")
+                _stream_state["last_restart_ts"] = time.time()
+                _stream_state["restart_count"] = _ws_restart_count + 1
             else:
-                log("WebSocket: no bars for 60s, restarting...")
-            _stream_state["last_restart_ts"] = time.time()
+                if not _stream_state["running"]:
+                    log(f"WebSocket: not running, restarting... (attempt {_ws_restart_count + 1})")
+                else:
+                    log(f"WebSocket: no bars for 60s, restarting... (attempt {_ws_restart_count + 1})")
+                _stream_state["last_restart_ts"] = time.time()
+                _stream_state["restart_count"] = _ws_restart_count + 1
+                try:
+                    restart_ws_stream(syms)
+                except Exception as e:
+                    log(f"WebSocket restart failed (will retry next cycle): {e}")
+
+        # REST backfill fallback: if WebSocket has been stale for >60s,
+        # poll REST API for recent 1min bars to keep accumulator updated
+        if ws_stale and time.time() - _stream_state.get("last_backfill_ts", 0) > 30:
             try:
-                restart_ws_stream(syms)
+                backfill_1min_bars(syms, target_date)
+                _stream_state["last_backfill_ts"] = time.time()
+                if _ws_restart_count <= 1:
+                    log("REST backfill: updated bars (WebSocket stale)")
             except Exception as e:
-                log(f"WebSocket restart failed (will retry next cycle): {e}")
+                log(f"REST backfill failed: {e}")
 
         # Save state
         state.update({
@@ -1254,11 +1281,45 @@ def _wait_until(target_date, target_time):
 
 def get_next_trading_day():
     now = dt.datetime.now(_EST)
-    for delta in range(1, 7):
+    for delta in range(1, 14):  # Check up to 2 weeks (covers holidays)
         candidate = now + dt.timedelta(days=delta)
-        if candidate.weekday() < 5:
-            return pd.Timestamp(candidate.date(), tz="America/New_York")
+        if candidate.weekday() >= 5:
+            continue
+        if _is_market_holiday(candidate.date()):
+            continue
+        return pd.Timestamp(candidate.date(), tz="America/New_York")
     return None
+
+
+def _is_market_holiday(date):
+    """Check if a date is a US stock market holiday.
+    Uses Alpaca calendar API if available, falls back to hardcoded list."""
+    # Try Alpaca calendar API first
+    try:
+        from alpaca.trading.requests import GetCalendarRequest
+        req = GetCalendarRequest(
+            start=pd.Timestamp(date),
+            end=pd.Timestamp(date),
+        )
+        calendar = trading_client.get_calendar(req)
+        if not calendar:
+            return True  # Not in calendar = holiday
+        return False
+    except Exception:
+        pass
+    # Fallback: hardcoded US market holidays for 2026
+    _holidays_2026 = {
+        dt.date(2026, 1, 1),   # New Year's Day
+        dt.date(2026, 1, 19),  # MLK Day
+        dt.date(2026, 2, 16),  # Presidents' Day
+        dt.date(2026, 4, 3),   # Good Friday
+        dt.date(2026, 5, 25),  # Memorial Day
+        dt.date(2026, 7, 3),   # Independence Day (observed)
+        dt.date(2026, 9, 7),   # Labor Day
+        dt.date(2026, 11, 26), # Thanksgiving
+        dt.date(2026, 12, 25), # Christmas
+    }
+    return date in _holidays_2026
 
 
 def test_connectivity():
@@ -1303,6 +1364,13 @@ def main():
         if now.weekday() >= 5:
             next_day = get_next_trading_day()
             log(f"Weekend. Next: {next_day.date()}")
+            _smart_sleep_until(dt.datetime.combine(next_day.date(), dt.time(9, 15), tzinfo=_EST))
+            continue
+
+        # Check if today is a market holiday
+        if _is_market_holiday(now.date()):
+            next_day = get_next_trading_day()
+            log(f"Market holiday today. Next: {next_day.date()}")
             _smart_sleep_until(dt.datetime.combine(next_day.date(), dt.time(9, 15), tzinfo=_EST))
             continue
 

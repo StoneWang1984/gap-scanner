@@ -27,10 +27,17 @@ ENTRY_WINDOW_START = "09:31"
 ENTRY_WINDOW_END = "10:00"
 MAX_CANDIDATES = 20
 
-# ── Exit: OCO单 ──
-STOP_LOSS_MIN_CENTS = 0.15   # 最低15美分止损
-STOP_LOSS_PCT = 0.015        # 1.5%止损
-REWARD_RISK_RATIO = 2.5      # 止盈 = 止损 × 2.5
+# ── Exit: OCO单 (按价格分档) ──
+# (min_price, max_price, stop_pct, target_pct)
+STOP_TIERS = [
+    (1,  2,  0.06,  0.12),    # $1-2:  止损6%,  止盈12%   (R:R 2.0)
+    (2,  3,  0.05,  0.10),    # $2-3:  止损5%,  止盈10%   (R:R 2.0)
+    (3,  4,  0.04,  0.06),    # $3-4:  止损4%,  止盈6%    (R:R 1.5)
+    (4,  5,  0.03,  0.045),   # $4-5:  止损3%,  止盈4.5%  (R:R 1.5)
+    (5,  10, 0.02,  0.04),    # $5-10: 止损2%,  止盈4%    (R:R 2.0)
+    (10, 15, 0.015, 0.035),   # $10-15:止损1.5%,止盈3.5%   (R:R 2.3)
+    (15, 20, 0.0125,0.02),    # $15-20:止损1.25%,止盈2%   (R:R 1.6)
+]
 STOP_LIMIT_BUFFER = 0.03     # stop-limit 3% buffer (stop_limit = stop_price × (1 - buffer))
 
 # ── Position management ──

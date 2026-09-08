@@ -1,5 +1,6 @@
 # Python
 venv/
+.venv/
 __pycache__/
 *.pyc
 *.pyo
@@ -24,3 +25,37 @@ backtest_results.png
 live_trade.log
 logs/
 stonewang_daytrade_frik5bar_1.0/versions/
+
+# Runtime logs
+*.log
+*.log.bak.*
+
+# Runtime state
+live_rtg*_state.json
+monitor_state.json
+monitor.log
+streamlit.log
+strategy_d.log
+
+# Daily reports (generated)
+daily_reports/
+
+# Chart data (generated JSON)
+chart_data*.json
+prescan_result.json
+dryrun_result.json
+
+# Nohup output
+nohup.out
+
+# Backup files
+*.bak.*
+backup_*/
+versions/versions/
+
+# Version dirs runtime files (keep .py source only)
+stonewang_daytrade_rtg_1.0/live_rtg*.log
+stonewang_daytrade_rtg_2.0/live_rtg*.log
+stonewang_daytrade_rtg_3.0/live_rtg*.log
+stonewang_daytrade_rtg_4.0/live_rtg*.log
+stonewang_daytrade_rtg_5.0/live_rtg*.log

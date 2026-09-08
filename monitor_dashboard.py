@@ -18,7 +18,7 @@ TZ_EST = ZoneInfo("America/New_York")
 
 st.set_page_config(page_title="系统监控", page_icon="🛡️", layout="wide")
 
-st.title("🛡️ Stone 1.0 系统监控")
+st.title("🛡️ Stone 1.1 系统监控")
 st.caption("进程状态 | WS连接 | 工作日志")
 
 

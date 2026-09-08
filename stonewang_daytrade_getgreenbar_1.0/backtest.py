@@ -241,14 +241,16 @@ def _bars_to_chart(bars_df):
 
 
 def find_greenbar_entry(bars_1m, open_price, min_volume=None, search_from=0):
-    """Find green bar sequence start entry on 1-min bars.
+    """Find green bar sequence start entry on 1-min bars with MACD + volume confirmation.
 
-    Approximates live GreenBarDetector.should_enter():
+    Entry conditions (all must be true):
     - bar[i-1] is red (close < open)
     - bar[i] is green (close > open)
     - bar[i].volume >= GBAR_VOLUME_MULT × bar[i-1].volume
     - bar[i].volume >= GBAR_MIN_VOLUME
     - bar[i].close > open_price
+    - MACD confirmation (if enabled): MACD > 0 or MACD above signal line
+    - Volume increase confirmation (if enabled): bar[i].vol > avg(recent N bars).vol × mult
 
     Returns (entry_price, entry_bar_idx, "greenbar") or (0, -1, "").
     """
@@ -259,6 +261,40 @@ def find_greenbar_entry(bars_1m, open_price, min_volume=None, search_from=0):
 
     entry_start_str = getattr(config, "ENTRY_WINDOW_START", "09:30")
     entry_end_str = getattr(config, "ENTRY_WINDOW_END", "15:30")
+
+    # Pre-compute MACD for all bars up to search point
+    macd_confirm = getattr(config, "GBAR_MACD_CONFIRM", False)
+    vol_inc_confirm = getattr(config, "GBAR_VOL_INCREASE_CONFIRM", False)
+
+    # Build MACD calculator and run through bars
+    macd_calc = None
+    macd_values = []  # MACD value at each bar
+    if macd_confirm:
+        from strategy import MACDCalculator
+        macd_calc = MACDCalculator(
+            fast=getattr(config, "GBAR_MACD_FAST", 12),
+            slow=getattr(config, "GBAR_MACD_SLOW", 26),
+            signal=getattr(config, "GBAR_MACD_SIGNAL", 9),
+        )
+        for j in range(len(bars_1m)):
+            c = float(bars_1m.iloc[j]["close"])
+            macd_calc.update(c)
+            macd_values.append({
+                "macd": macd_calc.macd,
+                "signal": macd_calc.signal_line,
+                "histogram": macd_calc.histogram,
+            })
+
+    # Pre-compute rolling average volume
+    vol_inc_lookback = getattr(config, "GBAR_VOL_INCREASE_LOOKBACK", 5)
+    vol_inc_mult = getattr(config, "GBAR_VOL_INCREASE_MULT", 1.2)
+    avg_volumes = []
+    if vol_inc_confirm:
+        for j in range(len(bars_1m)):
+            start_j = max(0, j - vol_inc_lookback)
+            vols = [int(bars_1m.iloc[k]["volume"]) for k in range(start_j, j)]
+            avg_v = sum(vols) / len(vols) if vols else 0
+            avg_volumes.append(avg_v)
 
     for i in range(max(search_from, 1), len(bars_1m)):
         idx_val = bars_1m.index[i]
@@ -291,9 +327,26 @@ def find_greenbar_entry(bars_1m, open_price, min_volume=None, search_from=0):
         vol_min = bar_vol >= min_volume
         above_open = bar_close > open_price
 
-        if prev_red and cur_green and vol_spike and vol_min and above_open:
-            entry_price = round(bar_close * 1.001, 4)  # signal bar close + slippage
-            return entry_price, i, "greenbar"
+        if not (prev_red and cur_green and vol_spike and vol_min and above_open):
+            continue
+
+        # MACD confirmation
+        if macd_confirm and i < len(macd_values):
+            macd_mode = getattr(config, "GBAR_MACD_MODE", "above_zero")
+            if macd_mode == "above_zero":
+                if macd_values[i]["macd"] <= 0:
+                    continue
+            elif macd_mode == "cross_signal":
+                if macd_values[i]["histogram"] <= 0:
+                    continue
+
+        # Volume increase confirmation
+        if vol_inc_confirm and i < len(avg_volumes):
+            if avg_volumes[i] > 0 and bar_vol < avg_volumes[i] * vol_inc_mult:
+                continue
+
+        entry_price = round(bar_close * 1.001, 4)  # signal bar close + slippage
+        return entry_price, i, "greenbar"
 
     return 0.0, -1, ""
 

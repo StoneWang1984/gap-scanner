@@ -38,11 +38,18 @@ def is_leveraged_etf(symbol: str) -> bool:
     return False
 
 
-# ── Stop/Target (same as live) ──
+# ── Stop/Target (tiered by price) ──
 def calc_stop_and_target(entry_price: float) -> tuple[float, float]:
-    stop_amount = max(config.STOP_LOSS_MIN_CENTS, entry_price * config.STOP_LOSS_PCT)
-    stop_price = round(entry_price - stop_amount, 2)
-    target_price = round(entry_price + stop_amount * config.REWARD_RISK_RATIO, 2)
+    tiers = getattr(config, "STOP_TIERS", None)
+    if tiers:
+        for min_p, max_p, stop_pct, target_pct in tiers:
+            if min_p <= entry_price < max_p:
+                stop_price = round(entry_price * (1 - stop_pct), 2)
+                target_price = round(entry_price * (1 + target_pct), 2)
+                return stop_price, target_price
+    # Fallback for prices outside tiers
+    stop_price = round(entry_price * 0.97, 2)
+    target_price = round(entry_price * 1.03, 2)
     return stop_price, target_price
 
 
@@ -137,6 +144,26 @@ def bulk_scan_gaps(client, trading_days, symbols):
     return final
 
 
+def _filter_rth(df):
+    """Keep only regular trading hours bars (9:30-16:00 ET)."""
+    if df.empty:
+        return df
+    keep = []
+    for i in range(len(df)):
+        idx = df.index[i]
+        ts = pd.Timestamp(idx if not isinstance(idx, tuple) else idx[1])
+        if ts.tzinfo is None:
+            ts = ts.tz_localize('UTC')
+        ts_et = ts.tz_convert('America/New_York')
+        if ts_et.hour == 9 and ts_et.minute >= 30:
+            keep.append(i)
+        elif ts_et.hour >= 10 and ts_et.hour < 16:
+            keep.append(i)
+        elif ts_et.hour == 16 and ts_et.minute == 0:
+            keep.append(i)
+    return df.iloc[keep] if keep else df.iloc[:0]
+
+
 def get_1min_bars(client, symbol, date):
     start = date - pd.Timedelta(days=1)
     end = date + pd.Timedelta(days=1)
@@ -147,7 +174,7 @@ def get_1min_bars(client, symbol, date):
     )
     try:
         bars = client.get_stock_bars(request)
-        return bars.df
+        return _filter_rth(bars.df)
     except Exception:
         return pd.DataFrame()
 
@@ -162,7 +189,7 @@ def get_5min_bars(client, symbol, date):
     )
     try:
         bars = client.get_stock_bars(request)
-        return bars.df
+        return _filter_rth(bars.df)
     except Exception:
         return pd.DataFrame()
 
@@ -299,8 +326,11 @@ def run_backtest(end_date=None, n_days=30):
         return
 
     print(f"[rossway 0.1] Backtesting {len(trading_days)} days: {trading_days[0].date()} to {trading_days[-1].date()}")
-    print(f"Stop: max(${config.STOP_LOSS_MIN_CENTS}, entry×{config.STOP_LOSS_PCT*100:.1f}%) | "
-          f"Target: stop×{config.REWARD_RISK_RATIO} | Max positions: {config.MAX_POSITIONS}")
+    tiers = getattr(config, "STOP_TIERS", None)
+    if tiers:
+        print(f"Stop/Target: tiered ({len(tiers)} price tiers) | Max positions: {config.MAX_POSITIONS}")
+    else:
+        print(f"Stop/Target: default 3%/3% | Max positions: {config.MAX_POSITIONS}")
 
     print("\nLoading tradable symbols...")
     symbols = get_tradable_symbols()
@@ -380,6 +410,8 @@ def run_backtest(end_date=None, n_days=30):
 
             stop_price, target_price = calc_stop_and_target(entry_price)
 
+            if entry_price <= 0:
+                continue
             shares = int(pos_per_stock / entry_price)
             if shares <= 0:
                 continue

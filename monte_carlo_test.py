@@ -1,4 +1,4 @@
-"""Monte Carlo simulation for testing the Stone 1.0 trading system.
+"""Monte Carlo simulation for testing the Stone 1.1 trading system.
 
 Generates random continuous price curves and tests:
 1. Backtest engine (evaluate_trade_stone) — 6-tier targets, skip-gap, trailing stop
@@ -1118,7 +1118,7 @@ if __name__ == "__main__":
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 5000
 
     print("=" * 80)
-    print(" Stone 1.0 Monte Carlo Simulation")
+    print(" Stone 1.1 Monte Carlo Simulation")
     print(f" Testing: backtest engine + ladder sell system + edge cases")
     print("=" * 80)
 

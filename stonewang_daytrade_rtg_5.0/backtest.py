@@ -1,16 +1,21 @@
-"""Backtesting engine — stonewang_daytrade_1025out_1.0: RTG + 10:25 Exit.
+"""Backtesting engine — stonewang_daytrade_rtg_1.0: Red-to-Green Volume Breakout.
 
 Entry detection (1-min bars, approximates live WebSocket bar stream):
   Signal A (Red-to-Green):
     - bar[i].close > open_price (crossed back above open)
     - bar[i].volume >= RTG_VOLUME_MULT × bar[i-1].volume (volume spike)
     - bar[i].volume >= RTG_MIN_VOLUME (liquidity floor)
-  Signal B (Gap-and-Go): DISABLED
+  Signal B (Gap-and-Go):
+    - bar[i-1].close > bar[i-1].open (prior bar bullish)
+    - bar[i].high > bar[i-1].high (breakout)
+    - bar[i-1].volume >= GAPGO_MIN_FIRST_BAR_VOL
+    - bar[i].volume >= GAPGO_MIN_BREAKOUT_VOL
 
-Entry window: 09:30 - 10:24 EST (before 10:25 exit)
-One trade per symbol per day (no re-entry).
+Entry window: 09:30 - 10:30 EST (1 hour)
+One trade per symbol per day (no re-entry — keeps logic simple for first version).
 
-Exit: 10:25 EST market sell or 3% hard stop loss.
+Exit (evaluate_trade_rtg):
+  3% stop, 10% target, 10-min time limit, 3% trailing after +5%.
 """
 
 import json
@@ -379,7 +384,7 @@ def run_backtest(end_date=None, n_days=None):
         print("No trading days found.")
         return []
 
-    print(f"[1025out_1.0] Backtesting {len(trading_days)} trading days: "
+    print(f"[rtg_1.0] Backtesting {len(trading_days)} trading days: "
           f"{trading_days[0].date()} to {trading_days[-1].date()}")
     print(f"Capital: ${config.INITIAL_CAPITAL:,.2f} | RVOL-weighted sizing | "
           f"Max concurrent: {config.MAX_POSITIONS} | Max daily trades: {config.MAX_DAILY_TRADES}")
@@ -390,7 +395,10 @@ def run_backtest(end_date=None, n_days=None):
     if sizing_tiers:
         print(f"  Sizing tiers: " + ", ".join(f"RVOL>{r:.0f}×→{p:.0%}" for r, p in sizing_tiers))
     exit_tiers = getattr(config, "RVOL_EXIT_TIERS", [])
-    print(f"  Exit: {getattr(config, 'EXIT_TIME', '10:00')} market sell or {getattr(config, 'STOP_LOSS_PCT', 0.03):.0%} stop loss")
+    if exit_tiers:
+        print(f"  Exit tiers: " + ", ".join(
+            f"RVOL>{r:.0f}×→stop{s:.0%}/tgt{t:.0%}/trail{a:.0%}/{tr:.0%}"
+            for r, s, t, a, tr in exit_tiers))
     print(f"  Re-entry: {'ON (max ' + str(config.RTG_REENTRY_MAX) + ')' if getattr(config, 'RTG_REENTRY_ALLOWED', False) else 'OFF'}")
 
     print("\nLoading tradable symbols...")
@@ -470,9 +478,7 @@ def run_backtest(end_date=None, n_days=None):
 
             entry_slippage = getattr(config, "SLIPPAGE_ENTRY_PCT", 0.005)
             same_tier = tier_counts.get(_get_rvol_tier(rvol)[0], 1)
-            stop_p = getattr(config, "STOP_LOSS_PCT", 0.03)  # Fixed 3% stop loss
-            exit_time = getattr(config, "EXIT_TIME", "10:00")  # 10:00 exit
-            exit_h, exit_m = (int(x) for x in exit_time.split(":"))
+            stop_p, target_p, trail_act_p, trail_p = get_rvol_exit_params(rvol)
             sym_key = f"{symbol} ({date_key})"
             chart_bars = _bars_to_chart(bars_1m)
             events = chart_entries.get(sym_key, {}).get("events", [])
@@ -501,7 +507,7 @@ def run_backtest(end_date=None, n_days=None):
                 # Use open_price entry for first entry, close price for re-entry
                 entries_for_sym_pre = entry_count.get(symbol, 0)
                 is_reentry_bt = entries_for_sym_pre > 0
-                entry_price = entry_at_close
+                entry_price = entry_at_open if not is_reentry_bt else entry_at_close
 
                 # Re-entry rules (match live_trade.py)
                 if is_reentry_bt:
@@ -557,48 +563,19 @@ def run_backtest(end_date=None, n_days=None):
                 remaining_list = all_bars_1m[entry_bar_idx + 1:]
                 force_close_price = remaining_list[-1]["close"] if remaining_list else entry_price_actual
 
-                # 1025out exit: 3% stop loss or 10:25 time-based exit
-                exit_price = 0.0
-                exit_reason = "force_close"
-                exit_bar_idx = len(remaining_list) - 1
-                stop_price = entry_price_actual * (1 - stop_p)
-                for bi in range(len(remaining_list)):
-                    rb = remaining_list[bi]
-                    rb_ts = rb["timestamp"].strftime("%H:%M")
-                    rb_h, rb_m = (int(x) for x in rb_ts.split(":"))
-                    bar_low = rb["low"]
-                    bar_close = rb["close"]
-                    # Stop loss
-                    if bar_low <= stop_price:
-                        exit_price = stop_price
-                        exit_reason = "stop_loss"
-                        exit_bar_idx = bi
-                        break
-                    # 10:25 time exit
-                    if rb_h > exit_h or (rb_h == exit_h and rb_m >= exit_m):
-                        exit_price = bar_close
-                        exit_reason = "10:25_exit"
-                        exit_bar_idx = bi
-                        break
-                if exit_price == 0.0:
-                    exit_price = force_close_price
-                    exit_reason = "force_close"
-
-                pnl = (exit_price - entry_price_actual) * shares
-                pnl_pct = exit_price / entry_price_actual - 1
-
-                result = TradeResult(
-                    symbol=symbol,
+                result = evaluate_trade_rtg(
                     entry_price=entry_price_actual,
-                    exit_price=round(exit_price, 4),
                     shares=shares,
-                    pnl=round(pnl, 2),
-                    pnl_pct=pnl_pct,
-                    exit_reason=exit_reason,
-                    exit_bar_idx=exit_bar_idx,
-                    stop_price=round(stop_price, 4),
-                    target_price=0.0,
+                    bars_after_entry=remaining_list,
+                    symbol=symbol,
+                    open_price=open_price,
+                    force_close_price=force_close_price,
+                    entry_bar_idx=entry_bar_idx,
                     signal_type=signal_type + ("_re" if is_reentry else ""),
+                    stop_pct=stop_p,
+                    target_pct=target_p,
+                    trail_activate_pct=trail_act_p,
+                    trail_pct=trail_p,
                 )
                 result.date = str(date_key)
                 result.open_price = open_price
@@ -610,7 +587,7 @@ def run_backtest(end_date=None, n_days=None):
                 print(f"  {symbol} [{label}] entry=${entry_price_actual:.4f}@{entry_ts} "
                       f"exit=${result.exit_price:.4f}@{exit_ts} ({result.exit_reason}), "
                       f"P&L=${result.pnl:+,.2f} ({result.pnl_pct:+.2%}) "
-                      f"[RVOL={rvol:.1f}× stop={stop_p:.0%}]")
+                      f"[RVOL={rvol:.1f}× stop={stop_p:.0%} tgt={target_p:.0%}]")
 
                 all_trades.append(result)
                 equity += result.pnl
@@ -642,7 +619,7 @@ def run_backtest(end_date=None, n_days=None):
                 }
 
     print(f"\n{'=' * 70}")
-    print(f"[1025out_1.0] Backtest complete. Final equity: ${equity:,.2f}")
+    print(f"[rtg_1.0] Backtest complete. Final equity: ${equity:,.2f}")
     print(f"Total trades: {len(all_trades)}")
     if all_trades:
         wins = [t for t in all_trades if t.pnl > 0]

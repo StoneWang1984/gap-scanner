@@ -126,7 +126,7 @@ class Position:
 
 class GreenBarDetector:
     """Processes trade prints to detect bar direction in real-time.
-    Detects red->green bar transitions with volume confirmation for entry,
+    Detects red->green bar transitions with MACD + volume confirmation for entry,
     and green->red bar transitions for exit.
     """
 
@@ -147,6 +147,19 @@ class GreenBarDetector:
         self._consecutive_red = 0
         self._bar_count = 0
         self._green_bar_count = 0
+
+        # MACD calculator
+        self._macd = None
+        if getattr(config, "GBAR_MACD_CONFIRM", False):
+            from strategy import MACDCalculator
+            self._macd = MACDCalculator(
+                fast=getattr(config, "GBAR_MACD_FAST", 12),
+                slow=getattr(config, "GBAR_MACD_SLOW", 26),
+                signal=getattr(config, "GBAR_MACD_SIGNAL", 9),
+            )
+
+        # Volume history for rolling average
+        self._volume_history = deque(maxlen=20)  # keep last 20 bars' volumes
 
     def on_trade(self, price, size, ts_epoch):
         minute = (int(ts_epoch) // 60) * 60
@@ -183,6 +196,12 @@ class GreenBarDetector:
             "low": self._bar_low,
         }
         self._bar_count += 1
+        self._volume_history.append(self._bar_volume)
+
+        # Update MACD with completed bar's close
+        if self._macd is not None:
+            self._macd.update(self._bar_close)
+
         if is_green:
             self._green_bar_count += 1
             self._consecutive_green += 1
@@ -210,6 +229,23 @@ class GreenBarDetector:
             # Price must be above open_price (confirming gap momentum)
             if self._bar_close < self.open_price:
                 return False
+
+            # MACD confirmation
+            if self._macd is not None:
+                macd_mode = getattr(config, "GBAR_MACD_MODE", "above_zero")
+                if not self._macd.is_bullish(macd_mode):
+                    return False
+
+            # Volume increase confirmation: current bar > rolling average × mult
+            if getattr(config, "GBAR_VOL_INCREASE_CONFIRM", False):
+                lookback = getattr(config, "GBAR_VOL_INCREASE_LOOKBACK", 5)
+                mult = getattr(config, "GBAR_VOL_INCREASE_MULT", 1.2)
+                recent_vols = list(self._volume_history)[-lookback:]
+                if recent_vols:
+                    avg_vol = sum(recent_vols) / len(recent_vols)
+                    if avg_vol > 0 and self._bar_volume < avg_vol * mult:
+                        return False
+
             return True
 
     def should_exit(self, entry_price, stop_pct, trail_active, highest, trail_activate_pct, trail_pct, target_pct):

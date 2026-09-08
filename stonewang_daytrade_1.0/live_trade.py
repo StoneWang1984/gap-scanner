@@ -53,7 +53,7 @@ if _parent_dir not in sys.path:
     sys.path.insert(0, _parent_dir)
 
 # Load version-specific config
-_spec = importlib.util.spec_from_file_location("config", os.path.join(_ver_dir, "config_stone_1.1.py"))
+_spec = importlib.util.spec_from_file_location("config", os.path.join(_ver_dir, "config.py"))
 config = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(config)
 sys.modules["config"] = config

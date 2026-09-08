@@ -57,12 +57,24 @@ RVOL_EXIT_TIERS = [
 ]
 
 # ── 绿bar入场参数 ──────────────────────────────────────────────────
-GBAR_VOLUME_MULT = 1.5        # 当前bar volume > 前一根bar × 1.5（放量确认）
+GBAR_VOLUME_MULT = 4.0        # 当前bar volume > 前一根bar × 4.0（放量确认，严格过滤噪声）
 GBAR_MIN_VOLUME = 10000       # 当前bar最低成交量（噪声过滤）
 GBAR_MIN_PRICE_GAIN = 0.0     # 当前bar close相对open_price的最低涨幅
 GBAR_ENTRY_AT_SIGNAL = True   # True=在信号bar的close入场
 GBAR_MIN_TRADES_IN_BAR = 5    # bar内至少5笔成交才判断方向
 GBAR_REENTRY_COOLDOWN_SEC = 60 # 同股退出后60秒冷却
+
+# ── MACD确认信号 ──────────────────────────────────────────────────
+GBAR_MACD_FAST = 12           # MACD快线EMA周期
+GBAR_MACD_SLOW = 26           # MACD慢线EMA周期
+GBAR_MACD_SIGNAL = 9          # MACD信号线EMA周期
+GBAR_MACD_CONFIRM = False     # 入场不需MACD确认（VOL_MULT=4.0已足够过滤）
+GBAR_MACD_MODE = "above_zero" # "above_zero": MACD>0即看多; "cross_signal": MACD金叉signal线
+
+# ── 成交量递增确认信号 ──────────────────────────────────────────────
+GBAR_VOL_INCREASE_CONFIRM = True  # 入场需成交量递增确认（相对近5根bar均量）
+GBAR_VOL_INCREASE_LOOKBACK = 5    # 回看N根bar的均量
+GBAR_VOL_INCREASE_MULT = 1.2      # 当前bar量 > 近N根bar均量 × 1.2
 
 # ── 绿bar退出参数 ──────────────────────────────────────────────────
 GBAR_STOP_PCT = 0.05          # 5%硬止损
@@ -82,7 +94,7 @@ MIN_POSITION_SIZE = 40
 MAX_POSITION_SIZE = 9999
 MAX_POSITIONS = 2              # 最多同时2只
 MAX_DAILY_TRADES = 20          # 每日最多20笔
-MAX_DAILY_ENTRIES_PER_SYMBOL = 6  # 同股最多6次入场
+MAX_DAILY_ENTRIES_PER_SYMBOL = 1  # 同股最多1次入场（禁止re-entry，回测验证re-entry显著增加亏损）
 MAX_DAILY_LOSS_PCT = 0.04     # 4%日亏损熔断
 EQUITY_POSITION_RATIO = 1.0
 
