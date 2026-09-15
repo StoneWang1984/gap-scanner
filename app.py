@@ -1,4 +1,4 @@
-"""RTG 5.0 策略 — Streamlit Web UI (交易显示 + 回测)"""
+"""RTG 6.0 策略 — Streamlit Web UI (交易显示 + 回测)"""
 
 import json
 import time
@@ -8,7 +8,7 @@ import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
 
-VERSION_DIR = Path("/Users/stonewang2014/gap-scanner/stonewang_daytrade_rtg_5.0")
+VERSION_DIR = Path("/Users/stonewang2014/gap-scanner/stonewang_daytrade_rtg_6.0")
 STATE_FILE = Path("/Users/stonewang2014/gap-scanner/live_state.json")
 import importlib.util, sys
 _spec = importlib.util.spec_from_file_location("config", VERSION_DIR / "config.py")
@@ -16,12 +16,12 @@ config = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(config)
 sys.modules["config"] = config
 
-st.set_page_config(page_title="RTG 5.0 交易", page_icon="📊", layout="wide")
+st.set_page_config(page_title="RTG 6.0 交易", page_icon="📊", layout="wide")
 
 # ── Sidebar ──────────────────────────────────────────────────────
 
-st.sidebar.title("RTG 5.0 交易")
-st.sidebar.caption("ORB + ATR止损 + 渐进Trailing + 利润保护")
+st.sidebar.title("RTG 6.0 交易")
+st.sidebar.caption("ORB + ATR止损 + 渐进Trailing + 全仓单股")
 
 tab = st.sidebar.radio("导航", ["实盘交易", "策略概览", "交易详情"])
 
@@ -236,7 +236,7 @@ if tab == "实盘交易":
 # ══════════════════════════════════════════════════════════════════
 
 elif tab == "策略概览":
-    st.title("RTG 5.0 策略概览")
+    st.title("RTG 6.0 策略概览")
 
     col1, col2 = st.columns(2)
 
@@ -304,7 +304,7 @@ elif tab == "策略概览":
         """)
 
     st.divider()
-    st.subheader("RTG 5.0 设计理念 (基于Cam Connor / Brian Shannon)")
+    st.subheader("RTG 6.0 设计理念 (基于Cam Connor / Brian Shannon)")
     st.markdown("""
     - **ORB入场**: 等3根bar建立开盘区间, 突破区间高点+放量才入场, 过滤开盘噪声
     - **ATR自适应止损**: stop=max(ATR×mult, |gap|×30%), 钳位2%-8%, 跳空股给宽止损
@@ -313,7 +313,7 @@ elif tab == "策略概览":
     - **渐进Trailing**: 利润>5%→1.5%, >10%→1%, >15%→0.5%, 让赢家奔跑
     - **日利润保护**: 峰值利润回撤30%→全仓强平, 30分钟延迟
     - **动量窗口**: 仅09:30-10:30入场, gap动量半衰期~30分钟
-    - **集中仓位**: 最多3仓, A+设定50%权益
+    - **全仓单股**: 最多1仓, 100%权益全仓买入最佳候选
     - **高质量过滤**: RVOL≥2.0×, 价格≥$2, 仅Top 5候选
     - **No Re-entry**: 首笔退出后不再入场
     """)

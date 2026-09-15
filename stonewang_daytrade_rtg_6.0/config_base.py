@@ -1,0 +1,23 @@
+"""Backtest-compatible config — mirrors config.py for backtest imports.
+
+Backtest modules import `config` directly; this file ensures all params
+needed by backtest.py and strategy.py are present.
+"""
+
+# Re-export everything from config.py
+from config import *  # noqa: F401, F403
+from config import (
+    GAP_THRESHOLD, GAP_MAX, MIN_VOLUME, MIN_DOLLAR_VOLUME,
+    PRICE_MIN, PRICE_MAX, MAX_CANDIDATES, RVOL_LOOKBACK_DAYS,
+    ENTRY_WINDOW_START, ENTRY_WINDOW_END,
+    RTG_VOLUME_MULT, RTG_MIN_VOLUME, RTG_MIN_PRICE_GAIN,
+    GAPGO_MIN_FIRST_BAR_VOL, GAPGO_MIN_BREAKOUT_VOL,
+    RTG_STOP_PCT, RTG_TARGET_PCT, RTG_TIME_LIMIT_SEC,
+    RTG_TRAIL_ACTIVATE_PCT, RTG_TRAIL_PCT,
+    INITIAL_CAPITAL, MIN_POSITION_SIZE, MAX_POSITION_SIZE,
+    MAX_POSITIONS, MAX_DAILY_TRADES, MAX_DAILY_LOSS_PCT,
+    EQUITY_POSITION_RATIO, MARKET_OPEN, MARKET_CLOSE, FORCE_CLOSE_TIME,
+    USE_WEBSOCKET, POLL_INTERVAL,
+    SLIPPAGE_ENTRY_PCT, SLIPPAGE_EXIT_PCT, SLIPPAGE_FORCE_CLOSE_PCT,
+    BACKTEST_DAYS, VERSION,
+)

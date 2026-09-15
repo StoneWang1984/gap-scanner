@@ -1,4 +1,4 @@
-"""Backtesting engine — stonewang_daytrade_rtg_5.0: ORB + ATR Stops + Progressive Trail.
+"""Backtesting engine — stonewang_daytrade_rtg_6.0: ORB + ATR Stops + Progressive Trail.
 
 Entry detection:
   Opening Range Breakout (ORB):
@@ -40,8 +40,8 @@ import config
 # Load scanner from parent directory
 from scanner import get_data_client, get_tradable_symbols
 
-# Load strategy from rtg_5.0 directory (v5.0: ATR stops + progressive trail)
-_strat_spec = importlib.util.spec_from_file_location("strategy", os.path.join(_ver_dir, "strategy_v5.py"))
+# Load strategy from rtg_6.0 directory (v5.0: ATR stops + progressive trail)
+_strat_spec = importlib.util.spec_from_file_location("strategy", os.path.join(_ver_dir, "strategy_v6.py"))
 strategy = importlib.util.module_from_spec(_strat_spec)
 _strat_spec.loader.exec_module(strategy)
 sys.modules["strategy"] = strategy
@@ -101,14 +101,18 @@ def get_trading_days(client, end_date, n_days):
 
 
 def bulk_scan_gaps(client, trading_days, symbols):
-    """Scan for gap-up stocks across all trading days. Also fetches 20-day avg volume for RVOL and ATR."""
-    start = trading_days[0] - pd.Timedelta(days=45)  # extra lookback for 20-day avg vol
+    """Scan for gap-up stocks + afternoon momentum across all trading days."""
+    start = trading_days[0] - pd.Timedelta(days=45)
     end = trading_days[-1] + pd.Timedelta(days=1)
     all_dates_set = {d.date() for d in trading_days}
     atr_period = getattr(config, "ATR_PERIOD", 14)
 
     batch_size = 500
     symbol_data = {}
+    afternoon_data = {}  # symbol -> list of afternoon momentum entries
+    aft_price_max = getattr(config, "AFTERNOON_PRICE_MAX", 200.0)
+    aft_min_gain = getattr(config, "AFTERNOON_MIN_GAIN_PCT", 0.02)
+    aft_min_rvol = getattr(config, "AFTERNOON_MIN_RVOL", 2.0)
     total_batches = (len(symbols) + batch_size - 1) // batch_size
 
     for batch_idx in range(total_batches):
@@ -196,6 +200,21 @@ def bulk_scan_gaps(client, trading_days, symbols):
                         "volume": gap_day_vol, "dollar_volume": dollar_volume,
                         "rvol": rvol, "atr": atr,
                     })
+
+                    # Afternoon momentum: gain from close > 2%, price $2-$200, RVOL > 2
+                    curr_close = float(curr["close"])
+                    gain_from_close = (curr_close - prev_close) / prev_close
+                    if (gain_from_close >= aft_min_gain
+                            and config.PRICE_MIN <= curr_close <= aft_price_max
+                            and rvol >= aft_min_rvol):
+                        if symbol not in afternoon_data:
+                            afternoon_data[symbol] = []
+                        afternoon_data[symbol].append({
+                            "date": curr_date, "open_price": open_price,
+                            "close_price": curr_close, "prev_close": prev_close,
+                            "gap_pct": gain_from_close, "volume": gap_day_vol,
+                            "rvol": rvol, "atr": atr,
+                        })
             except (KeyError, IndexError):
                 continue
 
@@ -213,7 +232,21 @@ def bulk_scan_gaps(client, trading_days, symbols):
         df_d = df_d.sort_values("rvol", ascending=False).reset_index(drop=True)
         results[d] = df_d
 
-    return results
+    # Group afternoon data by date
+    aft_results = {}
+    for symbol, entries in afternoon_data.items():
+        for entry in entries:
+            d = entry["date"]
+            if d not in aft_results:
+                aft_results[d] = []
+            aft_results[d].append({**entry, "symbol": symbol})
+
+    for d in aft_results:
+        df_d = pd.DataFrame(aft_results[d])
+        df_d = df_d.sort_values("rvol", ascending=False).reset_index(drop=True)
+        aft_results[d] = df_d
+
+    return results, aft_results
 
 
 def get_1min_bars(client, symbol, date):
@@ -348,7 +381,7 @@ def find_rtg_entry_1min(bars_1m, open_price, min_volume=None):
 
 
 def find_orb_entry_1min(bars_1m, open_price, min_volume=None):
-    """Opening Range Breakout entry (rtg_5.0).
+    """Opening Range Breakout entry (rtg_6.0).
     Phase 1: build opening range from first ORB_BARS bars.
     Phase 2: enter on breakout above range high with volume confirmation.
     Falls back to RTG if ORB range too narrow.
@@ -419,6 +452,64 @@ def find_orb_entry_1min(bars_1m, open_price, min_volume=None):
             return entry_at_open, entry_at_close, i, True, "orb_rtg"
 
     return 0.0, 0.0, -1, False, ""
+
+
+def find_momentum_entry_1min(bars_1m, min_volume=None):
+    """Afternoon momentum breakout: price + volume both rising (量价齐升).
+
+    Returns (entry_price, entry_bar_idx, confirmed, signal_type).
+    """
+    import datetime as _dt
+    if bars_1m.empty or len(bars_1m) < 6:
+        return 0.0, -1, False, ""
+    if min_volume is None:
+        min_volume = config.RTG_MIN_VOLUME
+
+    aft_end_str = getattr(config, "AFTERNOON_ENTRY_END", "15:30")
+    aft_end_h, aft_end_m = (int(x) for x in aft_end_str.split(":"))
+    aft_end_time = _dt.time(aft_end_h, aft_end_m)
+    aft_start_time = _dt.time(10, 30)
+
+    for i in range(5, len(bars_1m)):
+        idx_val = bars_1m.index[i]
+        ts = idx_val[1] if isinstance(idx_val, tuple) else idx_val
+        ts = pd.Timestamp(ts)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        ts = ts.tz_convert("America/New_York")
+        bar_time = ts.time()
+        if bar_time < aft_start_time or bar_time > aft_end_time:
+            continue
+
+        # Check last 5 bars
+        recent = [bars_1m.iloc[j] for j in range(i - 5, i)]
+        current = bars_1m.iloc[i]
+
+        # Up bars: at least 3 of 5
+        up_count = sum(1 for b in recent if float(b["close"]) > float(b["open"]))
+        if up_count < 3:
+            continue
+
+        # Volume increasing
+        vols = [int(b["volume"]) for b in recent]
+        if vols[-1] < vols[0]:
+            continue
+
+        # Breakout above recent high
+        recent_high = max(float(b["high"]) for b in recent)
+        if float(current["close"]) <= recent_high:
+            continue
+
+        # Volume confirmation
+        avg_vol = sum(vols) / len(vols)
+        cur_vol = int(current["volume"])
+        if cur_vol < avg_vol * 1.5 or cur_vol < min_volume:
+            continue
+
+        entry = round(float(current["close"]) * 1.001, 4)
+        return entry, i, True, "momentum"
+
+    return 0.0, -1, False, ""
 
 
 def _get_rvol_tier(rvol):
@@ -492,7 +583,7 @@ def run_backtest(end_date=None, n_days=None):
         print("No trading days found.")
         return []
 
-    print(f"[rtg_5.0] Backtesting {len(trading_days)} trading days: "
+    print(f"[rtg_6.0] Backtesting {len(trading_days)} trading days: "
           f"{trading_days[0].date()} to {trading_days[-1].date()}")
     print(f"Capital: ${config.INITIAL_CAPITAL:,.2f} | RVOL-weighted sizing | "
           f"Max concurrent: {config.MAX_POSITIONS} | Max daily trades: {config.MAX_DAILY_TRADES}")
@@ -531,9 +622,10 @@ def run_backtest(end_date=None, n_days=None):
     print(f"After crypto ETF filter: {len(symbols)} symbols")
 
     print("\nBulk scanning for gaps (with RVOL + ATR)...")
-    gap_data = bulk_scan_gaps(client, trading_days, symbols)
+    gap_data, aft_data = bulk_scan_gaps(client, trading_days, symbols)
     total_candidates = sum(len(v) for v in gap_data.values())
-    print(f"Found {total_candidates} gap entries across {len(gap_data)} days")
+    total_aft = sum(len(v) for v in aft_data.values())
+    print(f"Found {total_candidates} gap entries + {total_aft} afternoon momentum entries across {len(gap_data)} days")
 
     all_trades = []
     equity = config.INITIAL_CAPITAL
@@ -541,27 +633,47 @@ def run_backtest(end_date=None, n_days=None):
 
     for date in trading_days:
         date_key = date.date()
-        if date_key not in gap_data or gap_data[date_key].empty:
+        has_gap = date_key in gap_data and not gap_data[date_key].empty
+        has_aft = getattr(config, "AFTERNOON_SCAN_ENABLED", False) and date_key in aft_data and not aft_data[date_key].empty
+        if not has_gap and not has_aft:
             continue
 
-        candidates = gap_data[date_key]
-        # Filter by RVOL quality (matches live)
-        min_rvol = getattr(config, "MIN_ENTRY_RVOL", 2.0)
-        min_price = getattr(config, "MIN_ENTRY_PRICE", 2.0)
-        candidates = candidates[(candidates["rvol"] >= min_rvol) & (candidates["open_price"] >= min_price)]
-        # Select top N by RVOL
-        max_cands = getattr(config, "MAX_CANDIDATES", 5)
-        candidates = candidates.head(max_cands)
+        # Morning gap candidates
+        if has_gap:
+            candidates = gap_data[date_key]
+            min_rvol = getattr(config, "MIN_ENTRY_RVOL", 2.0)
+            min_price = getattr(config, "MIN_ENTRY_PRICE", 2.0)
+            candidates = candidates[(candidates["rvol"] >= min_rvol) & (candidates["open_price"] >= min_price)]
+            max_cands = getattr(config, "MAX_CANDIDATES", 5)
+            candidates = candidates.head(max_cands)
+        else:
+            candidates = pd.DataFrame()
 
-        print(f"\n--- {date_key} ({len(candidates)} candidates by RVOL, equity: ${equity:,.2f}) ---")
-        for _, row in candidates.iterrows():
+        # Afternoon momentum candidates
+        if has_aft:
+            aft_cands = aft_data[date_key]
+            aft_max = getattr(config, "AFTERNOON_MAX_CANDIDATES", 5)
+            aft_cands = aft_cands.head(aft_max)
+        else:
+            aft_cands = pd.DataFrame()
+
+        n_gap = len(candidates) if not candidates.empty else 0
+        n_aft = len(aft_cands) if not aft_cands.empty else 0
+        print(f"\n--- {date_key} ({n_gap} gap + {n_aft} afternoon candidates, equity: ${equity:,.2f}) ---")
+        for _, row in (candidates.iterrows() if not candidates.empty else []):
             sym = row["symbol"]
             open_price = row["open_price"]
             rvol = row.get("rvol", 0)
             gap_pct = row["gap_pct"]
             atr_val = row.get("atr", 0)
             atr_str = f" ATR=${atr_val:.2f}" if atr_val > 0 else ""
-            print(f"  {sym} gap={gap_pct:+.1%} RVOL={rvol:.1f}× open=${open_price:.2f}{atr_str}")
+            print(f"  [GAP] {sym} gap={gap_pct:+.1%} RVOL={rvol:.1f}× open=${open_price:.2f}{atr_str}")
+        for _, row in (aft_cands.iterrows() if not aft_cands.empty else []):
+            sym = row["symbol"]
+            rvol = row.get("rvol", 0)
+            gain = row.get("gap_pct", 0)
+            cp = row.get("close_price", 0)
+            print(f"  [AFT] {sym} +{gain:.1%} RVOL={rvol:.1f}× ${cp:.2f}")
 
         daily_trades = 0
         daily_loss = 0.0
@@ -611,7 +723,48 @@ def run_backtest(end_date=None, n_days=None):
                 "atr": atr_val, "stop_pct": stop_p, "target_pct": target_p,
                 "trail_act_pct": trail_act_p, "trail_pct": trail_p,
                 "same_tier": same_tier, "min_vol": min_vol,
+                "signal": "gap",
             }
+
+        # Pre-fetch 1-min bars + cand_info for afternoon momentum candidates
+        if not aft_cands.empty:
+            for _, row in aft_cands.iterrows():
+                symbol = row["symbol"]
+                if symbol in cached_bars:
+                    continue
+                bars_1m = get_1min_bars(client, symbol, date)
+                if bars_1m.empty or len(bars_1m) < 2:
+                    cached_bars[symbol] = (None, None)
+                    continue
+                cached_bars[symbol] = (bars_1m, _bars_to_list(bars_1m))
+
+            for _, row in aft_cands.iterrows():
+                symbol = row["symbol"]
+                if symbol in cand_info:
+                    continue  # Already in from gap scan
+                rvol = row.get("rvol", 0)
+                atr_val = row.get("atr", 0)
+                open_price = row.get("open_price", 0)
+                gap_pct = row.get("gap_pct", 0)
+                if atr_val > 0:
+                    stop_p, target_p, trail_act_p, trail_p = get_atr_stop_params_bt(rvol, atr_val, open_price, gap_pct=gap_pct)
+                else:
+                    stop_p = getattr(config, "AFTERNOON_STOP_PCT", 0.03)
+                    target_p = 0.0
+                    trail_act_p = getattr(config, "AFTERNOON_TRAIL_ACTIVATE_PCT", 0.01)
+                    trail_p = getattr(config, "AFTERNOON_TRAIL_PCT", 0.015)
+                min_vol = config.RTG_MIN_VOLUME
+                if rvol >= 10:
+                    min_vol = max(config.RTG_MIN_VOLUME // 3, 5000)
+                elif rvol >= 5:
+                    min_vol = max(config.RTG_MIN_VOLUME // 2, 10000)
+                cand_info[symbol] = {
+                    "open_price": open_price, "rvol": rvol, "gap_pct": gap_pct,
+                    "atr": atr_val, "stop_pct": stop_p, "target_pct": target_p,
+                    "trail_act_pct": trail_act_p, "trail_pct": trail_p,
+                    "same_tier": 1, "min_vol": min_vol,
+                    "signal": "afternoon",
+                }
 
         # ── Concurrent bar-by-bar simulation ──────────────────────────────
         # Track open positions as list of dicts (similar to live TradeResult)
@@ -864,70 +1017,127 @@ def run_backtest(end_date=None, n_days=None):
                 continue
             entry_start_time = pd.Timestamp(f"{date_key} {entry_start_str}", tz="America/New_York").time()
             entry_end_time = pd.Timestamp(f"{date_key} {entry_end_str}", tz="America/New_York").time()
-            if not (entry_start_time <= bar_time <= entry_end_time):
-                continue
 
-            # Try to enter candidates (sorted by RVOL descending)
-            cand_list = list(candidates.iterrows())
-            cand_list.sort(key=lambda x: x[1].get("rvol", 0), reverse=True)
+            # ── Morning entry (09:30-10:30): gap ORB ──
+            if entry_start_time <= bar_time <= entry_end_time and not candidates.empty:
+                cand_list = list(candidates.iterrows())
+                cand_list.sort(key=lambda x: x[1].get("rvol", 0), reverse=True)
 
-            for _, row in cand_list:
-                if len(open_positions) >= config.MAX_POSITIONS:
-                    break
-                symbol = row["symbol"]
-                if symbol in entered_symbols or symbol in stop_exit_symbols:
-                    continue
-                if symbol not in cand_info:
-                    continue
-                ci = cand_info[symbol]
-                bars_1m, all_bars_1m = cached_bars.get(symbol, (None, None))
-                if bars_1m is None:
-                    continue
+                for _, row in cand_list:
+                    if len(open_positions) >= config.MAX_POSITIONS:
+                        break
+                    symbol = row["symbol"]
+                    if symbol in entered_symbols or symbol in stop_exit_symbols:
+                        continue
+                    if symbol not in cand_info:
+                        continue
+                    ci = cand_info[symbol]
+                    bars_1m, all_bars_1m = cached_bars.get(symbol, (None, None))
+                    if bars_1m is None:
+                        continue
 
-                # Scan for entry signal in bars up to current bar_idx
-                # ORB needs bars from start (to build opening range)
-                if orb_enabled:
-                    entry_at_open, entry_at_close, entry_bi, confirmed, signal_type = find_orb_entry_1min(
-                        bars_1m.iloc[:bar_idx + 1], ci["open_price"], min_volume=ci["min_vol"])
-                else:
-                    entry_at_open, entry_at_close, entry_bi, confirmed, signal_type = find_rtg_entry_1min(
-                        bars_1m.iloc[:bar_idx + 1], ci["open_price"], min_volume=ci["min_vol"])
+                    if orb_enabled:
+                        entry_at_open, entry_at_close, entry_bi, confirmed, signal_type = find_orb_entry_1min(
+                            bars_1m.iloc[:bar_idx + 1], ci["open_price"], min_volume=ci["min_vol"])
+                    else:
+                        entry_at_open, entry_at_close, entry_bi, confirmed, signal_type = find_rtg_entry_1min(
+                            bars_1m.iloc[:bar_idx + 1], ci["open_price"], min_volume=ci["min_vol"])
 
-                if not confirmed or entry_at_open <= 0:
-                    continue
+                    if not confirmed or entry_at_open <= 0:
+                        continue
+                    if entry_bi <= last_signal_bar.get(symbol, -1):
+                        continue
+                    last_signal_bar[symbol] = entry_bi
 
-                # Skip if this signal was already found on a previous bar
-                if entry_bi <= last_signal_bar.get(symbol, -1):
-                    continue
-                last_signal_bar[symbol] = entry_bi
+                    entry_price_actual = round(entry_at_close * (1 + entry_slippage), 4)
 
-                # Entry price: signal bar close × slippage (market order, no double-counting)
-                entry_price_actual = round(entry_at_close * (1 + entry_slippage), 4)
+                    # Position sizing (RVOL-weighted, split among same-tier)
+                    pos_size = get_rvol_sizing(ci["rvol"], equity, same_tier_count=ci["same_tier"])
+                    pos_size = max(config.MIN_POSITION_SIZE, pos_size)
+                    shares = int(pos_size / entry_price_actual)
+                    if shares <= 0:
+                        continue
 
-                # Position sizing (RVOL-weighted, split among same-tier)
-                pos_size = get_rvol_sizing(ci["rvol"], equity, same_tier_count=ci["same_tier"])
-                pos_size = max(config.MIN_POSITION_SIZE, pos_size)
-                shares = int(pos_size / entry_price_actual)
-                if shares <= 0:
-                    continue
+                    open_positions.append({
+                        "symbol": symbol, "entry_price": entry_price_actual,
+                        "shares": shares, "entry_bar_idx": entry_bi,
+                        "open_price": ci["open_price"], "gap_pct": ci["gap_pct"],
+                        "signal_type": signal_type, "highest": entry_price_actual,
+                        "trail_active": False, "trail_stop_price": 0.0,
+                        "stop_pct": ci["stop_pct"], "target_pct": ci["target_pct"],
+                        "trail_act_pct": ci["trail_act_pct"], "trail_pct": ci["trail_pct"],
+                        "rvol": ci["rvol"], "atr": ci["atr"],
+                    })
+                    entered_symbols.add(symbol)
+                    entry_count[symbol] = entry_count.get(symbol, 0) + 1
+                    daily_trades += 1
+                    entry_ts = _bar_ts_str(all_bars_1m, entry_bi)
+                    atr_str = f" ATR=${ci['atr']:.2f}" if ci["atr"] > 0 else ""
+                    print(f"  {symbol} [{signal_type}] entry=${entry_price_actual:.4f}@{entry_ts} "
+                          f"{shares}sh [RVOL={ci['rvol']:.1f}×{atr_str} stop={ci['stop_pct']:.0%}]")
 
-                open_positions.append({
-                    "symbol": symbol, "entry_price": entry_price_actual,
-                    "shares": shares, "entry_bar_idx": entry_bi,
-                    "open_price": ci["open_price"], "gap_pct": ci["gap_pct"],
-                    "signal_type": signal_type, "highest": entry_price_actual,
-                    "trail_active": False, "trail_stop_price": 0.0,
-                    "stop_pct": ci["stop_pct"], "target_pct": ci["target_pct"],
-                    "trail_act_pct": ci["trail_act_pct"], "trail_pct": ci["trail_pct"],
-                    "rvol": ci["rvol"], "atr": ci["atr"],
-                })
-                entered_symbols.add(symbol)
-                entry_count[symbol] = entry_count.get(symbol, 0) + 1
-                daily_trades += 1
-                entry_ts = _bar_ts_str(all_bars_1m, entry_bi)
-                atr_str = f" ATR=${ci['atr']:.2f}" if ci["atr"] > 0 else ""
-                print(f"  {symbol} [{signal_type}] entry=${entry_price_actual:.4f}@{entry_ts} "
-                      f"{shares}sh [RVOL={ci['rvol']:.1f}×{atr_str} stop={ci['stop_pct']:.0%}]")
+            # ── Afternoon momentum entry (10:30-15:30) ──
+            if (getattr(config, "AFTERNOON_SCAN_ENABLED", False)
+                    and not aft_cands.empty
+                    and len(open_positions) < config.MAX_POSITIONS):
+                import datetime as _dt
+                aft_end_str = getattr(config, "AFTERNOON_ENTRY_END", "15:30")
+                aft_start_time = _dt.time(10, 30)
+                aft_end_h, aft_end_m = (int(x) for x in aft_end_str.split(":"))
+                aft_end_time = _dt.time(aft_end_h, aft_end_m)
+
+                if aft_start_time <= bar_time <= aft_end_time:
+                    aft_list = list(aft_cands.iterrows())
+                    aft_list.sort(key=lambda x: x[1].get("rvol", 0), reverse=True)
+
+                    for _, row in aft_list:
+                        if len(open_positions) >= config.MAX_POSITIONS:
+                            break
+                        symbol = row["symbol"]
+                        if symbol in entered_symbols or symbol in stop_exit_symbols:
+                            continue
+                        if symbol not in cand_info:
+                            continue
+                        ci = cand_info[symbol]
+                        bars_1m, all_bars_1m = cached_bars.get(symbol, (None, None))
+                        if bars_1m is None:
+                            continue
+
+                        # Momentum entry: volume-price breakout
+                        entry_price, entry_bi, confirmed, signal_type = find_momentum_entry_1min(
+                            bars_1m.iloc[:bar_idx + 1], min_volume=ci["min_vol"])
+
+                        if not confirmed or entry_price <= 0:
+                            continue
+                        if entry_bi <= last_signal_bar.get(symbol, -1):
+                            continue
+                        last_signal_bar[symbol] = entry_bi
+
+                        entry_price_actual = round(entry_price * (1 + entry_slippage), 4)
+
+                        # Position sizing: full equity
+                        pos_size = get_rvol_sizing(ci["rvol"], equity, same_tier_count=ci["same_tier"])
+                        pos_size = max(config.MIN_POSITION_SIZE, pos_size)
+                        shares = int(pos_size / entry_price_actual)
+                        if shares <= 0:
+                            continue
+
+                        open_positions.append({
+                            "symbol": symbol, "entry_price": entry_price_actual,
+                            "shares": shares, "entry_bar_idx": entry_bi,
+                            "open_price": ci["open_price"], "gap_pct": ci["gap_pct"],
+                            "signal_type": signal_type, "highest": entry_price_actual,
+                            "trail_active": False, "trail_stop_price": 0.0,
+                            "stop_pct": ci["stop_pct"], "target_pct": ci["target_pct"],
+                            "trail_act_pct": ci["trail_act_pct"], "trail_pct": ci["trail_pct"],
+                            "rvol": ci["rvol"], "atr": ci["atr"],
+                        })
+                        entered_symbols.add(symbol)
+                        entry_count[symbol] = entry_count.get(symbol, 0) + 1
+                        daily_trades += 1
+                        entry_ts = _bar_ts_str(all_bars_1m, entry_bi)
+                        print(f"  {symbol} [{signal_type}] entry=${entry_price_actual:.4f}@{entry_ts} "
+                              f"{shares}sh [RVOL={ci['rvol']:.1f}× stop={ci['stop_pct']:.0%} trail={ci['trail_pct']:.1%}]")
 
         # ── Force-close remaining positions at end of day ──
         for pos in open_positions[:]:
@@ -977,7 +1187,7 @@ def run_backtest(end_date=None, n_days=None):
         open_positions.clear()
 
     print(f"\n{'=' * 70}")
-    print(f"[rtg_5.0] Backtest complete. Final equity: ${equity:,.2f}")
+    print(f"[rtg_6.0] Backtest complete. Final equity: ${equity:,.2f}")
     print(f"Total trades: {len(all_trades)}")
     if all_trades:
         wins = [t for t in all_trades if t.pnl > 0]
