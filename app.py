@@ -173,7 +173,7 @@ if tab == "实盘交易":
             total_pnl += total_pnl_sym
             entry_price = trades[0].get("entry", 0)
             exit_price = trades[-1].get("exit", 0)
-            trade_type = trades[0].get("type", "first")
+            trade_type = trades[0].get("trade_type", "first")
             final_reason = trades[-1].get("exit_reason", "") or trades[-1].get("reason", "")
             all_reasons = [t.get("exit_reason", "") or t.get("reason", "") for t in trades]
             entry_cost = entry_price * total_shares if entry_price > 0 else 0
@@ -209,7 +209,7 @@ if tab == "实盘交易":
             reason = t.get("exit_reason", "") or t.get("reason", "")
             trade_rows.append({
                 "股票": t["symbol"],
-                "类型": t.get("type", "first"),
+                "类型": t.get("trade_type", "first"),
                 "入场": f"${t.get('entry', 0):.4f}",
                 "出场": f"${t.get('exit', 0):.4f}",
                 "股数": t.get("shares", 0),

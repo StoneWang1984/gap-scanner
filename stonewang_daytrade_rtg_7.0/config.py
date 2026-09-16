@@ -1,12 +1,12 @@
-"""Config — stonewang_daytrade_rtg_6.0: ORB + ATR Stops + Full Concentration.
+"""Config — stonewang_daytrade_rtg_7.0: ORB + ATR Stops + Full Concentration.
 
-Based on rtg_5.0 with one key change: buy ONLY 1 stock with FULL equity.
-All other strategy logic identical (ORB entry, ATR stops, progressive trail, etc).
+Based on rtg_6.0 with one key change: failed-entry uses ORB range_high instead of
+arbitrary 1%-in-3-min rule. If price drops back below the opening range high,
+the breakout is false — exit immediately.
 
-Changes from 5.0:
-  - MAX_POSITIONS = 1 (single stock)
-  - Sizing = 100% equity (full all-in on the best candidate)
-  - MAX_CANDIDATES = 5 (still scan top 5, but only trade #1)
+Changes from 6.0:
+  - Failed-entry: price < range_high → breakout failed (replaces 1%/3min rule)
+  - Position stores range_high for failed-entry check
 """
 
 import os
@@ -175,5 +175,5 @@ FORCE_CLOSE_LIMIT_TIMEOUT = 60
 BACKTEST_DAYS = 30
 
 # ── Version ──────────────────────────────────────────────────────────
-VERSION = "stonewang_daytrade_rtg_6.0"
-VERSION_SHORT = "rtg_6.0"
+VERSION = "stonewang_daytrade_rtg_7.0"
+VERSION_SHORT = "rtg_7.0"

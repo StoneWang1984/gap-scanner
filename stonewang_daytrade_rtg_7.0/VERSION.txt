@@ -1,0 +1,2 @@
+stonewang_daytrade_rtg_1.0
+Red-to-Green Volume Breakout Strategy

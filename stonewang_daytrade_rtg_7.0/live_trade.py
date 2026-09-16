@@ -161,6 +161,7 @@ class Position:
     target_pct: float = 0.0
     trail_activate_pct: float = 0.0
     trail_pct: float = 0.0
+    range_high: float = 0.0  # ORB opening range high — for failed-entry check
 
 
 class BarAccumulator:
@@ -711,8 +712,9 @@ def backfill_1min_bars(symbols, target_date):
 
 
 def check_rtg_entry(symbol, open_price, bars, after_time=None, min_volume=None):
+    """Returns (entry_price, confirmed, signal_type, range_high)."""
     if len(bars) < 2:
-        return 0.0, False, ""
+        return 0.0, False, "", 0.0
     if min_volume is None:
         min_volume = config.RTG_MIN_VOLUME
     ew_start_h, ew_start_m = (int(x) for x in config.ENTRY_WINDOW_START.split(":"))
@@ -751,20 +753,21 @@ def check_rtg_entry(symbol, open_price, bars, after_time=None, min_volume=None):
         pc = prev["close"]
         if bc > open_price and pv > 0 and bv >= config.RTG_VOLUME_MULT * pv and bv >= min_volume:
             entry = round(open_price * 1.001, 4) if getattr(config, "RTG_ENTRY_AT_OPEN", True) else round(bc, 4)
-            return entry, True, "rtg"
+            return entry, True, "rtg", open_price
         if pc > po and pv >= config.GAPGO_MIN_FIRST_BAR_VOL and bh > ph and bv >= config.GAPGO_MIN_BREAKOUT_VOL:
-            return round(ph, 4), True, "gapgo"
-    return 0.0, False, ""
+            return round(ph, 4), True, "gapgo", ph
+    return 0.0, False, "", 0.0
 
 
 def check_orb_entry(symbol, open_price, bars, min_volume=None, after_time=None):
     """Opening Range Breakout entry. Phase 1: build range from first ORB_BARS bars.
-    Phase 2: enter on breakout above range high with volume confirmation."""
+    Phase 2: enter on breakout above range high with volume confirmation.
+    Returns (entry_price, confirmed, signal_type, range_high)."""
     orb_bars = getattr(config, "ORB_BARS", 3)
     if orb_bars < 1:
         orb_bars = 1
     if len(bars) < orb_bars + 1:
-        return 0.0, False, ""
+        return 0.0, False, "", 0.0
     if min_volume is None:
         min_volume = config.RTG_MIN_VOLUME
 
@@ -775,7 +778,7 @@ def check_orb_entry(symbol, open_price, bars, min_volume=None, after_time=None):
     range_width = (range_high - range_low) / range_high
     min_range = getattr(config, "ORB_MIN_RANGE_PCT", 0.005)
     if range_width < min_range:
-        return 0.0, False, ""
+        return 0.0, False, "", 0.0
 
     # Phase 2: breakout above range high with volume
     ew_end_h, ew_end_m = (int(x) for x in config.ENTRY_WINDOW_END.split(":"))
@@ -804,8 +807,8 @@ def check_orb_entry(symbol, open_price, bars, min_volume=None, after_time=None):
             else:
                 buf = getattr(config, "ORB_BREAKOUT_BUFFER", 0.002)
                 entry = round(range_high * (1 + buf), 4)
-            return entry, True, "orb_rtg"
-    return 0.0, False, ""
+            return entry, True, "orb_rtg", range_high
+    return 0.0, False, "", 0.0
 
 
 def check_momentum_entry(symbol, bars, min_volume=None):
@@ -861,15 +864,13 @@ def check_momentum_entry(symbol, bars, min_volume=None):
     return entry, True, "momentum"
 
 
-def check_failed_entry(pos, now_ts):
-    """If stock hasn't moved +1% within 3 min of entry, it's a failed setup."""
-    if not getattr(config, "FAILED_ENTRY_ENABLED", False):
+def check_failed_entry(pos, cur_price):
+    """If price drops back below opening range high, the breakout failed.
+    This is the mirror of ORB entry: enter on close > range_high,
+    exit on close < range_high."""
+    if pos.range_high <= 0:
         return False
-    elapsed = now_ts - pos.entry_ts
-    if elapsed < getattr(config, "FAILED_ENTRY_MAX_SECONDS", 180):
-        return False
-    stock_gain = (pos.highest - pos.entry_price) / pos.entry_price
-    if stock_gain < getattr(config, "FAILED_ENTRY_MIN_GAIN_PCT", 0.01):
+    if cur_price < pos.range_high:
         return True
     return False
 
@@ -978,6 +979,7 @@ def run_trading_day(target_date):
                 target_pct=sp.get("target_pct", target_p),
                 trail_activate_pct=sp.get("trail_activate_pct", trail_act_p),
                 trail_pct=sp.get("trail_pct", trail_p),
+                range_high=sp.get("range_high", 0.0),
             )
             positions.append(pos)
             entry_checked.add(sym)
@@ -1156,7 +1158,7 @@ def run_trading_day(target_date):
             reason = None
             if bar_low <= stop_price:
                 reason = "stop_loss"
-            elif check_failed_entry(pos, time.time()):
+            elif check_failed_entry(pos, cur_price):
                 reason = "failed_entry"
             else:
                 if not pos.trail_active:
@@ -1295,9 +1297,9 @@ def run_trading_day(target_date):
                     min_vol = max(config.RTG_MIN_VOLUME // 2, 10000)
                 # Use ORB entry if enabled, else fallback to RTG
                 if getattr(config, "ORB_ENABLED", True):
-                    entry_price, confirmed, signal_type = check_orb_entry(sym, open_price, bars, min_volume=min_vol, after_time=after_time)
+                    entry_price, confirmed, signal_type, entry_range_high = check_orb_entry(sym, open_price, bars, min_volume=min_vol, after_time=after_time)
                 else:
-                    entry_price, confirmed, signal_type = check_rtg_entry(sym, open_price, bars, after_time=after_time, min_volume=min_vol)
+                    entry_price, confirmed, signal_type, entry_range_high = check_rtg_entry(sym, open_price, bars, after_time=after_time, min_volume=min_vol)
                 if not confirmed or entry_price <= 0:
                     # Log why ORB didn't trigger (diagnostic, every 30s per symbol)
                     _orb_diag_key = f"{sym}_orb_diag"
@@ -1375,7 +1377,8 @@ def run_trading_day(target_date):
                                entry_ts=time.time(), open_price=open_price,
                                gap_pct=c["gap_pct"], signal_type=sig_label, highest=fill_price,
                                rvol=rvol, atr=atr_val, stop_pct=stop_p, target_pct=target_p,
-                               trail_activate_pct=trail_act_p, trail_pct=trail_p)
+                               trail_activate_pct=trail_act_p, trail_pct=trail_p,
+                               range_high=entry_range_high)
                 positions.append(pos)
                 entry_checked.add(sym)
                 entry_count[sym] = entry_count.get(sym, 0) + 1
@@ -1383,7 +1386,7 @@ def run_trading_day(target_date):
                 live_bp -= fill_price * filled  # Track remaining buying power
                 atr_str = f" ATR={atr_val:.2f}" if atr_val > 0 else ""
                 log(f"ENTRY {sym} [{sig_label}] {filled}sh @ ${fill_price:.4f} "
-                    f"[RVOL={rvol:.1f}×{atr_str} stop={stop_p:.0%} tgt={target_p:.0%}]")
+                    f"[RVOL={rvol:.1f}×{atr_str} stop={stop_p:.0%} tgt={target_p:.0%} range_high=${entry_range_high:.4f}]")
 
         # ── Afternoon momentum entry ──────────────────────────────────────
         if getattr(config, "AFTERNOON_SCAN_ENABLED", False) and len(positions) < config.MAX_POSITIONS:
@@ -1464,7 +1467,8 @@ def run_trading_day(target_date):
                                    entry_ts=time.time(), open_price=c.get("open_price", fill_price),
                                    gap_pct=c.get("gap_pct", 0), signal_type=signal_type, highest=fill_price,
                                    rvol=rvol, atr=atr_val, stop_pct=stop_p, target_pct=target_p,
-                                   trail_activate_pct=trail_act_p, trail_pct=trail_p)
+                                   trail_activate_pct=trail_act_p, trail_pct=trail_p,
+                                   range_high=0.0)  # No ORB range for momentum entry
                     positions.append(pos)
                     entry_checked.add(sym)
                     daily_trades += 1
@@ -1521,7 +1525,7 @@ def run_trading_day(target_date):
                            "stop_pct": p.stop_pct, "target_pct": p.target_pct,
                            "trail_activate_pct": p.trail_activate_pct, "trail_pct": p.trail_pct,
                            "highest": p.highest, "trail_active": p.trail_active,
-                           "entry_ts": p.entry_ts} for p in positions],
+                           "entry_ts": p.entry_ts, "range_high": p.range_high} for p in positions],
             "trades_detail": trades_detail,
             "date": str(target_date.date()),
             "max_daily_profit": max_daily_profit,
@@ -1623,13 +1627,13 @@ def test_connectivity():
 
 def main():
     global _log_file
-    _log_file = open(os.path.join(_ver_dir, "live_rtg6.log"), "a")
+    _log_file = open(os.path.join(_ver_dir, "live_rtg7.log"), "a")
 
     log(f"Using {config.DATA_FEED.upper()} data feed")
     log("=" * 60)
-    log(f"stonewang RTG 6.0 Live Trading -- ORB + ATR Stops + Full All-In")
+    log(f"stonewang RTG 7.0 Live Trading -- ORB + ATR Stops + Range-High Failed-Entry")
     log(f"Entry: ORB ({getattr(config, 'ORB_BARS', 3)} bars) + RTG volume | GapGo DISABLED")
-    log(f"Exit: ATR stops + gap expansion + failed-entry cut | time {config.RTG_TIME_LIMIT_SEC}s")
+    log(f"Exit: ATR stops + gap expansion + failed-entry (price < range_high) | time {config.RTG_TIME_LIMIT_SEC}s")
     log(f"Window: {config.ENTRY_WINDOW_START}-{config.ENTRY_WINDOW_END} EST")
     sizing_str = "/".join(f"{p:.0%}" for _, p in config.RVOL_SIZING_TIERS)
     log(f"Sizing: RVOL-weighted ({sizing_str}) | max {config.MAX_POSITIONS} concurrent | re-entry max {config.RTG_REENTRY_MAX}")
