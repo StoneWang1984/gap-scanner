@@ -1,16 +1,17 @@
-"""Backtesting engine — stonewang_daytrade_rtg_6.0: ORB + ATR Stops + Progressive Trail.
+"""Backtesting engine — stonewang_daytrade_rtg_7.0: ORB + ATR Stops + Progressive Trail + Range-High Failed-Entry.
 
 Entry detection:
   Opening Range Breakout (ORB):
     - Wait ORB_BARS (3) one-min bars to establish opening range
     - Enter on breakout above range high with 0.2% buffer
     - Min opening range width 0.5% (skip flat opens)
+    - Only uses bars at/after 09:30 (filters pre-market)
   Fallback: Red-to-Green volume breakout (if ORB disabled/invalid)
 
-Entry window: 09:30 - 10C:30 EST (1 hour)
+Entry window: 09:30 - 10:30 EST (1 hour)
 
-Exit (evaluate_trade_rtg v5.0):
-  ATR-based stops + gap expansion + progressive trailing + failed-entry cut.
+Exit (rtg_7.0):
+  ATR-based stops + gap expansion + progressive trailing + failed-entry (price < range_high).
 """
 
 import json
@@ -40,7 +41,7 @@ import config
 # Load scanner from parent directory
 from scanner import get_data_client, get_tradable_symbols
 
-# Load strategy from rtg_6.0 directory (v5.0: ATR stops + progressive trail)
+# Load strategy from rtg_7.0 directory (v7.0: ATR stops + progressive trail + range-high failed-entry)
 _strat_spec = importlib.util.spec_from_file_location("strategy", os.path.join(_ver_dir, "strategy_v6.py"))
 strategy = importlib.util.module_from_spec(_strat_spec)
 _strat_spec.loader.exec_module(strategy)
@@ -381,26 +382,42 @@ def find_rtg_entry_1min(bars_1m, open_price, min_volume=None):
 
 
 def find_orb_entry_1min(bars_1m, open_price, min_volume=None):
-    """Opening Range Breakout entry (rtg_6.0).
-    Phase 1: build opening range from first ORB_BARS bars.
+    """Opening Range Breakout entry (rtg_7.0).
+    Phase 1: build opening range from first ORB_BARS market-open bars.
     Phase 2: enter on breakout above range high with volume confirmation.
-    Falls back to RTG if ORB range too narrow.
+    Returns (entry_at_open, entry_at_close, entry_bar_idx, confirmed, signal_type, range_high).
+    Only uses bars at or after market open (09:30) — filters pre-market bars.
     """
+    import datetime as _dt
     orb_bars = getattr(config, "ORB_BARS", 3)
     if bars_1m.empty or len(bars_1m) < orb_bars + 1:
-        return 0.0, 0.0, -1, False, ""
+        return 0.0, 0.0, -1, False, "", 0.0
     if min_volume is None:
         min_volume = config.RTG_MIN_VOLUME
 
-    entry_start_str = getattr(config, "ENTRY_WINDOW_START", "09:30")
+    # Filter: only keep bars at or after market open (09:30)
+    mkt_open_time = _dt.time(9, 30)
+    market_indices = []
+    for i in range(len(bars_1m)):
+        idx_val = bars_1m.index[i]
+        ts = idx_val[1] if isinstance(idx_val, tuple) else idx_val
+        ts = pd.Timestamp(ts)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        ts = ts.tz_convert("America/New_York")
+        if ts.time() >= mkt_open_time:
+            market_indices.append(i)
+
+    if len(market_indices) < orb_bars + 1:
+        return 0.0, 0.0, -1, False, "", 0.0
+
     entry_end_str = getattr(config, "ENTRY_WINDOW_END", "10:30")
-    start_time = pd.Timestamp(f"2000-01-01 {entry_start_str}").time()
     end_time = pd.Timestamp(f"2000-01-01 {entry_end_str}").time()
 
-    # Phase 1: build opening range from first ORB_BARS bars
+    # Phase 1: build opening range from first ORB_BARS market-open bars
     range_high = 0.0
     range_low = float('inf')
-    for i in range(min(orb_bars, len(bars_1m))):
+    for i in market_indices[:orb_bars]:
         bar = bars_1m.iloc[i]
         h = float(bar["high"])
         l = float(bar["low"])
@@ -410,17 +427,22 @@ def find_orb_entry_1min(bars_1m, open_price, min_volume=None):
             range_low = l
 
     if range_high <= 0:
-        return 0.0, 0.0, -1, False, ""
+        return 0.0, 0.0, -1, False, "", 0.0
 
     range_width = (range_high - range_low) / range_high
     min_range = getattr(config, "ORB_MIN_RANGE_PCT", 0.005)
 
     # If range too narrow, fall back to RTG
     if range_width < min_range:
-        return find_rtg_entry_1min(bars_1m, open_price, min_volume=min_volume)
+        result = find_rtg_entry_1min(bars_1m, open_price, min_volume=min_volume)
+        # find_rtg_entry_1min returns (entry_at_open, entry_at_close, idx, confirmed, signal_type)
+        # Append range_high=0.0 to match new signature
+        return result + (0.0,)
 
     # Phase 2: breakout above range high with volume
-    for i in range(orb_bars, len(bars_1m)):
+    for j in range(orb_bars, len(market_indices)):
+        i = market_indices[j]
+        prev_i = market_indices[j - 1]
         idx_val = bars_1m.index[i]
         ts = idx_val[1] if isinstance(idx_val, tuple) else idx_val
         ts = pd.Timestamp(ts)
@@ -429,11 +451,11 @@ def find_orb_entry_1min(bars_1m, open_price, min_volume=None):
         ts = ts.tz_convert("America/New_York")
 
         bar_time = ts.time()
-        if not (start_time <= bar_time <= end_time):
+        if bar_time > end_time:
             continue
 
         bar = bars_1m.iloc[i]
-        prev_bar = bars_1m.iloc[i - 1]
+        prev_bar = bars_1m.iloc[prev_i]
         bar_close = float(bar["close"])
         bar_vol = int(bar["volume"])
         prev_vol = int(prev_bar["volume"])
@@ -449,9 +471,9 @@ def find_orb_entry_1min(bars_1m, open_price, min_volume=None):
                 buf = getattr(config, "ORB_BREAKOUT_BUFFER", 0.002)
                 entry_at_open = round(range_high * (1 + buf), 4)
             entry_at_close = round(bar_close * 1.001, 4)
-            return entry_at_open, entry_at_close, i, True, "orb_rtg"
+            return entry_at_open, entry_at_close, i, True, "orb_rtg", range_high
 
-    return 0.0, 0.0, -1, False, ""
+    return 0.0, 0.0, -1, False, "", 0.0
 
 
 def find_momentum_entry_1min(bars_1m, min_volume=None):
@@ -557,7 +579,7 @@ def get_atr_stop_params_bt(rvol, atr, entry_price, gap_pct=0):
                    min(getattr(config, "ATR_STOP_MAX_PCT", 0.08), stop_pct))
     trail_pct = max(0.005, min(0.05, (getattr(config, "ATR_TRAIL_MULT", 2.0) * atr) / entry_price)) if entry_price > 0 else 0.02
     target_pct = 0.0
-    trail_activate_pct = min(stop_pct * 1.5, 0.10)
+    trail_activate_pct = 0.01  # Fixed 1% activation (matches live_trade.py)
     return stop_pct, target_pct, trail_activate_pct, trail_pct
 
 
@@ -583,7 +605,7 @@ def run_backtest(end_date=None, n_days=None):
         print("No trading days found.")
         return []
 
-    print(f"[rtg_6.0] Backtesting {len(trading_days)} trading days: "
+    print(f"[rtg_7.0] Backtesting {len(trading_days)} trading days: "
           f"{trading_days[0].date()} to {trading_days[-1].date()}")
     print(f"Capital: ${config.INITIAL_CAPITAL:,.2f} | RVOL-weighted sizing | "
           f"Max concurrent: {config.MAX_POSITIONS} | Max daily trades: {config.MAX_DAILY_TRADES}")
@@ -600,7 +622,7 @@ def run_backtest(end_date=None, n_days=None):
     print(f"  ATR Stops: max(ATR×mult, gap×0.3), clamped {getattr(config, 'ATR_STOP_MIN_PCT', 0.02):.0%}-{getattr(config, 'ATR_STOP_MAX_PCT', 0.08):.0%}")
     print(f"  Progressive Trail: " + ", ".join(
         f">{t:.0%}→{p:.1%}" for t, p in sorted(getattr(config, "PROGRESSIVE_TRAIL_TIERS", []), reverse=True)))
-    print(f"  Failed-Entry Cut: +{getattr(config, 'FAILED_ENTRY_MIN_GAIN_PCT', 0.01):.0%} in {getattr(config, 'FAILED_ENTRY_MAX_SECONDS', 180)}s")
+    print(f"  Failed-Entry (rtg_7.0): price < range_high → breakout failed")
     sizing_tiers = getattr(config, "RVOL_SIZING_TIERS", [])
     if sizing_tiers:
         print(f"  Sizing tiers: " + ", ".join(f"RVOL>{r:.0f}×→{p:.0%}" for r, p in sizing_tiers))
@@ -785,7 +807,7 @@ def run_backtest(end_date=None, n_days=None):
         mkt_open_ts = pd.Timestamp(f"{date_key} {config.MARKET_OPEN}", tz="America/New_York")
         entry_start_str = getattr(config, "ENTRY_WINDOW_START", "09:30")
         entry_end_str = getattr(config, "ENTRY_WINDOW_END", "10:30")
-        protect_delay = getattr(config, "DAILY_PROFIT_PROTECT_DELAY_SEC", 1800)
+        protect_delay = getattr(config, "DAILY_PROFIT_PROTECT_DELAY_SEC", 180)
         profit_protect_active = False
 
         for bar_idx in range(max_bars):
@@ -815,15 +837,12 @@ def run_backtest(end_date=None, n_days=None):
                         exit_price = stop_price
                     reason = "stop_loss"
 
-                # 2. Failed-entry cut
+                # 2. Failed-entry cut (rtg_7.0): price < range_high → breakout failed
                 if reason is None and getattr(config, "FAILED_ENTRY_ENABLED", True):
-                    bars_since_entry = bar_idx - pos["entry_bar_idx"]
-                    fe_max_bars = getattr(config, "FAILED_ENTRY_MAX_SECONDS", 180) // 60
-                    if bars_since_entry >= fe_max_bars:
-                        stock_gain = (pos["highest"] - pos["entry_price"]) / pos["entry_price"]
-                        if stock_gain < getattr(config, "FAILED_ENTRY_MIN_GAIN_PCT", 0.01):
-                            exit_price = bar["close"]
-                            reason = "failed_entry"
+                    range_high = pos.get("range_high", 0.0)
+                    if range_high > 0 and bar["close"] < range_high:
+                        exit_price = bar["close"]
+                        reason = "failed_entry"
 
                 # 3. Progressive trailing stop
                 if reason is None:
@@ -951,7 +970,7 @@ def run_backtest(end_date=None, n_days=None):
                 open_positions.clear()
                 break
 
-            # ── Daily profit protection ──
+            # ── Daily profit protection (rtg_7.0: close declining positions, continue trading) ──
             if getattr(config, "DAILY_PROFIT_PROTECT_ENABLED", False):
                 bar_ts = None
                 for sym in cand_info:
@@ -971,10 +990,24 @@ def run_backtest(end_date=None, n_days=None):
                         if current_profit > max_daily_profit:
                             max_daily_profit = current_profit
                         protect_min = getattr(config, "DAILY_PROFIT_PROTECT_MIN", 5.0)
-                        protect_ratio = getattr(config, "DAILY_PROFIT_PROTECT_RATIO", 0.70)
+                        protect_ratio = getattr(config, "DAILY_PROFIT_PROTECT_RATIO", 0.90)
                         if max_daily_profit >= protect_min and current_profit < max_daily_profit * protect_ratio:
                             print(f"  Profit protection! Peak ${max_daily_profit:+,.2f}, now ${current_profit:+,.2f}")
+                            # Close only declining positions (price going down), keep rising
+                            positions_to_close = []
                             for pos in open_positions[:]:
+                                sym = pos["symbol"]
+                                _, all_bars_1m = cached_bars[sym]
+                                if bar_idx < len(all_bars_1m):
+                                    cur_price = all_bars_1m[bar_idx]["close"]
+                                    prev_price = all_bars_1m[bar_idx - 1]["close"] if bar_idx >= 1 and bar_idx - 1 < len(all_bars_1m) else cur_price
+                                else:
+                                    cur_price = all_bars_1m[-1]["close"]
+                                    prev_price = cur_price
+                                price_declining = cur_price < prev_price
+                                if price_declining:
+                                    positions_to_close.append(pos)
+                            for pos in positions_to_close:
                                 sym = pos["symbol"]
                                 _, all_bars_1m = cached_bars[sym]
                                 if bar_idx < len(all_bars_1m):
@@ -998,9 +1031,9 @@ def run_backtest(end_date=None, n_days=None):
                                 equity += pnl
                                 daily_loss += pnl
                                 daily_trades += 1
-                                print(f"  Profit protect close {sym}, P&L=${pnl:+,.2f}")
-                            open_positions.clear()
-                            break
+                                open_positions.remove(pos)
+                                print(f"  Profit protect close {sym} (declining), P&L=${pnl:+,.2f}")
+                            # Reset peak after closing declining positions, continue trading (no break)
 
             # ── Entry monitoring: fill available slots ──
             if len(open_positions) >= config.MAX_POSITIONS:
@@ -1037,11 +1070,12 @@ def run_backtest(end_date=None, n_days=None):
                         continue
 
                     if orb_enabled:
-                        entry_at_open, entry_at_close, entry_bi, confirmed, signal_type = find_orb_entry_1min(
+                        entry_at_open, entry_at_close, entry_bi, confirmed, signal_type, orb_range_high = find_orb_entry_1min(
                             bars_1m.iloc[:bar_idx + 1], ci["open_price"], min_volume=ci["min_vol"])
                     else:
                         entry_at_open, entry_at_close, entry_bi, confirmed, signal_type = find_rtg_entry_1min(
                             bars_1m.iloc[:bar_idx + 1], ci["open_price"], min_volume=ci["min_vol"])
+                        orb_range_high = 0.0
 
                     if not confirmed or entry_at_open <= 0:
                         continue
@@ -1051,9 +1085,12 @@ def run_backtest(end_date=None, n_days=None):
 
                     entry_price_actual = round(entry_at_close * (1 + entry_slippage), 4)
 
-                    # Position sizing (RVOL-weighted, split among same-tier)
-                    pos_size = get_rvol_sizing(ci["rvol"], equity, same_tier_count=ci["same_tier"])
-                    pos_size = max(config.MIN_POSITION_SIZE, pos_size)
+                    # Position sizing (full all-in when MAX_POSITIONS=1, else RVOL-weighted)
+                    if config.MAX_POSITIONS <= 1:
+                        pos_size = max(config.MIN_POSITION_SIZE, equity)
+                    else:
+                        pos_size = get_rvol_sizing(ci["rvol"], equity, same_tier_count=ci["same_tier"])
+                        pos_size = max(config.MIN_POSITION_SIZE, pos_size)
                     shares = int(pos_size / entry_price_actual)
                     if shares <= 0:
                         continue
@@ -1067,6 +1104,7 @@ def run_backtest(end_date=None, n_days=None):
                         "stop_pct": ci["stop_pct"], "target_pct": ci["target_pct"],
                         "trail_act_pct": ci["trail_act_pct"], "trail_pct": ci["trail_pct"],
                         "rvol": ci["rvol"], "atr": ci["atr"],
+                        "range_high": orb_range_high,
                     })
                     entered_symbols.add(symbol)
                     entry_count[symbol] = entry_count.get(symbol, 0) + 1
@@ -1115,9 +1153,12 @@ def run_backtest(end_date=None, n_days=None):
 
                         entry_price_actual = round(entry_price * (1 + entry_slippage), 4)
 
-                        # Position sizing: full equity
-                        pos_size = get_rvol_sizing(ci["rvol"], equity, same_tier_count=ci["same_tier"])
-                        pos_size = max(config.MIN_POSITION_SIZE, pos_size)
+                        # Position sizing: full all-in when MAX_POSITIONS=1
+                        if config.MAX_POSITIONS <= 1:
+                            pos_size = max(config.MIN_POSITION_SIZE, equity)
+                        else:
+                            pos_size = get_rvol_sizing(ci["rvol"], equity, same_tier_count=ci["same_tier"])
+                            pos_size = max(config.MIN_POSITION_SIZE, pos_size)
                         shares = int(pos_size / entry_price_actual)
                         if shares <= 0:
                             continue
@@ -1131,6 +1172,7 @@ def run_backtest(end_date=None, n_days=None):
                             "stop_pct": ci["stop_pct"], "target_pct": ci["target_pct"],
                             "trail_act_pct": ci["trail_act_pct"], "trail_pct": ci["trail_pct"],
                             "rvol": ci["rvol"], "atr": ci["atr"],
+                            "range_high": 0.0,  # No ORB range for momentum entry
                         })
                         entered_symbols.add(symbol)
                         entry_count[symbol] = entry_count.get(symbol, 0) + 1
@@ -1187,7 +1229,7 @@ def run_backtest(end_date=None, n_days=None):
         open_positions.clear()
 
     print(f"\n{'=' * 70}")
-    print(f"[rtg_6.0] Backtest complete. Final equity: ${equity:,.2f}")
+    print(f"[rtg_7.0] Backtest complete. Final equity: ${equity:,.2f}")
     print(f"Total trades: {len(all_trades)}")
     if all_trades:
         wins = [t for t in all_trades if t.pnl > 0]
