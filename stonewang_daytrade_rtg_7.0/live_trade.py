@@ -1327,7 +1327,11 @@ def run_trading_day(target_date):
                             continue
                 # RVOL-weighted sizing, split evenly among same-tier candidates
                 same_tier = tier_counts.get(_get_rvol_tier(rvol)[0], 1)
-                slot = max(config.MIN_POSITION_SIZE, get_rvol_sizing(rvol, equity, same_tier_count=same_tier))
+                if config.MAX_POSITIONS <= 1:
+                    # Full all-in: don't split among candidates
+                    slot = max(config.MIN_POSITION_SIZE, equity)
+                else:
+                    slot = max(config.MIN_POSITION_SIZE, get_rvol_sizing(rvol, equity, same_tier_count=same_tier))
                 slot = min(slot, live_bp * 0.95)  # Cap to 95% of buying power
                 # Use latest market price for sizing (not open_price which underestimates cost)
                 latest_bar = _accumulator.get_1min_bars(sym)
