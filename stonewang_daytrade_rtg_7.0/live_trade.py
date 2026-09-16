@@ -712,7 +712,8 @@ def backfill_1min_bars(symbols, target_date):
 
 
 def check_rtg_entry(symbol, open_price, bars, after_time=None, min_volume=None):
-    """Returns (entry_price, confirmed, signal_type, range_high)."""
+    """Returns (entry_price, confirmed, signal_type, range_high).
+    Only uses bars at or after market open (09:30)."""
     if len(bars) < 2:
         return 0.0, False, "", 0.0
     if min_volume is None:
@@ -721,9 +722,18 @@ def check_rtg_entry(symbol, open_price, bars, after_time=None, min_volume=None):
     ew_end_h, ew_end_m = (int(x) for x in config.ENTRY_WINDOW_END.split(":"))
     entry_start = dt.time(ew_start_h, ew_start_m)
     entry_end = dt.time(ew_end_h, ew_end_m)
-    for i in range(1, len(bars)):
-        bar = bars[i]
-        prev = bars[i - 1]
+    # Filter: only market-open bars
+    mkt_open_time = dt.time(9, 30)
+    market_bars = [b for b in bars if b.get("timestamp") and
+                   (b["timestamp"].time() if isinstance(b["timestamp"], dt.datetime) else
+                    b["timestamp"].time() if hasattr(b["timestamp"], "time") else None) is not None and
+                   (b["timestamp"].time() if isinstance(b["timestamp"], dt.datetime) else
+                    b["timestamp"].time() if hasattr(b["timestamp"], "time") else dt.time(0,0)) >= mkt_open_time]
+    if len(market_bars) < 2:
+        return 0.0, False, "", 0.0
+    for i in range(1, len(market_bars)):
+        bar = market_bars[i]
+        prev = market_bars[i - 1]
         ts = bar.get("timestamp")
         if ts is None:
             continue
@@ -762,17 +772,30 @@ def check_rtg_entry(symbol, open_price, bars, after_time=None, min_volume=None):
 def check_orb_entry(symbol, open_price, bars, min_volume=None, after_time=None):
     """Opening Range Breakout entry. Phase 1: build range from first ORB_BARS bars.
     Phase 2: enter on breakout above range high with volume confirmation.
-    Returns (entry_price, confirmed, signal_type, range_high)."""
+    Returns (entry_price, confirmed, signal_type, range_high).
+    Only uses bars at or after market open (09:30) — filters out pre-market bars."""
     orb_bars = getattr(config, "ORB_BARS", 3)
     if orb_bars < 1:
         orb_bars = 1
-    if len(bars) < orb_bars + 1:
-        return 0.0, False, "", 0.0
     if min_volume is None:
         min_volume = config.RTG_MIN_VOLUME
 
-    # Phase 1: build opening range
-    range_bars = bars[:orb_bars]
+    # Filter: only keep bars at or after market open
+    mkt_open_time = dt.time(9, 30)
+    market_bars = []
+    for b in bars:
+        ts = b.get("timestamp")
+        if ts is None:
+            continue
+        bar_time = ts.time() if isinstance(ts, dt.datetime) else (ts.time() if hasattr(ts, "time") else None)
+        if bar_time is not None and bar_time >= mkt_open_time:
+            market_bars.append(b)
+
+    if len(market_bars) < orb_bars + 1:
+        return 0.0, False, "", 0.0
+
+    # Phase 1: build opening range from first ORB_BARS market-open bars
+    range_bars = market_bars[:orb_bars]
     range_high = max(b["high"] for b in range_bars)
     range_low = min(b["low"] for b in range_bars)
     range_width = (range_high - range_low) / range_high
@@ -783,9 +806,9 @@ def check_orb_entry(symbol, open_price, bars, min_volume=None, after_time=None):
     # Phase 2: breakout above range high with volume
     ew_end_h, ew_end_m = (int(x) for x in config.ENTRY_WINDOW_END.split(":"))
     entry_end = dt.time(ew_end_h, ew_end_m)
-    for i in range(orb_bars, len(bars)):
-        bar = bars[i]
-        prev = bars[i - 1]
+    for i in range(orb_bars, len(market_bars)):
+        bar = market_bars[i]
+        prev = market_bars[i - 1]
         ts = bar.get("timestamp")
         if ts is None:
             continue
