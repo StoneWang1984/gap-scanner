@@ -1,4 +1,4 @@
-"""RTG 6.0 策略 — Streamlit Web UI (交易显示 + 回测)"""
+"""RTG 7.0 策略 — Streamlit Web UI (交易显示 + 回测)"""
 
 import json
 import time
@@ -8,7 +8,7 @@ import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
 
-VERSION_DIR = Path("/Users/stonewang2014/gap-scanner/stonewang_daytrade_rtg_6.0")
+VERSION_DIR = Path("/Users/stonewang2014/gap-scanner/stonewang_daytrade_rtg_7.0")
 STATE_FILE = Path("/Users/stonewang2014/gap-scanner/live_state.json")
 import importlib.util, sys
 _spec = importlib.util.spec_from_file_location("config", VERSION_DIR / "config.py")
@@ -16,12 +16,12 @@ config = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(config)
 sys.modules["config"] = config
 
-st.set_page_config(page_title="RTG 6.0 交易", page_icon="📊", layout="wide")
+st.set_page_config(page_title="RTG 7.0 交易", page_icon="📊", layout="wide")
 
 # ── Sidebar ──────────────────────────────────────────────────────
 
-st.sidebar.title("RTG 6.0 交易")
-st.sidebar.caption("ORB + ATR止损 + 渐进Trailing + 全仓单股")
+st.sidebar.title("RTG 7.0 交易")
+st.sidebar.caption("ORB + ATR止损 + Range-High Failed-Entry + 全仓单股")
 
 tab = st.sidebar.radio("导航", ["实盘交易", "策略概览", "交易详情"])
 
@@ -236,7 +236,7 @@ if tab == "实盘交易":
 # ══════════════════════════════════════════════════════════════════
 
 elif tab == "策略概览":
-    st.title("RTG 6.0 策略概览")
+    st.title("RTG 7.0 策略概览")
 
     col1, col2 = st.columns(2)
 
@@ -285,14 +285,18 @@ elif tab == "策略概览":
         for tier_profit, tier_trail in config.PROGRESSIVE_TRAIL_TIERS:
             st.markdown(f"- 利润 > {tier_profit:.0%} → trail = **{tier_trail:.1%}**")
 
-        st.subheader("Failed-Entry快速止损")
-        st.markdown(f"""
-        - {config.FAILED_ENTRY_MAX_SECONDS}秒内未涨 **{config.FAILED_ENTRY_MIN_GAIN_PCT:.0%}** → 立即出场
+        st.subheader("Failed-Entry (Range-High)")
+        st.markdown("""
+        - 入场信号: close > range_high → 入场
+        - 退出信号: **close < range_high** → 假突破, 立即出场
+        - 每根bar实时检查, 无需等待3分钟
         """)
 
         st.subheader("日利润保护")
         st.markdown(f"""
-        - 利润从峰值回撤到 **{config.DAILY_PROFIT_PROTECT_RATIO:.0%}** → 全仓强平
+        - 利润从峰值回撤 **{1-config.DAILY_PROFIT_PROTECT_RATIO:.0%}** → 平仓价格下行持仓
+        - 保留价格上行持仓 (利润增加或亏损减少)
+        - 触发后继续交易, 不终止当天
         - 激活阈值: 峰值 ≥ ${config.DAILY_PROFIT_PROTECT_MIN:.0f}
         - 延迟: 开盘后{config.DAILY_PROFIT_PROTECT_DELAY_SEC // 60}分钟
         """)
@@ -304,15 +308,16 @@ elif tab == "策略概览":
         """)
 
     st.divider()
-    st.subheader("RTG 6.0 设计理念 (基于Cam Connor / Brian Shannon)")
+    st.subheader("RTG 7.0 设计理念 (基于Cam Connor / Brian Shannon)")
     st.markdown("""
     - **ORB入场**: 等3根bar建立开盘区间, 突破区间高点+放量才入场, 过滤开盘噪声
     - **ATR自适应止损**: stop=max(ATR×mult, |gap|×30%), 钳位2%-8%, 跳空股给宽止损
     - **Gap扩展**: 止损覆盖30%的跳空幅度, 防止开盘震荡触发止损
-    - **Failed-entry快速止损**: 3分钟不涨1%→立即出场, 不等全止损
-    - **渐进Trailing**: 利润>5%→1.5%, >10%→1%, >15%→0.5%, 让赢家奔跑
-    - **日利润保护**: 峰值利润回撤30%→全仓强平, 30分钟延迟
+    - **Failed-entry (7.0新增)**: 价格跌回range_high以下→假突破, 立即出场, 逐bar检查
+    - **渐进Trailing**: 利润>2%→1%, >3%→0.8%, ...>7%→0%, 让赢家奔跑
+    - **日利润保护**: 峰值利润回撤10%→平仓价格下行持仓(保留上行), 继续交易, 3分钟延迟
     - **动量窗口**: 仅09:30-10:30入场, gap动量半衰期~30分钟
+    - **下午扫描**: 10:30后全盘扫描量价齐升股, 最多$200/股
     - **全仓单股**: 最多1仓, 100%权益全仓买入最佳候选
     - **高质量过滤**: RVOL≥2.0×, 价格≥$2, 仅Top 5候选
     - **No Re-entry**: 首笔退出后不再入场
