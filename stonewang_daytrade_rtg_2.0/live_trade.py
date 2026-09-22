@@ -1230,12 +1230,18 @@ def run_trading_day(target_date):
     except Exception as e:
         log(f"Could not restore positions: {e}")
 
-    # Restore exit tracking from trades_detail (prevent re-buying already-traded stocks)
+    # Restore exit tracking from trades_detail (prevent re-buying already-traded stocks today)
+    # Only restore SAME-DAY exits — previous days' stop exits don't block today's new gap candidates
     try:
         with open(_state_file) as f:
             _restart_state = json.load(f)
+        today_str = str(target_date.date())
         for t in _restart_state.get("trades_detail", []):
             sym = t.get("symbol", "")
+            # Only track exits from today (restart midday scenario)
+            trade_date = t.get("date", "")
+            if trade_date and trade_date != today_str:
+                continue
             if sym and sym not in _last_exit_ts:
                 _last_exit_ts[sym] = time.time()
                 entry_count[sym] = entry_count.get(sym, 0) + 1
@@ -1243,7 +1249,7 @@ def run_trading_day(target_date):
             if "stop" in reason.lower() and sym:
                 _stop_exit_ts[sym] = time.time()
         if _last_exit_ts:
-            log(f"Restored exit tracking for {len(_last_exit_ts)} symbols from trades_detail "
+            log(f"Restored exit tracking for {len(_last_exit_ts)} symbols from today's trades_detail "
                 f"(stop_exit: {list(_stop_exit_ts.keys())})")
     except Exception:
         pass
