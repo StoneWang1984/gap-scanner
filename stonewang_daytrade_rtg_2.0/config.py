@@ -109,6 +109,17 @@ PROGRESSIVE_TRAIL_TIERS = [
     (0.05, 0.015),  # profit > 5%  -> trail = 1.5%
 ]
 
+# ── Afternoon momentum scan (from rtg_7.0) ─────────────────────────────
+AFTERNOON_SCAN_ENABLED = True
+AFTERNOON_PRICE_MAX = 200.0       # After 10:30, allow stocks up to $200
+AFTERNOON_MIN_RVOL = 2.0          # Min relative volume for momentum
+AFTERNOON_MIN_GAIN_PCT = 0.02     # Min 2% gain from previous close
+AFTERNOON_MAX_CANDIDATES = 5      # Top 5 momentum candidates
+AFTERNOON_ENTRY_END = "15:30"     # No new afternoon entries after 15:30
+AFTERNOON_STOP_PCT = 0.03         # 3% stop for afternoon trades
+AFTERNOON_TRAIL_PCT = 0.015       # 1.5% base trail for afternoon
+AFTERNOON_TRAIL_ACTIVATE_PCT = 0.01  # 1% trail activation
+
 # ── Re-entry: NONE (Cam Connor — "the opening drive is your only edge") ──
 # Backtest proof: first entry P&L +$37.70 (83% WR), ALL re-entries -$39.50 (35% WR)
 # Stop-loss = setup failed. Trail-stop = move captured. Either way, you're done.
@@ -121,7 +132,7 @@ REENTRY_COOLDOWN_SEC = 120        # (unused)
 
 # ── Entry parameters ─────────────────────────────────────────────────
 ENTRY_WINDOW_START = "09:30"  # Start at open
-ENTRY_WINDOW_END = "15:59"    # Full trading day — entries allowed until 15:59
+ENTRY_WINDOW_END = "10:30"    # Gap momentum window — no entries after 10:30
 
 # Signal A: Red-to-Green (THE signal — 75% win rate in backtest)
 RTG_VOLUME_MULT = 1.5       # Lower threshold catches earlier signals (was 2.0)

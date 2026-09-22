@@ -1,42 +1,42 @@
-"""RTG 7.0 策略 — Streamlit Web UI (交易显示 + 回测)"""
+"""RTG 2.0 策略 — Streamlit Web UI (交易显示 + 策略概览 + 交易详情)"""
 
 import json
 import time
 from pathlib import Path
 
 import streamlit as st
-import plotly.graph_objects as go
 import pandas as pd
 
-VERSION_DIR = Path("/Users/stonewang2014/gap-scanner/stonewang_daytrade_rtg_7.0")
+VERSION_DIR = Path("/Users/stonewang2014/gap-scanner/stonewang_daytrade_rtg_2.0")
 STATE_FILE = Path("/Users/stonewang2014/gap-scanner/live_state.json")
+LOG_FILE = VERSION_DIR / "live_rtg.log"
+
 import importlib.util, sys
 _spec = importlib.util.spec_from_file_location("config", VERSION_DIR / "config.py")
 config = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(config)
 sys.modules["config"] = config
 
-st.set_page_config(page_title="RTG 7.0 交易", page_icon="📊", layout="wide")
+st.set_page_config(page_title="RTG 2.0 交易", page_icon="📊", layout="wide")
 
 # ── Sidebar ──────────────────────────────────────────────────────
 
-st.sidebar.title("RTG 7.0 交易")
-st.sidebar.caption("ORB + ATR止损 + Range-High Failed-Entry + 全仓单股")
+st.sidebar.title("RTG 2.0 交易")
+st.sidebar.caption("RTG + 利润保护90% + 渐进Trailing + 下午动量")
 
-tab = st.sidebar.radio("导航", ["实盘交易", "策略概览", "交易详情"])
+tab = st.sidebar.radio("导航", ["实盘交易", "策略概览", "交易详情", "日志"])
 
 # ══════════════════════════════════════════════════════════════════
-# Tab 1: 实盘交易 (核心页面)
+# Tab 1: 实盘交易
 # ══════════════════════════════════════════════════════════════════
 
 if tab == "实盘交易":
     st.title("实盘交易")
 
-    state_file = STATE_FILE
     state = None
-    if state_file.exists():
+    if STATE_FILE.exists():
         try:
-            with open(state_file) as f:
+            with open(STATE_FILE) as f:
                 state = json.load(f)
         except Exception:
             state = None
@@ -73,25 +73,19 @@ if tab == "实盘交易":
     a5.metric("当日盈亏", f"${pnl:+,.2f}",
               delta=f"{pnl_pct:+.1%}" if last_equity > 0 else "")
 
-    # ── 数据源状态 ──
+    # ── 系统状态 ──
     if state:
         version = state.get("version", "?")
         daily_trades = state.get("daily_trades", 0)
-        cycle_idx = state.get("cycle_index", "?")
-        next_scan = state.get("next_scan_time", "")
-        status = f"v{version} | {config.DATA_FEED} | 今日 {daily_trades} 笔 | 周期 #{cycle_idx}"
-        if next_scan:
-            status += f" | 下次扫描: {next_scan[11:16]}"
+        ws_connected = state.get("ws_connected", False)
+        status = f"v{version} | {config.DATA_FEED} | 今日 {daily_trades} 笔 | WS {'✓' if ws_connected else '✗'}"
         st.caption(status)
 
     # ── 当前持仓 ──
     st.divider()
     st.subheader("当前持仓")
 
-    # rtg_2.0 uses positions array
     state_positions_list = state.get("positions", []) if state else []
-    if state and not state_positions_list and state.get("position"):
-        state_positions_list = [state["position"]]
     state_positions = {p["symbol"]: p for p in state_positions_list}
 
     if alpaca_positions:
@@ -117,7 +111,9 @@ if tab == "实盘交易":
             if sp:
                 row["信号"] = sp.get("signal_type", "rtg")
                 row["RVOL"] = f"{sp.get('rvol', 0):.1f}×"
+                row["止损"] = f"{sp.get('stop_pct', 0):.1%}"
                 row["Trail"] = f"{sp.get('trail_pct', 0):.1%}"
+                row["最高"] = f"${sp.get('highest', 0):.4f}"
 
             pos_rows.append(row)
 
@@ -131,6 +127,7 @@ if tab == "实盘交易":
                 "数量": p.get("shares", 0),
                 "入场价": f"${p.get('entry_price', 0):.4f}",
                 "RVOL": f"{p.get('rvol', 0):.1f}×",
+                "止损": f"{p.get('stop_pct', 0):.1%}",
                 "Trail": f"{p.get('trail_pct', 0):.1%}",
             })
         st.dataframe(pd.DataFrame(pos_rows), hide_index=True, use_container_width=True)
@@ -141,7 +138,6 @@ if tab == "实盘交易":
     if state and state.get("candidates"):
         st.divider()
         st.subheader("今日候选股")
-
         cand_rows = []
         for c in state["candidates"]:
             cand_rows.append({
@@ -153,7 +149,7 @@ if tab == "实盘交易":
             })
         st.dataframe(pd.DataFrame(cand_rows), hide_index=True, use_container_width=True)
 
-    # ── 今日交易汇总 (按股票聚合) ──
+    # ── 今日交易汇总 ──
     st.divider()
     st.subheader("今日交易汇总")
     if state and state.get("trades_detail"):
@@ -173,15 +169,11 @@ if tab == "实盘交易":
             total_pnl += total_pnl_sym
             entry_price = trades[0].get("entry", 0)
             exit_price = trades[-1].get("exit", 0)
-            trade_type = trades[0].get("trade_type", "first")
+            trade_type = trades[0].get("trade_type", "")
             final_reason = trades[-1].get("exit_reason", "") or trades[-1].get("reason", "")
-            all_reasons = [t.get("exit_reason", "") or t.get("reason", "") for t in trades]
+
             entry_cost = entry_price * total_shares if entry_price > 0 else 0
             pnl_pct = (total_pnl_sym / entry_cost) if entry_cost > 0 else 0
-
-            reason_display = final_reason.replace("_", " ").title()
-            if len(set(all_reasons)) > 1:
-                reason_display += f" ({len(trades)}档)"
 
             summary_rows.append({
                 "股票": sym,
@@ -191,35 +183,13 @@ if tab == "实盘交易":
                 "股数": total_shares,
                 "盈亏": f"${total_pnl_sym:+,.2f}",
                 "盈亏%": f"{pnl_pct:+.1%}",
-                "退出类型": reason_display,
+                "退出类型": final_reason.replace("_", " ").title(),
             })
 
         st.dataframe(pd.DataFrame(summary_rows), hide_index=True, use_container_width=True)
         st.metric("今日总盈亏", f"${total_pnl:+,.2f}")
     else:
         st.info("今日暂无已完成交易")
-
-    # ── 今日交易明细 (逐笔) ──
-    st.divider()
-    st.subheader("今日交易明细 (逐笔)")
-    if state and state.get("trades_detail"):
-        trade_rows = []
-        for t in state["trades_detail"]:
-            pnl_val = t.get("pnl", 0)
-            reason = t.get("exit_reason", "") or t.get("reason", "")
-            trade_rows.append({
-                "股票": t["symbol"],
-                "类型": t.get("trade_type", "first"),
-                "入场": f"${t.get('entry', 0):.4f}",
-                "出场": f"${t.get('exit', 0):.4f}",
-                "股数": t.get("shares", 0),
-                "盈亏": f"${pnl_val:+,.2f}",
-                "退出原因": reason.replace("_", " ").title(),
-            })
-
-        st.dataframe(pd.DataFrame(trade_rows), hide_index=True, use_container_width=True)
-    else:
-        st.info("今日暂无交易记录")
 
     if not state:
         st.warning("未找到 live_state.json，实盘未运行")
@@ -236,7 +206,7 @@ if tab == "实盘交易":
 # ══════════════════════════════════════════════════════════════════
 
 elif tab == "策略概览":
-    st.title("RTG 7.0 策略概览")
+    st.title("RTG 2.0 策略概览")
 
     col1, col2 = st.columns(2)
 
@@ -253,21 +223,22 @@ elif tab == "策略概览":
 
         st.subheader("入场信号")
         st.markdown(f"""
-        - **ORB** (Opening Range Breakout): 等{config.ORB_BARS}根1min bar建立区间, 突破区间高点+放量入场
-        - GapGo: **禁用** (胜率34%)
-        - 入场窗口: **{config.ENTRY_WINDOW_START} ~ {config.ENTRY_WINDOW_END} EST** (动量窗口)
-        - 最低RVOL: **{config.MIN_ENTRY_RVOL:.0f}×**
-        - 最低价格: **${config.MIN_ENTRY_PRICE:.0f}**
+        - **RTG** (Red-to-Green): close > open_price + 量能 ≥ {config.RTG_VOLUME_MULT}× 前bar + ≥ {config.RTG_MIN_VOLUME:,}股
+        - **Vol Surge** (盘中量能): 5min量比 ≥ 3.0× + close > open×1.005
+        - **Momentum** (下午动量): 3/5阳线 + 量增 + 突破前高 + 量 > 1.5×均量
+        - 上午窗口: **{config.ENTRY_WINDOW_START} ~ {config.ENTRY_WINDOW_END} EST**
+        - 下午窗口: **10:30 ~ {config.AFTERNOON_ENTRY_END} EST** (动量扫描)
         """)
 
         st.subheader("仓位管理")
         max_daily = config.MAX_DAILY_TRADES if config.MAX_DAILY_TRADES > 0 else "无限制"
         st.markdown(f"""
         - 当前权益: **${config.INITIAL_CAPITAL:,.2f}**
-        - 最大同时持仓: **{config.MAX_POSITIONS}** 只
+        - 最大同时持仓: **{config.MAX_POSITIONS}** 只 (全仓单股)
         - 每日交易上限: **{max_daily}**
         - 日损失熔断: **{config.MAX_DAILY_LOSS_PCT:.0%}**
         """)
+
         st.subheader("RVOL仓位分级")
         for rvol_min, eq_pct in config.RVOL_SIZING_TIERS:
             st.markdown(f"- RVOL ≥ {rvol_min:.0f}× → **{eq_pct:.0%}** 权益")
@@ -285,13 +256,6 @@ elif tab == "策略概览":
         for tier_profit, tier_trail in config.PROGRESSIVE_TRAIL_TIERS:
             st.markdown(f"- 利润 > {tier_profit:.0%} → trail = **{tier_trail:.1%}**")
 
-        st.subheader("Failed-Entry (Range-High)")
-        st.markdown("""
-        - 入场信号: close > range_high → 入场
-        - 退出信号: **close < range_high** → 假突破, 立即出场
-        - 每根bar实时检查, 无需等待3分钟
-        """)
-
         st.subheader("日利润保护")
         st.markdown(f"""
         - 利润从峰值回撤 **{1-config.DAILY_PROFIT_PROTECT_RATIO:.0%}** → 平仓价格下行持仓
@@ -301,6 +265,22 @@ elif tab == "策略概览":
         - 延迟: 开盘后{config.DAILY_PROFIT_PROTECT_DELAY_SEC // 60}分钟
         """)
 
+        st.subheader("Vol Surge止损 (比RTG更紧)")
+        st.markdown(f"""
+        - 最大止损: **{config.VOL_SURGE_STOP_MAX_PCT:.0%}** (无gap扩展)
+        - Trail乘数: **{config.VOL_SURGE_TRAIL_MULT:.1f}×** ATR
+        - Trail上限: **{config.VOL_SURGE_TRAIL_MAX_PCT:.0%}**
+        """)
+
+        st.subheader("下午动量参数")
+        st.markdown(f"""
+        - 最小RVOL: **{config.AFTERNOON_MIN_RVOL:.0f}×**
+        - 最小涨幅: **{config.AFTERNOON_MIN_GAIN_PCT:.0%}**
+        - 价格上限: **${config.AFTERNOON_PRICE_MAX:.0f}**
+        - 止损: **{config.AFTERNOON_STOP_PCT:.0%}** | Trail: **{config.AFTERNOON_TRAIL_PCT:.1%}**
+        - 入场截止: **{config.AFTERNOON_ENTRY_END} EST**
+        """)
+
         st.subheader("强制平仓 & Re-entry")
         st.markdown(f"""
         - EOD强平: **{config.FORCE_CLOSE_TIME} EST**
@@ -308,19 +288,17 @@ elif tab == "策略概览":
         """)
 
     st.divider()
-    st.subheader("RTG 7.0 设计理念 (基于Cam Connor / Brian Shannon)")
+    st.subheader("RTG 2.0 设计理念")
     st.markdown("""
-    - **ORB入场**: 等3根bar建立开盘区间, 突破区间高点+放量才入场, 过滤开盘噪声
+    - **RTG入场**: close > open_price + 量能突破, 75%胜率信号
+    - **Vol Surge入场**: 5min量比≥3.0×, 盘中量能突破, 更紧止损
+    - **下午Momentum**: 10:30后全盘扫描量价齐升股, 全天候发现交易机会
     - **ATR自适应止损**: stop=max(ATR×mult, |gap|×30%), 钳位2%-8%, 跳空股给宽止损
     - **Gap扩展**: 止损覆盖30%的跳空幅度, 防止开盘震荡触发止损
-    - **Failed-entry (7.0新增)**: 价格跌回range_high以下→假突破, 立即出场, 逐bar检查
-    - **渐进Trailing**: 利润>2%→1%, >3%→0.8%, ...>7%→0%, 让赢家奔跑
-    - **日利润保护**: 峰值利润回撤10%→平仓价格下行持仓(保留上行), 继续交易, 3分钟延迟
-    - **动量窗口**: 仅09:30-10:30入场, gap动量半衰期~30分钟
-    - **下午扫描**: 10:30后全盘扫描量价齐升股, 最多$200/股
+    - **渐进Trailing**: 利润>5%→1.5%, >10%→1%, >15%→0.5%, 让赢家奔跑
+    - **日利润保护90%**: 峰值利润回撤10%→平仓下行持仓(保留上行), 继续交易
     - **全仓单股**: 最多1仓, 100%权益全仓买入最佳候选
-    - **高质量过滤**: RVOL≥2.0×, 价格≥$2, 仅Top 5候选
-    - **No Re-entry**: 首笔退出后不再入场
+    - **No Re-entry**: 首笔退出后不再入场 (Cam Connor: opening drive is your only edge)
     """)
 
 # ══════════════════════════════════════════════════════════════════
@@ -330,11 +308,10 @@ elif tab == "策略概览":
 elif tab == "交易详情":
     st.title("交易详情")
 
-    state_file = STATE_FILE
     state = None
-    if state_file.exists():
+    if STATE_FILE.exists():
         try:
-            with open(state_file) as f:
+            with open(STATE_FILE) as f:
                 state = json.load(f)
         except Exception:
             state = None
@@ -359,7 +336,7 @@ elif tab == "交易详情":
 
     c5, c6 = st.columns(2)
     c5.metric("出场原因", t.get("reason", "").replace("_", " ").title())
-    c6.metric("类型", t.get("trade_type", "first"))
+    c6.metric("类型", t.get("trade_type", ""))
 
     st.divider()
     st.subheader("全部交易")
@@ -367,7 +344,7 @@ elif tab == "交易详情":
     for t in trades:
         trade_rows.append({
             "股票": t["symbol"],
-            "类型": t.get("trade_type", "first"),
+            "类型": t.get("trade_type", ""),
             "入场": f"${t.get('entry', 0):.4f}",
             "出场": f"${t.get('exit', 0):.4f}",
             "股数": t.get("shares", 0),
@@ -375,3 +352,23 @@ elif tab == "交易详情":
             "原因": t.get("reason", ""),
         })
     st.dataframe(pd.DataFrame(trade_rows), hide_index=True, use_container_width=True)
+
+# ══════════════════════════════════════════════════════════════════
+# Tab 4: 日志
+# ══════════════════════════════════════════════════════════════════
+
+elif tab == "日志":
+    st.title("实盘日志")
+    if LOG_FILE.exists():
+        try:
+            lines = LOG_FILE.read_text().strip().split("\n")
+            # Show last 200 lines
+            recent = lines[-200:]
+            st.code("\n".join(recent), language="log")
+        except Exception as e:
+            st.error(f"读取日志失败: {e}")
+    else:
+        st.info("日志文件不存在")
+
+    if st.button("刷新"):
+        st.rerun()

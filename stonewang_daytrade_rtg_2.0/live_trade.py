@@ -962,6 +962,146 @@ def _parse_time(t_str):
     return dt.time(h, m)
 
 
+def scan_afternoon_momentum(target_date):
+    """Scan for afternoon momentum: stocks with rising price + volume."""
+    log(f"Scanning for afternoon momentum stocks...")
+    symbols = get_tradable_symbols()
+    symbols = [s for s in symbols if not is_leveraged_etf(s)]
+    symbols = [s for s in symbols if not is_crypto_etf(s)]
+    if EXCLUDE_SYMBOLS:
+        symbols = [s for s in symbols if s not in EXCLUDE_SYMBOLS]
+
+    price_max = getattr(config, "AFTERNOON_PRICE_MAX", 200.0)
+    min_gain = getattr(config, "AFTERNOON_MIN_GAIN_PCT", 0.02)
+
+    today_data = {}
+    batch_size = 200
+    total_batches = (len(symbols) + batch_size - 1) // batch_size
+    completed = 0
+
+    for i in range(0, len(symbols), batch_size):
+        batch = symbols[i:i + batch_size]
+        try:
+            req = StockBarsRequest(
+                symbol_or_symbols=batch, timeframe=TimeFrame.Day,
+                start=target_date - pd.Timedelta(days=5),
+                end=target_date,
+                adjustment=Adjustment.RAW,
+                feed=getattr(config, "DATA_FEED_OBJ", DataFeed.SIP),
+            )
+            bars = data_client.get_stock_bars(req)
+            completed += 1
+            if completed % 10 == 0 or completed == total_batches:
+                log(f"  Afternoon scan: {completed}/{total_batches} batches")
+            if bars.df.empty:
+                continue
+            df = bars.df
+            for sym in batch:
+                try:
+                    if "symbol" in df.columns:
+                        sym_df = df[df["symbol"] == sym]
+                    else:
+                        sym_df = df.loc[sym] if sym in df.index else pd.DataFrame()
+                    if sym_df.empty or len(sym_df) < 2:
+                        continue
+                    sym_df = sym_df.sort_index()
+                    prev = sym_df.iloc[-2]
+                    curr = sym_df.iloc[-1]
+                    prev_close = float(prev["close"])
+                    curr_close = float(curr["close"])
+                    curr_open = float(curr["open"])
+                    curr_vol = int(curr["volume"])
+                    if prev_close <= 0:
+                        continue
+                    gain_pct = (curr_close - prev_close) / prev_close
+                    if gain_pct < min_gain:
+                        continue
+                    if curr_close < config.PRICE_MIN or curr_close > price_max:
+                        continue
+                    today_data[sym] = {
+                        "symbol": sym,
+                        "open_price": curr_open,
+                        "prev_close": prev_close,
+                        "close_price": curr_close,
+                        "gap_pct": gain_pct,
+                        "volume": curr_vol,
+                    }
+                except Exception:
+                    pass
+        except Exception as e:
+            log(f"Afternoon scan batch error: {e}")
+
+    if not today_data:
+        log("Afternoon scan: no momentum stocks found")
+        return []
+
+    cands_symbols = list(today_data.keys())
+    avg_vols, atrs = _fetch_20d_avg_volumes(cands_symbols, target_date)
+
+    min_rvol = getattr(config, "AFTERNOON_MIN_RVOL", 2.0)
+    max_cands = getattr(config, "AFTERNOON_MAX_CANDIDATES", 5)
+    candidates = []
+    for sym, data in today_data.items():
+        avg_vol = avg_vols.get(sym, 0)
+        if avg_vol <= 0:
+            continue
+        rvol = data["volume"] / avg_vol
+        if rvol < min_rvol:
+            continue
+        data["rvol"] = rvol
+        data["atr"] = atrs.get(sym, 0)
+        candidates.append(data)
+
+    candidates.sort(key=lambda c: c["rvol"], reverse=True)
+    candidates = candidates[:max_cands]
+
+    log(f"Afternoon scan: {len(candidates)} momentum candidates")
+    for c in candidates:
+        log(f"  {c['symbol']}: +{c['gap_pct']:.1%}, RVOL={c['rvol']:.1f}×, ${c['close_price']:.2f}")
+    return candidates
+
+
+def check_momentum_entry(symbol, bars, min_volume=None):
+    """Check for momentum breakout: price + volume both rising (量价齐升)."""
+    if len(bars) < 6:
+        return 0.0, False, ""
+    if min_volume is None:
+        min_volume = config.RTG_MIN_VOLUME
+
+    aft_end = getattr(config, "AFTERNOON_ENTRY_END", "15:30")
+    aft_end_h, aft_end_m = (int(x) for x in aft_end.split(":"))
+    aft_entry_end = dt.time(aft_end_h, aft_end_m)
+
+    recent = bars[-6:-1]
+    current = bars[-1]
+
+    ts = current.get("timestamp")
+    if ts:
+        bar_time = ts.time() if isinstance(ts, dt.datetime) else (
+            ts.time() if hasattr(ts, "time") else None)
+        if bar_time and bar_time > aft_entry_end:
+            return 0.0, False, ""
+
+    up_count = sum(1 for b in recent if b["close"] > b["open"])
+    if up_count < 3:
+        return 0.0, False, ""
+
+    recent_vols = [b["volume"] for b in recent]
+    if recent_vols[-1] < recent_vols[0]:
+        return 0.0, False, ""
+
+    recent_high = max(b["high"] for b in recent)
+    if current["close"] <= recent_high:
+        return 0.0, False, ""
+
+    avg_vol = sum(recent_vols) / len(recent_vols)
+    if current["volume"] < avg_vol * 1.5 or current["volume"] < min_volume:
+        return 0.0, False, ""
+
+    entry = round(current["close"] * 1.001, 4)
+    return entry, True, "momentum"
+
+
 def run_trading_day(target_date):
     log(f"Starting trading day: {target_date.date()} (close {config.MARKET_CLOSE}, force_close {config.FORCE_CLOSE_TIME})")
     try:
@@ -1032,6 +1172,8 @@ def run_trading_day(target_date):
     _stop_exit_ts = {}  # symbol -> timestamp of stop_loss exit (cooldown)
     _sell_stuck_until = {}  # symbol -> timestamp until which sell retries are throttled
     _pending_sells = {}    # symbol -> {order_id, reason, submit_time} for async sell tracking
+    _last_afternoon_scan = 0  # timestamp of last afternoon momentum scan
+    _afternoon_candidates = []  # afternoon momentum candidates
 
     # Restore existing Alpaca positions (survive restart)
     try:
@@ -1500,6 +1642,95 @@ def run_trading_day(target_date):
                 live_bp -= fill_price * filled  # Track remaining buying power
                 log(f"ENTRY {sym} [{sig_label}] {filled}sh @ ${fill_price:.4f} "
                     f"[RVOL={rvol:.1f}× stop={stop_p:.1%}({stop_src}) tgt={target_p:.0%}]")
+
+        # ── Afternoon momentum entry ──────────────────────────────────────
+        if getattr(config, "AFTERNOON_SCAN_ENABLED", False) and len(positions) < config.MAX_POSITIONS:
+            _aft_start = dt.datetime.combine(target_date.date(), dt.time(10, 30), tzinfo=_EST)
+            _aft_end_str = getattr(config, "AFTERNOON_ENTRY_END", "15:30")
+            _aft_end_h, _aft_end_m = (int(x) for x in _aft_end_str.split(":"))
+            _aft_end = dt.datetime.combine(target_date.date(), dt.time(_aft_end_h, _aft_end_m), tzinfo=_EST)
+
+            if _aft_start <= now < _aft_end:
+                # Scan interval: 5 min before noon, 10 min after
+                _aft_interval = 300 if now.time() < dt.time(12, 0) else 600
+                if time.time() - _last_afternoon_scan >= _aft_interval:
+                    _afternoon_candidates = scan_afternoon_momentum(target_date)
+                    if _afternoon_candidates:
+                        _aft_syms = [c["symbol"] for c in _afternoon_candidates]
+                        backfill_1min_bars(_aft_syms, target_date)
+                        _all_syms = list(set(syms + _aft_syms))
+                        if set(_all_syms) != set(syms):
+                            restart_ws_stream(_all_syms)
+                            syms = _all_syms
+                    _last_afternoon_scan = time.time()
+
+                # Check momentum entry for afternoon candidates
+                for c in _afternoon_candidates:
+                    if len(positions) >= config.MAX_POSITIONS:
+                        break
+                    sym = c["symbol"]
+                    rvol = c.get("rvol", 0)
+                    if rvol < getattr(config, "AFTERNOON_MIN_RVOL", 2.0):
+                        continue
+                    if any(p.symbol == sym for p in positions):
+                        continue
+                    if sym in entry_checked or sym in EXCLUDE_SYMBOLS:
+                        continue
+                    if is_crypto_etf(sym):
+                        continue
+                    if (force_close_dt - now).total_seconds() < 20 * 60:
+                        continue
+                    bars_aft = _accumulator.get_1min_bars(sym)
+                    entry_price, confirmed, signal_type = check_momentum_entry(sym, bars_aft)
+                    if not confirmed or entry_price <= 0:
+                        continue
+                    # Sizing: full all-in when MAX_POSITIONS=1
+                    try:
+                        acct_live = trading_client.get_account()
+                        live_bp = float(acct_live.buying_power)
+                        equity = float(acct_live.equity)
+                    except Exception:
+                        live_bp = equity
+                    if config.MAX_POSITIONS <= 1:
+                        slot = max(config.MIN_POSITION_SIZE, equity)
+                    else:
+                        slot = max(config.MIN_POSITION_SIZE, equity)
+                    slot = min(slot, live_bp * 0.95)
+                    latest_bar = _accumulator.get_1min_bars(sym)
+                    sizing_price = latest_bar[-1]["close"] if latest_bar else entry_price
+                    shares = int(slot / sizing_price)
+                    if shares <= 0:
+                        continue
+                    order, _, reject = place_buy_market(sym, shares)
+                    if order is None:
+                        log(f"Afternoon entry rejected: {sym} - {reject}")
+                        continue
+                    filled, fill_price = wait_order_filled(str(order.id), timeout=15)
+                    if filled <= 0:
+                        entry_checked.add(sym)
+                        continue
+                    if fill_price <= 0:
+                        fill_price = entry_price
+                    # Afternoon stop/trail params
+                    atr_val = c.get("atr", 0)
+                    if atr_val > 0:
+                        stop_p, target_p, trail_act_p, trail_p = get_atr_stop_params(
+                            rvol, atr_val, fill_price, gap_pct=c.get("gap_pct", 0))
+                    else:
+                        stop_p = getattr(config, "AFTERNOON_STOP_PCT", 0.03)
+                        target_p = 0.0
+                        trail_act_p = getattr(config, "AFTERNOON_TRAIL_ACTIVATE_PCT", 0.01)
+                        trail_p = getattr(config, "AFTERNOON_TRAIL_PCT", 0.015)
+                    pos = Position(symbol=sym, shares=filled, entry_price=fill_price,
+                                   entry_ts=time.time(), open_price=c.get("open_price", fill_price),
+                                   gap_pct=c.get("gap_pct", 0), signal_type=signal_type, highest=fill_price,
+                                   rvol=rvol, atr=atr_val, stop_pct=stop_p, target_pct=target_p,
+                                   trail_activate_pct=trail_act_p, trail_pct=trail_p)
+                    positions.append(pos)
+                    entry_checked.add(sym)
+                    daily_trades += 1
+                    log(f"ENTRY {sym} [{signal_type}] {filled}sh @ ${fill_price:.4f} "
+                        f"[RVOL={rvol:.1f}× stop={stop_p:.0%} trail={trail_p:.1%}]")
 
         # WS health — restart if not running OR no bars for 60s
         # Add 30s cooldown between restarts to avoid tight loop

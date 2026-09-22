@@ -141,7 +141,8 @@ def bulk_scan_gaps(client, trading_days, symbols):
                         continue
                     prev_close = float(prev["close"])
                     open_price = float(curr["open"])
-                    volume = int(prev["volume"])
+                    prev_vol = int(prev["volume"])
+                    gap_day_vol = int(curr["volume"])
                     if prev_close <= 0:
                         continue
                     gap_pct = (open_price / prev_close) - 1.0
@@ -149,17 +150,17 @@ def bulk_scan_gaps(client, trading_days, symbols):
                         continue
                     if gap_pct > getattr(config, "GAP_MAX", 1.0):
                         continue
-                    if volume < config.MIN_VOLUME:
+                    if prev_vol < config.MIN_VOLUME:
                         continue
                     if not (config.PRICE_MIN <= open_price <= config.PRICE_MAX):
                         continue
-                    dollar_volume = prev_close * volume
+                    dollar_volume = prev_close * prev_vol
                     if dollar_volume < config.MIN_DOLLAR_VOLUME:
                         continue
                     lookback_start = max(0, i - config.RVOL_LOOKBACK_DAYS - 1)
                     prior_vols = [int(sym_df.iloc[j]["volume"]) for j in range(lookback_start, i)]
                     avg_vol_20d = sum(prior_vols) / len(prior_vols) if prior_vols else 0
-                    rvol = volume / avg_vol_20d if avg_vol_20d > 0 else 0
+                    rvol = gap_day_vol / avg_vol_20d if avg_vol_20d > 0 else 0
 
                     # Calculate 14-day ATR from pre-gap daily bars
                     atr_period = getattr(config, "ATR_PERIOD", 14)
@@ -183,7 +184,7 @@ def bulk_scan_gaps(client, trading_days, symbols):
                     symbol_data[symbol].append({
                         "date": curr_date, "open_price": open_price,
                         "prev_close": prev_close, "gap_pct": gap_pct,
-                        "volume": volume, "dollar_volume": dollar_volume,
+                        "volume": gap_day_vol, "dollar_volume": dollar_volume,
                         "rvol": rvol, "atr": atr,
                     })
             except (KeyError, IndexError):
@@ -202,7 +203,29 @@ def bulk_scan_gaps(client, trading_days, symbols):
         df_d = df_d.sort_values("rvol", ascending=False).reset_index(drop=True)
         results[d] = df_d
 
-    return results
+    # Afternoon momentum data: stocks with gain >= 2% and RVOL >= 2
+    aft_price_max = getattr(config, "AFTERNOON_PRICE_MAX", 200.0)
+    aft_min_gain = getattr(config, "AFTERNOON_MIN_GAIN_PCT", 0.02)
+    aft_min_rvol = getattr(config, "AFTERNOON_MIN_RVOL", 2.0)
+    aft_results = {}
+    for symbol, entries in symbol_data.items():
+        for entry in entries:
+            d = entry["date"]
+            gain_from_close = entry["gap_pct"]
+            open_price = entry["open_price"]
+            # Afternoon candidates: any stock with gain >= 2%, RVOL >= 2, price in range
+            # Use the gap data but relax the gap threshold for afternoon
+            if gain_from_close >= aft_min_gain and entry.get("rvol", 0) >= aft_min_rvol:
+                if d not in aft_results:
+                    aft_results[d] = []
+                aft_results[d].append({**entry, "symbol": symbol, "close_price": open_price * (1 + gain_from_close)})
+
+    for d in aft_results:
+        df_d = pd.DataFrame(aft_results[d])
+        df_d = df_d.sort_values("rvol", ascending=False).reset_index(drop=True)
+        aft_results[d] = df_d
+
+    return results, aft_results
 
 
 def get_1min_bars(client, symbol, date):
@@ -320,6 +343,64 @@ def find_rtg_entry_1min(bars_1m, open_price, min_volume=None):
     return 0.0, 0.0, -1, False, ""
 
 
+def find_momentum_entry_1min(bars_1m, min_volume=None):
+    """Afternoon momentum breakout: price + volume both rising (量价齐升).
+
+    Returns (entry_price, entry_bar_idx, confirmed, signal_type).
+    """
+    import datetime as _dt
+    if bars_1m.empty or len(bars_1m) < 6:
+        return 0.0, -1, False, ""
+    if min_volume is None:
+        min_volume = config.RTG_MIN_VOLUME
+
+    aft_end_str = getattr(config, "AFTERNOON_ENTRY_END", "15:30")
+    aft_end_h, aft_end_m = (int(x) for x in aft_end_str.split(":"))
+    aft_end_time = _dt.time(aft_end_h, aft_end_m)
+    aft_start_time = _dt.time(10, 30)
+
+    for i in range(5, len(bars_1m)):
+        idx_val = bars_1m.index[i]
+        ts = idx_val[1] if isinstance(idx_val, tuple) else idx_val
+        ts = pd.Timestamp(ts)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        ts = ts.tz_convert("America/New_York")
+        bar_time = ts.time()
+        if bar_time < aft_start_time or bar_time > aft_end_time:
+            continue
+
+        # Check last 5 bars
+        recent = [bars_1m.iloc[j] for j in range(i - 5, i)]
+        current = bars_1m.iloc[i]
+
+        # Up bars: at least 3 of 5
+        up_count = sum(1 for b in recent if float(b["close"]) > float(b["open"]))
+        if up_count < 3:
+            continue
+
+        # Volume increasing
+        vols = [int(b["volume"]) for b in recent]
+        if vols[-1] < vols[0]:
+            continue
+
+        # Breakout above recent high
+        recent_high = max(float(b["high"]) for b in recent)
+        if float(current["close"]) <= recent_high:
+            continue
+
+        # Volume confirmation
+        avg_vol = sum(vols) / len(vols)
+        cur_vol = int(current["volume"])
+        if cur_vol < avg_vol * 1.5 or cur_vol < min_volume:
+            continue
+
+        entry = round(float(current["close"]) * 1.001, 4)
+        return entry, i, True, "momentum"
+
+    return 0.0, -1, False, ""
+
+
 def _get_rvol_tier(rvol):
     rvol = min(rvol, getattr(config, "RVOL_SIZING_CAP", 10.0))
     tiers = getattr(config, "RVOL_SIZING_TIERS", [(10.0, 0.50), (5.0, 0.30), (0.0, 0.15)])
@@ -427,6 +508,7 @@ class OpenPosition:
         bar_high = float(bar["high"])
         bar_low = float(bar["low"])
         bar_close = float(bar["close"])
+        bar_open = float(bar["open"])
 
         if bar_high > self.highest:
             self.highest = bar_high
@@ -436,15 +518,21 @@ class OpenPosition:
             profit_pct = (self.highest - self.entry_price) / self.entry_price
             self.current_trail_pct = self._get_progressive_trail(profit_pct)
 
-        # 1. Hard stop
+        exit_slippage = getattr(config, "SLIPPAGE_EXIT_PCT", 0.0)
+
+        # 1. Hard stop (with gap-through model)
         if bar_low <= self.stop_price:
-            self.exit_price = self.stop_price
+            if bar_open < self.stop_price:
+                # Bar gapped through stop — fill at open (worst case)
+                self.exit_price = round(bar_open * (1 - exit_slippage), 4)
+            else:
+                self.exit_price = self.stop_price
             self.exit_reason = "stop_loss"
             self.exit_bar_idx = bar_idx
             self.closed = True
             return True
 
-        # 2. Trailing stop (with progressive tightening)
+        # 2. Trailing stop (with progressive tightening + gap-through model)
         if not self.trail_active and self.highest >= self.trail_activate:
             self.trail_active = True
             self.trail_stop = round(self.highest * (1 - self.current_trail_pct), 4)
@@ -453,7 +541,10 @@ class OpenPosition:
             if new_trail > self.trail_stop:
                 self.trail_stop = new_trail
             if bar_low <= self.trail_stop:
-                self.exit_price = self.trail_stop
+                if bar_open < self.trail_stop:
+                    self.exit_price = round(bar_open * (1 - exit_slippage), 4)
+                else:
+                    self.exit_price = self.trail_stop
                 self.exit_reason = "trail_stop"
                 self.exit_bar_idx = bar_idx
                 self.closed = True
@@ -471,7 +562,10 @@ class OpenPosition:
 
     def force_close(self, price, bar_idx, reason="force_close"):
         """Force close at given price (profit protect or EOD)."""
-        slippage = getattr(config, "SLIPPAGE_EXIT_PCT", 0.0)
+        if reason == "force_close":
+            slippage = getattr(config, "SLIPPAGE_FORCE_CLOSE_PCT", 0.01)
+        else:
+            slippage = getattr(config, "SLIPPAGE_EXIT_PCT", 0.0)
         if slippage > 0:
             price = round(price * (1 - slippage), 4)
         self.exit_price = price
@@ -489,7 +583,9 @@ class OpenPosition:
     def pnl(self):
         if not self.closed:
             return 0.0
-        return round((self.exit_price - self.entry_price) * self.shares, 2)
+        sale_proceeds = self.exit_price * self.shares
+        reg_fees = round(sale_proceeds * 0.000027 + self.shares * 0.000166, 4)
+        return round((self.exit_price - self.entry_price) * self.shares - reg_fees, 2)
 
     @property
     def pnl_pct(self):
@@ -521,8 +617,8 @@ def run_backtest(end_date=None, n_days=None):
         return []
 
     profit_protect = getattr(config, "DAILY_PROFIT_PROTECT_ENABLED", False)
-    profit_ratio = getattr(config, "DAILY_PROFIT_PROTECT_RATIO", 0.85)
-    profit_min = getattr(config, "DAILY_PROFIT_PROTECT_MIN", 5.0)
+    profit_ratio = getattr(config, "DAILY_PROFIT_PROTECT_RATIO", 0.90)
+    profit_min = getattr(config, "DAILY_PROFIT_PROTECT_MIN", 10.0)
     progressive_tiers = getattr(config, "PROGRESSIVE_TRAIL_TIERS", [])
 
     print(f"[rtg_2.0] Backtesting {len(trading_days)} trading days: "
@@ -564,10 +660,11 @@ def run_backtest(end_date=None, n_days=None):
     symbols = [s for s in symbols if not is_crypto_etf(s)]
     print(f"After crypto ETF filter: {len(symbols)} symbols")
 
-    print("\nBulk scanning for gaps (with RVOL)...")
-    gap_data = bulk_scan_gaps(client, trading_days, symbols)
+    print("\nBulk scanning for gaps (with RVOL + ATR)...")
+    gap_data, aft_data = bulk_scan_gaps(client, trading_days, symbols)
     total_candidates = sum(len(v) for v in gap_data.values())
-    print(f"Found {total_candidates} gap entries across {len(gap_data)} days")
+    total_aft = sum(len(v) for v in aft_data.values())
+    print(f"Found {total_candidates} gap entries + {total_aft} afternoon momentum entries across {len(gap_data)} days")
 
     all_trades = []
     equity = config.INITIAL_CAPITAL
@@ -575,30 +672,52 @@ def run_backtest(end_date=None, n_days=None):
 
     for date in trading_days:
         date_key = date.date()
-        if date_key not in gap_data or gap_data[date_key].empty:
+        has_gap = date_key in gap_data and not gap_data[date_key].empty
+        has_aft = getattr(config, "AFTERNOON_SCAN_ENABLED", False) and date_key in aft_data and not aft_data[date_key].empty
+        if not has_gap and not has_aft:
             continue
 
-        candidates = gap_data[date_key]
-        max_cands = getattr(config, "MAX_CANDIDATES", 5)
-        candidates = candidates.head(max_cands)
+        # Morning gap candidates
+        if has_gap:
+            candidates = gap_data[date_key]
+            max_cands = getattr(config, "MAX_CANDIDATES", 40)
+            candidates = candidates.head(max_cands)
+        else:
+            candidates = pd.DataFrame()
 
-        print(f"\n--- {date_key} ({len(candidates)} candidates by RVOL, equity: ${equity:,.2f}) ---")
-        for _, row in candidates.iterrows():
+        # Afternoon momentum candidates
+        if has_aft:
+            aft_cands = aft_data[date_key]
+            aft_max = getattr(config, "AFTERNOON_MAX_CANDIDATES", 5)
+            aft_cands = aft_cands.head(aft_max)
+        else:
+            aft_cands = pd.DataFrame()
+
+        n_gap = len(candidates) if not candidates.empty else 0
+        n_aft = len(aft_cands) if not aft_cands.empty else 0
+        print(f"\n--- {date_key} ({n_gap} gap + {n_aft} afternoon candidates, equity: ${equity:,.2f}) ---")
+        for _, row in (candidates.iterrows() if not candidates.empty else []):
             sym = row["symbol"]
             rvol = row.get("rvol", 0)
             gap_pct = row["gap_pct"]
             open_p = row["open_price"]
             atr_v = row.get("atr", 0)
             atr_str = f" ATR=${atr_v:.3f}" if atr_v > 0 else ""
-            print(f"  {sym} gap={gap_pct:+.1%} RVOL={rvol:.1f}× open=${open_p:.2f}{atr_str}")
+            print(f"  [GAP] {sym} gap={gap_pct:+.1%} RVOL={rvol:.1f}× open=${open_p:.2f}{atr_str}")
+        for _, row in (aft_cands.iterrows() if not aft_cands.empty else []):
+            sym = row["symbol"]
+            rvol = row.get("rvol", 0)
+            gain = row.get("gap_pct", 0)
+            cp = row.get("close_price", 0)
+            print(f"  [AFT] {sym} +{gain:.1%} RVOL={rvol:.1f}× ${cp:.2f}")
 
         # Pre-fetch all 1-min bars and find entry signals
         cached_bars = {}  # symbol -> bars_list
-        entry_info = {}   # symbol -> (entry_price, entry_bar_idx, signal_type)
+        entry_info = {}   # symbol -> (entry_at_open, entry_at_close, entry_bar_idx, signal_type, rvol, open_price, gap_pct)
         candidate_atrs = {}  # symbol -> atr
 
         tier_counts = {}
-        for _, r in candidates.iterrows():
+        for _, r in (candidates.iterrows() if not candidates.empty else []):
             rvol_r = r.get("rvol", 0)
             tier_key = _get_rvol_tier(rvol_r)[0]
             tier_counts[tier_key] = tier_counts.get(tier_key, 0) + 1
@@ -606,7 +725,8 @@ def run_backtest(end_date=None, n_days=None):
             if atr_v > 0:
                 candidate_atrs[r["symbol"]] = atr_v
 
-        for _, row in candidates.iterrows():
+        # ── Morning gap candidates: find RTG entry ──
+        for _, row in (candidates.iterrows() if not candidates.empty else []):
             symbol = row["symbol"]
             open_price = row["open_price"]
             rvol = row.get("rvol", 0)
@@ -628,9 +748,39 @@ def run_backtest(end_date=None, n_days=None):
             entry_at_open, entry_at_close, entry_bar_idx, confirmed, signal_type = find_rtg_entry_1min(
                 bars_1m, open_price, min_volume=min_vol)
             if confirmed and entry_at_open > 0:
-                entry_info[symbol] = (entry_at_open, entry_bar_idx, signal_type, rvol, open_price, abs(row.get("gap_pct", 0)))
+                entry_info[symbol] = (entry_at_open, entry_at_close, entry_bar_idx, signal_type, rvol, open_price, abs(row.get("gap_pct", 0)))
 
-        if not entry_info:
+        # ── Afternoon momentum candidates: find momentum entry ──
+        aft_entry_info = {}  # symbol -> (entry_price, entry_bar_idx, signal_type, rvol, open_price, gap_pct)
+        if not aft_cands.empty:
+            for _, row in aft_cands.iterrows():
+                symbol = row["symbol"]
+                if symbol in entry_info or symbol in cached_bars:
+                    continue
+                rvol = row.get("rvol", 0)
+                atr_v = row.get("atr", 0)
+                if atr_v > 0:
+                    candidate_atrs[symbol] = atr_v
+
+                bars_1m = get_1min_bars(client, symbol, date)
+                if bars_1m.empty or len(bars_1m) < 6:
+                    continue
+                bars_list = _bars_to_list(bars_1m)
+                cached_bars[symbol] = bars_list
+
+                min_vol = config.RTG_MIN_VOLUME
+                if rvol >= 10:
+                    min_vol = max(config.RTG_MIN_VOLUME // 3, 5000)
+                elif rvol >= 5:
+                    min_vol = max(config.RTG_MIN_VOLUME // 2, 10000)
+
+                entry_price, entry_bar_idx, confirmed, signal_type = find_momentum_entry_1min(
+                    bars_1m, min_volume=min_vol)
+                if confirmed and entry_price > 0:
+                    aft_entry_info[symbol] = (entry_price, entry_bar_idx, signal_type, rvol,
+                                              row.get("open_price", entry_price), row.get("gap_pct", 0))
+
+        if not entry_info and not aft_entry_info:
             continue
 
         # ── Bar-by-bar concurrent simulation ──
@@ -644,14 +794,14 @@ def run_backtest(end_date=None, n_days=None):
         profit_protect_triggered = False
 
         # Sort entries by bar index (earliest entry first for sizing)
-        sorted_entries = sorted(entry_info.items(), key=lambda x: x[1][1])
+        sorted_entries = sorted(entry_info.items(), key=lambda x: x[1][2])
 
         open_positions = []
         closed_trades = []
         entered_symbols = set()
         entry_slippage = getattr(config, "SLIPPAGE_ENTRY_PCT", 0.005)
 
-        for symbol, (entry_price, entry_bar_idx, signal_type, rvol, open_price, gap_p) in sorted_entries:
+        for symbol, (entry_at_open, entry_at_close, entry_bar_idx, signal_type, rvol, open_price, gap_p) in sorted_entries:
             if symbol in entered_symbols:
                 continue
             if len(entered_symbols) >= config.MAX_POSITIONS:
@@ -660,15 +810,65 @@ def run_backtest(end_date=None, n_days=None):
             same_tier = tier_counts.get(_get_rvol_tier(rvol)[0], 1)
             atr = candidate_atrs.get(symbol, 0)
             if atr > 0:
-                stop_p, target_p, trail_act_p, trail_p = get_atr_stop_params(rvol, atr, entry_price, gap_pct=gap_p)
+                stop_p, target_p, trail_act_p, trail_p = get_atr_stop_params(rvol, atr, entry_at_open, gap_pct=gap_p)
             else:
                 stop_p, target_p, trail_act_p, trail_p = get_rvol_exit_params(rvol)
 
             # Compounding: size based on current equity (start of day + realized P&L so far)
             current_equity = daily_start_equity + sum(p.pnl for p in closed_trades)
+            # Entry price = entry_at_open (RTG_ENTRY_AT_OPEN=True → open_price*1.001) + slippage
+            entry_price_actual = round(entry_at_open * (1 + entry_slippage), 4)
+            # Sizing price = entry_at_close (matches live: uses latest bar close for share count)
+            sizing_price = round(entry_at_close * (1 + entry_slippage), 4)
+            # Full all-in when MAX_POSITIONS=1, else RVOL-weighted sizing
+            if config.MAX_POSITIONS <= 1:
+                pos_size = max(config.MIN_POSITION_SIZE, current_equity)
+            else:
+                pos_size = get_rvol_sizing(rvol, current_equity, same_tier_count=same_tier)
+                pos_size = max(config.MIN_POSITION_SIZE, pos_size)
+            pos_size = min(pos_size, current_equity * 0.95)  # Cap to 95% of buying power
+            shares = int(pos_size / sizing_price)
+            if shares <= 0:
+                continue
+
+            pos = OpenPosition(
+                symbol=symbol, shares=shares, entry_price=entry_price_actual,
+                entry_bar_idx=entry_bar_idx, open_price=open_price, rvol=rvol,
+                atr=atr,
+                stop_pct=stop_p, target_pct=target_p,
+                trail_activate_pct=trail_act_p, trail_pct=trail_p,
+                signal_type=signal_type,
+            )
+            open_positions.append(pos)
+            entered_symbols.add(symbol)
+            entry_ts_str = _bar_ts_str(cached_bars[symbol], entry_bar_idx)
+            atr_str = f" ATR=${atr:.3f}" if atr > 0 else ""
+            print(f"  {symbol} [{signal_type}] entry=${entry_price_actual:.4f}@{entry_ts_str} "
+                  f"{shares}sh [RVOL={rvol:.1f}×{atr_str} stop={stop_p:.0%}]")
+
+        # ── Enter afternoon momentum positions ──
+        for symbol, (entry_price, entry_bar_idx, signal_type, rvol, open_price, gap_p) in aft_entry_info.items():
+            if symbol in entered_symbols:
+                continue
+            if len(entered_symbols) >= config.MAX_POSITIONS:
+                break
+            atr = candidate_atrs.get(symbol, 0)
+            if atr > 0:
+                stop_p, target_p, trail_act_p, trail_p = get_atr_stop_params(
+                    rvol, atr, entry_price, gap_pct=gap_p)
+            else:
+                stop_p = getattr(config, "AFTERNOON_STOP_PCT", 0.03)
+                target_p = 0.0
+                trail_act_p = getattr(config, "AFTERNOON_TRAIL_ACTIVATE_PCT", 0.01)
+                trail_p = getattr(config, "AFTERNOON_TRAIL_PCT", 0.015)
+
+            current_equity = daily_start_equity + sum(p.pnl for p in closed_trades)
             entry_price_actual = round(entry_price * (1 + entry_slippage), 4)
-            pos_size = get_rvol_sizing(rvol, current_equity, same_tier_count=same_tier)
-            pos_size = max(config.MIN_POSITION_SIZE, pos_size)
+            if config.MAX_POSITIONS <= 1:
+                pos_size = max(config.MIN_POSITION_SIZE, current_equity)
+            else:
+                pos_size = max(config.MIN_POSITION_SIZE, current_equity)
+            pos_size = min(pos_size, current_equity * 0.95)
             shares = int(pos_size / entry_price_actual)
             if shares <= 0:
                 continue
@@ -683,10 +883,14 @@ def run_backtest(end_date=None, n_days=None):
             )
             open_positions.append(pos)
             entered_symbols.add(symbol)
+            entry_ts_str = _bar_ts_str(cached_bars[symbol], entry_bar_idx)
+            print(f"  {symbol} [{signal_type}] entry=${entry_price_actual:.4f}@{entry_ts_str} "
+                  f"{shares}sh [RVOL={rvol:.1f}× stop={stop_p:.0%} trail={trail_p:.1%}]")
 
         # Build global bar timeline from all symbols' bars
         all_bar_times = {}  # timestamp -> {symbol: bar}
-        for symbol in entered_symbols:
+        all_tracked_symbols = set(entered_symbols) | set(cached_bars.keys())
+        for symbol in all_tracked_symbols:
             bars = cached_bars.get(symbol, [])
             for bar in bars:
                 ts = bar["timestamp"]
@@ -740,23 +944,43 @@ def run_backtest(end_date=None, n_days=None):
                 elapsed_sec = (ts - mkt_open_ts).total_seconds()
 
                 if elapsed_sec >= protect_delay and max_daily_pnl >= profit_min and total_pnl <= max_daily_pnl * profit_ratio:
-                    # Trigger profit protect: force close all open positions
-                    for p in open_positions:
-                        if not p.closed:
-                            bar = bars_this_min.get(p.symbol, {})
-                            if "close" in bar:
-                                p.force_close(bar["close"], bar_idx or 0, "profit_protect")
-                                closed_trades.append(p)
-                    profit_protect_triggered = True
+                    # Profit protect: close only declining positions (price <( prev bar close), keep rising
+                    print(f"  *** PROFIT PROTECT at {ts.strftime('%H:%M')}: "
+                          f"peak=${max_daily_pnl:+,.2f}, now=${total_pnl:+,.2f} ({total_pnl/max_daily_pnl:.0%}) ***")
+                    for p in open_positions[:]:
+                        if p.closed:
+                            continue
+                        bar = bars_this_min.get(p.symbol, {})
+                        if "close" not in bar:
+                            continue
+                        cur_price = bar["close"]
+                        # Check if price is declining: close < previous bar close
+                        bars = cached_bars.get(p.symbol, [])
+                        prev_price = cur_price
+                        for bi, b in enumerate(bars):
+                            if b["timestamp"] == ts and bi > 0:
+                                prev_price = bars[bi - 1]["close"]
+                                break
+                        price_declining = cur_price < prev_price
+                        if price_declining:
+                            p.force_close(cur_price, bar_idx or 0, "profit_protect")
+                            closed_trades.append(p)
+                            print(f"    Close {p.symbol} (declining), P&L=${p.pnl:+,.2f}")
+                    # Reset peak to current level — continue trading (NOT profit_protect_triggered=True)
                     daily_realized_pnl = sum(p.pnl for p in closed_trades)
-                    print(f"  *** PROFIT PROTECT triggered at {ts.strftime('%H:%M')}: "
-                          f"max_pnl=${max_daily_pnl:+,.2f}, cur_pnl=${total_pnl:+,.2f}, "
-                          f"ratio={total_pnl/max_daily_pnl:.0%} ***")
+                    # Recalculate current PnL after closes to reset peak
+                    new_unrealized = sum(
+                        (b["close"] - p.entry_price) * p.shares
+                        for p in open_positions if not p.closed
+                        for b in [bars_this_min.get(p.symbol, {})]
+                        if "close" in b
+                    )
+                    max_daily_pnl = daily_realized_pnl + new_unrealized
 
             # Check daily loss limit (compounding: recompute limit from current equity)
             realized_so_far = sum(p.pnl for p in closed_trades)
-            current_max_loss = (daily_start_equity + realized_so_far) * config.MAX_DAILY_LOSS_PCT
-            if current_max_loss > 0 and realized_so_far <= -current_max_loss:
+            # Fixed threshold (matches live: computed once from start-of-day equity)
+            if max_daily_loss > 0 and realized_so_far <= -max_daily_loss:
                 for p in open_positions:
                     if not p.closed:
                         bar = bars_this_min.get(p.symbol, {})
