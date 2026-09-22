@@ -1,7 +1,7 @@
 """Config — stonewang_daytrade_rtg_2.0: RTG + Profit Protection + Progressive Trailing.
 
 New rules vs rtg_1.0:
-  1. Daily profit protection: when today's profit drops to 70% of max profit reached, force close all
+  1. Daily profit protection: when today's profit drops to 90% of max profit reached, force close all
   2. Progressive trailing stop:
      - stock profit > 5%  -> trail = 1.5%
      - stock profit > 10% -> trail = 1%
@@ -9,6 +9,7 @@ New rules vs rtg_1.0:
   3. Gap-adaptive stop: stop width = max(ATR_stop, gap × 0.3), clamp 2%~8%
   4. No target price — exit managed entirely by trail + progressive trail
   5. vol_surge signal uses tighter stops than rtg signal
+  6. Full all-in on single best candidate (MAX_POSITIONS=1, all tiers 100%)
 """
 
 import os
@@ -59,9 +60,9 @@ VOLUME_SCAN_PRICE_MAX = 20.0    # same ceiling as gap scan
 # (rvol_min, equity_pct) — higher RVOL = bigger conviction = bigger size
 # Concentrate on A+ setups: top traders put 50%+ on the best idea
 RVOL_SIZING_TIERS = [
-    (10.0, 0.50),   # RVOL > 10× → 50% of equity (A+ setup, concentrated)
-    (5.0,  0.35),   # RVOL 5-10× → 35% of equity
-    (0.0,  0.20),   # RVOL < 5× → 20% of equity (marginal setup)
+    (10.0, 1.00),   # RVOL > 10× → 100% equity (full all-in)
+    (5.0,  1.00),   # RVOL 5-10× → 100% equity
+    (0.0,  1.00),   # RVOL < 5× → 100% equity
 ]
 RVOL_SIZING_CAP = 10.0        # Cap RVOL at 10× for sizing (intraday RVOL can be 1000×+)
 
@@ -96,7 +97,7 @@ RVOL_EXIT_TIERS = [
 
 # ── Daily profit protection (rtg_2.0) ──────────────────────────────────
 DAILY_PROFIT_PROTECT_ENABLED = True   # When today's profit drops to X% of max, force close all
-DAILY_PROFIT_PROTECT_RATIO = 0.70    # 70% — allow 30% drawdown from peak profit
+DAILY_PROFIT_PROTECT_RATIO = 0.90    # 90% — allow 10% drawdown from peak profit
 DAILY_PROFIT_PROTECT_MIN = 10.0      # Only activate when max profit >= $10
 DAILY_PROFIT_PROTECT_DELAY_SEC = 1800  # Don't activate until 30 min after market open
 
@@ -144,7 +145,7 @@ RTG_TRAIL_PCT = 0.02          # 2% trailing stop
 INITIAL_CAPITAL = 306.24      # Account equity (updated 2026-09-02)
 MIN_POSITION_SIZE = 40        # Min $40 per position (fractional shares)
 MAX_POSITION_SIZE = 9999      # No hard cap — RVOL tiers control sizing
-MAX_POSITIONS = 4             # Max 4 concurrent positions — concentrate capital
+MAX_POSITIONS = 1             # Single stock, full all-in
 EXCLUDE_SYMBOLS = {"AEI", "LITZ", "VOGX", "WEAV"}  # Managed by external OCO orders
 MAX_DAILY_TRADES = 0          # 0 = no limit
 MAX_DAILY_LOSS_PCT = 0.04     # 4% daily loss circuit breaker (tighter)

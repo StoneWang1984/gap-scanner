@@ -1192,48 +1192,64 @@ def run_trading_day(target_date):
                 state["daily_stopped"] = True
                 break
 
-        # Daily profit protection (rtg_2.0): force close when profit drops to 70% of max
-        if getattr(config, "DAILY_PROFIT_PROTECT_ENABLED", False) and positions:
-            # Delay activation — don't trigger in the first 30 min after open
+        # Daily profit protection: close declining positions when profit drops below ratio of peak
+        # Keep positions where price is still rising (profit increasing or loss recovering)
+        # Does NOT stop trading — resets peak and continues
+        if getattr(config, "DAILY_PROFIT_PROTECT_ENABLED", False):
             protect_delay = getattr(config, "DAILY_PROFIT_PROTECT_DELAY_SEC", 1800)
             mkt_open_ts = dt.datetime.combine(target_date.date(), _parse_time(config.MARKET_OPEN), tzinfo=_EST)
-            if (now - mkt_open_ts).total_seconds() < protect_delay:
-                # Still in delay window — only track max profit, don't protect
-                current_profit = daily_loss
-                for pos in positions:
-                    bars = _accumulator.get_1min_bars(pos.symbol)
-                    if bars:
-                        cur = float(bars[-1]["close"])
-                        current_profit += (cur - pos.entry_price) * pos.shares
-                if current_profit > max_daily_profit:
-                    max_daily_profit = current_profit
-            else:
-                # Calculate current total profit (realized + unrealized)
-                current_profit = daily_loss  # daily_loss is negative for losses, positive for wins
-                for pos in positions:
-                    bars = _accumulator.get_1min_bars(pos.symbol)
-                    if bars:
-                        cur = float(bars[-1]["close"])
-                        current_profit += (cur - pos.entry_price) * pos.shares
-                if current_profit > max_daily_profit:
-                    max_daily_profit = current_profit
+            # Calculate current total profit (realized + unrealized)
+            current_profit = daily_loss
+            for pos in positions:
+                bars = _accumulator.get_1min_bars(pos.symbol)
+                if bars:
+                    cur = float(bars[-1]["close"])
+                    current_profit += (cur - pos.entry_price) * pos.shares
+            if current_profit > max_daily_profit:
+                max_daily_profit = current_profit
+            # Only activate after delay window
+            if (now - mkt_open_ts).total_seconds() >= protect_delay:
                 protect_min = getattr(config, "DAILY_PROFIT_PROTECT_MIN", 10.0)
-                if max_daily_profit >= protect_min and current_profit < max_daily_profit * config.DAILY_PROFIT_PROTECT_RATIO:
-                    log(f"Profit protection! Max profit was ${max_daily_profit:+,.2f}, now ${current_profit:+,.2f} < {config.DAILY_PROFIT_PROTECT_RATIO:.0%}")
+                protect_ratio = getattr(config, "DAILY_PROFIT_PROTECT_RATIO", 0.90)
+                if max_daily_profit >= protect_min and current_profit < max_daily_profit * protect_ratio:
+                    log(f"Profit protection! Peak ${max_daily_profit:+,.2f}, now ${current_profit:+,.2f} < {protect_ratio:.0%}")
                     for pos in positions[:]:
-                        sold, fill = force_sell_position(pos.symbol, pos.shares)
-                        if sold > 0:
-                            pnl = (fill - pos.entry_price) * sold
-                            trades_detail.append({"symbol": pos.symbol, "entry": pos.entry_price, "exit": fill,
-                                                  "shares": sold, "pnl": round(pnl, 2), "reason": "profit_protect",
-                                                  "trade_type": pos.signal_type})
-                            daily_loss += pnl
-                            daily_trades += 1
-                            positions.remove(pos)
-                            _last_exit_ts[pos.symbol] = time.time()
-                            log(f"Profit protect close {pos.symbol}, P&L=${pnl:+,.2f}")
-                    state["daily_stopped"] = True
-                    break
+                        bars = _accumulator.get_1min_bars(pos.symbol)
+                        cur_price = float(bars[-1]["close"]) if bars else pos.entry_price
+                        # Check price direction: price declining → close; price rising/flat → keep
+                        price_declining = True
+                        if bars and len(bars) >= 2:
+                            prev_close = float(bars[-2]["close"])
+                            price_declining = cur_price < prev_close
+                        elif cur_price >= pos.entry_price:
+                            price_declining = False
+                        if price_declining:
+                            sold, fill = force_sell_position(pos.symbol, pos.shares)
+                            if sold > 0:
+                                if fill <= 0:
+                                    fill = cur_price
+                                pnl = (fill - pos.entry_price) * sold
+                                trades_detail.append({"symbol": pos.symbol, "entry": pos.entry_price, "exit": fill,
+                                                      "shares": sold, "pnl": round(pnl, 2), "reason": "profit_protect",
+                                                      "trade_type": pos.signal_type})
+                                daily_loss += pnl
+                                daily_trades += 1
+                                positions.remove(pos)
+                                _last_exit_ts[pos.symbol] = time.time()
+                                log(f"Profit protect close {pos.symbol} (price declining), P&L=${pnl:+,.2f}")
+                            else:
+                                log(f"Profit protect: {pos.symbol} not found at Alpaca, removing from tracker (desync)")
+                                positions.remove(pos)
+                                entry_checked.discard(pos.symbol)
+                        else:
+                            log(f"Profit protect keep {pos.symbol} (price rising), unrealized=${(cur_price - pos.entry_price) * pos.shares:+,.2f}")
+                    # Reset peak to current level — new trades build a fresh peak
+                    max_daily_profit = daily_loss
+                    for pos in positions:
+                        bars = _accumulator.get_1min_bars(pos.symbol)
+                        if bars:
+                            max_daily_profit += (float(bars[-1]["close"]) - pos.entry_price) * pos.shares
+                    log(f"Peak reset to ${max_daily_profit:+,.2f} — continuing trading")
 
         # Exit monitoring
         # Check pending async sells from previous iterations
@@ -1435,9 +1451,12 @@ def run_trading_day(target_date):
                         day_high = max(b["high"] for b in bars)
                         if entry_price > day_high * (1 - min_pullback):
                             continue
-                # RVOL-weighted sizing, split evenly among same-tier candidates
-                same_tier = tier_counts.get(_get_rvol_tier(rvol)[0], 1)
-                slot = max(config.MIN_POSITION_SIZE, get_rvol_sizing(rvol, equity, same_tier_count=same_tier))
+                # Position sizing: full all-in when MAX_POSITIONS=1
+                if config.MAX_POSITIONS <= 1:
+                    slot = max(config.MIN_POSITION_SIZE, equity)
+                else:
+                    same_tier = tier_counts.get(_get_rvol_tier(rvol)[0], 1)
+                    slot = max(config.MIN_POSITION_SIZE, get_rvol_sizing(rvol, equity, same_tier_count=same_tier))
                 slot = min(slot, live_bp * 0.95)  # Cap to 95% of buying power
                 # Use latest market price for sizing (not open_price which underestimates cost)
                 latest_bar = _accumulator.get_1min_bars(sym)
