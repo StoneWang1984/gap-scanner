@@ -1,11 +1,13 @@
 """stonewang_daytrade_rtg_2.0 — RTG + Profit Protection + Progressive Trailing.
 
 New rules vs rtg_1.0:
-  1. Daily profit protection: when today's profit drops to 85% of max, force close all
+  1. Daily profit protection: when today's profit drops to 90% of max, close declining only
   2. Progressive trailing stop:
-     - stock profit > 5%  -> trail = 1.5%
-     - stock profit > 10% -> trail = 1%
-     - stock profit > 15% -> trail = 0.5%
+     - stock profit > 2.5% -> trail = 1.5%
+     - stock profit > 5%   -> trail = 1.2%
+     - stock profit > 7.5% -> trail = 1%
+     - stock profit > 10%  -> trail = 0.5%
+     - stock profit > 15%  -> sell immediately
 """
 
 import re

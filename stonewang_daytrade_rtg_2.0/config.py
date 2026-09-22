@@ -3,9 +3,11 @@
 New rules vs rtg_1.0:
   1. Daily profit protection: when today's profit drops to 90% of max profit reached, force close all
   2. Progressive trailing stop:
-     - stock profit > 5%  -> trail = 1.5%
-     - stock profit > 10% -> trail = 1%
-     - stock profit > 15% -> trail = 0.5%
+     - stock profit > 2.5% -> trail = 1.5%
+     - stock profit > 5%   -> trail = 1.2%
+     - stock profit > 7.5% -> trail = 1%
+     - stock profit > 10%  -> trail = 0.5%
+     - stock profit > 15%  -> sell immediately
   3. Gap-adaptive stop: stop width = max(ATR_stop, gap × 0.3), clamp 2%~8%
   4. No target price — exit managed entirely by trail + progressive trail
   5. vol_surge signal uses tighter stops than rtg signal
@@ -104,9 +106,11 @@ DAILY_PROFIT_PROTECT_DELAY_SEC = 1800  # Don't activate until 30 min after marke
 # ── Progressive trailing stop (rtg_2.0) ────────────────────────────────
 # As stock profit grows, tighten trailing stop to lock in gains
 PROGRESSIVE_TRAIL_TIERS = [
-    (0.15, 0.005),  # profit > 15% -> trail = 0.5%
-    (0.10, 0.010),  # profit > 10% -> trail = 1%
-    (0.05, 0.015),  # profit > 5%  -> trail = 1.5%
+    (0.15, 0.000),  # profit > 15% -> sell immediately
+    (0.10, 0.005),  # profit > 10% -> trail = 0.5%
+    (0.075, 0.010), # profit > 7.5% -> trail = 1%
+    (0.05, 0.012),  # profit > 5%  -> trail = 1.2%
+    (0.025, 0.015), # profit > 2.5% -> trail = 1.5%
 ]
 
 # ── Afternoon momentum scan (from rtg_7.0) ─────────────────────────────
