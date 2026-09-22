@@ -596,7 +596,11 @@ def _fetch_20d_avg_volumes(symbols, target_date):
 
 def scan_gaps(target_date):
     log(f"Scanning for gap stocks on {target_date.date()}...")
-    symbols = get_tradable_symbols()
+    try:
+        symbols = get_tradable_symbols()
+    except Exception as e:
+        log(f"Gap scan: get_tradable_symbols failed: {e}")
+        return []
     symbols = [s for s in symbols if not is_leveraged_etf(s)]
     log(f"After leveraged ETF filter: {len(symbols)} symbols")
 
@@ -967,7 +971,11 @@ def _parse_time(t_str):
 def scan_afternoon_momentum(target_date):
     """Scan for afternoon momentum: stocks with rising price + volume."""
     log(f"Scanning for afternoon momentum stocks...")
-    symbols = get_tradable_symbols()
+    try:
+        symbols = get_tradable_symbols()
+    except Exception as e:
+        log(f"Afternoon scan: get_tradable_symbols failed: {e}")
+        return []
     symbols = [s for s in symbols if not is_leveraged_etf(s)]
     symbols = [s for s in symbols if not is_crypto_etf(s)]
     if EXCLUDE_SYMBOLS:
@@ -1497,7 +1505,7 @@ def run_trading_day(target_date):
                 log(f"SELL stuck for {pos.symbol} (locked shares), throttling 60s")
                 continue
 
-        # Entry monitoring
+        # Entry monitoring — Morning RTG (09:30-10:30)
         if entry_start_dt <= now < entry_end_dt and len(positions) < config.MAX_POSITIONS:
             # Read live buying power from Alpaca before sizing
             live_bp = 0
@@ -1522,6 +1530,9 @@ def run_trading_day(target_date):
                 sym = c["symbol"]
                 rvol = c.get("rvol", 0)
                 if any(p.symbol == sym for p in positions):
+                    continue
+                # Skip volume surge candidates here — handled in all-day block below
+                if c.get("rel_vol_ratio", 0) >= getattr(config, "VOLUME_SCAN_MIN_REL_VOL_RATIO", 3.0):
                     continue
                 # Re-entry checks — Cam Connor: the opening drive is your only edge
                 is_reentry = sym in _last_exit_ts
@@ -1556,37 +1567,14 @@ def run_trading_day(target_date):
                     break
                 open_price = c["open_price"]
                 bars = _accumulator.get_1min_bars(sym)
-                # Volume scan candidates: skip RTG check — 5min vol surge IS the signal
-                if c.get("rel_vol_ratio", 0) >= getattr(config, "VOLUME_SCAN_MIN_REL_VOL_RATIO", 3.0):
-                    # Momentum confirmation: require close > open * 1.005 (min 0.5% gain)
-                    if bars and bars[-1]["close"] > 0:
-                        entry_price = bars[-1]["close"]
-                        if entry_price <= open_price * 1.005:
-                            continue  # Insufficient momentum
-                        entry_price = bars[-1]["close"]
-                        confirmed = True
-                        signal_type = "vol_surge"
-                    else:
-                        # Fallback to snapshot price
-                        try:
-                            from alpaca.data.requests import StockLatestTradeRequest
-                            req = StockLatestTradeRequest(symbol_or_symbols=[sym],
-                                                          feed=getattr(config, "DATA_FEED_OBJ", DataFeed.SIP))
-                            trade = data_client.get_stock_latest_trade(req)
-                            entry_price = float(trade[sym].price) if sym in trade else 0
-                        except Exception:
-                            entry_price = 0
-                        confirmed = entry_price > 0
-                        signal_type = "vol_surge"
-                else:
-                    # Gap scan candidate: wait for RTG signal
-                    # RVOL-adaptive min volume: high RVOL relaxes liquidity floor
-                    min_vol = config.RTG_MIN_VOLUME
-                    if rvol >= 10:
-                        min_vol = max(config.RTG_MIN_VOLUME // 3, 5000)
-                    elif rvol >= 5:
-                        min_vol = max(config.RTG_MIN_VOLUME // 2, 10000)
-                    entry_price, confirmed, signal_type = check_rtg_entry(sym, open_price, bars, after_time=after_time, min_volume=min_vol)
+                # Gap scan candidate: wait for RTG signal
+                # RVOL-adaptive min volume: high RVOL relaxes liquidity floor
+                min_vol = config.RTG_MIN_VOLUME
+                if rvol >= 10:
+                    min_vol = max(config.RTG_MIN_VOLUME // 3, 5000)
+                elif rvol >= 5:
+                    min_vol = max(config.RTG_MIN_VOLUME // 2, 10000)
+                entry_price, confirmed, signal_type = check_rtg_entry(sym, open_price, bars, after_time=after_time, min_volume=min_vol)
                 if not confirmed or entry_price <= 0:
                     continue
                 # Re-entry price guards (after RTG signal confirmed)
@@ -1651,6 +1639,93 @@ def run_trading_day(target_date):
                 log(f"ENTRY {sym} [{sig_label}] {filled}sh @ ${fill_price:.4f} "
                     f"[RVOL={rvol:.1f}× stop={stop_p:.1%}({stop_src}) tgt={target_p:.0%}]")
 
+        # Entry monitoring — All-day volume surge (09:30 until AFTERNOON_ENTRY_END)
+        # Volume surge candidates (5min vol ratio >= 3x) can enter any time during market hours
+        _vol_entry_end_str = getattr(config, "AFTERNOON_ENTRY_END", "15:30")
+        _vol_entry_end_h, _vol_entry_end_m = (int(x) for x in _vol_entry_end_str.split(":"))
+        _vol_entry_end_dt = dt.datetime.combine(target_date.date(), dt.time(_vol_entry_end_h, _vol_entry_end_m), tzinfo=_EST)
+        if entry_start_dt <= now < _vol_entry_end_dt and len(positions) < config.MAX_POSITIONS:
+            # Read live buying power
+            live_bp = 0
+            try:
+                acct_live = trading_client.get_account()
+                live_bp = float(acct_live.buying_power)
+                equity = float(acct_live.equity)
+            except Exception:
+                live_bp = equity
+
+            for c in candidates:
+                if len(positions) >= config.MAX_POSITIONS:
+                    break
+                sym = c["symbol"]
+                rvol = c.get("rvol", 0)
+                # Only handle volume surge candidates here
+                if c.get("rel_vol_ratio", 0) < getattr(config, "VOLUME_SCAN_MIN_REL_VOL_RATIO", 3.0):
+                    continue
+                if any(p.symbol == sym for p in positions):
+                    continue
+                if sym in entry_checked or sym in EXCLUDE_SYMBOLS or sym in entry_halted:
+                    continue
+                if is_crypto_etf(sym):
+                    continue
+                if config.MAX_DAILY_TRADES > 0 and daily_trades >= config.MAX_DAILY_TRADES:
+                    break
+                if max_daily_loss > 0 and daily_loss <= -max_daily_loss:
+                    break
+                open_price = c["open_price"]
+                bars = _accumulator.get_1min_bars(sym)
+                if not bars or bars[-1]["close"] <= 0:
+                    continue
+                entry_price = bars[-1]["close"]
+                # Momentum confirmation: close > open * 1.005
+                if entry_price <= open_price * 1.005:
+                    continue
+                confirmed = True
+                signal_type = "vol_surge"
+                # Position sizing
+                if config.MAX_POSITIONS <= 1:
+                    slot = max(config.MIN_POSITION_SIZE, equity)
+                else:
+                    same_tier = 1
+                    slot = max(config.MIN_POSITION_SIZE, get_rvol_sizing(rvol, equity, same_tier_count=same_tier))
+                slot = min(slot, live_bp * 0.95)
+                sizing_price = entry_price
+                shares = int(slot / sizing_price)
+                if shares <= 0:
+                    continue
+                order, _, reject = place_buy_market(sym, shares)
+                if order is None:
+                    log(f"Vol surge entry rejected: {sym} - {reject}")
+                    if "trading halt" in str(reject).lower():
+                        entry_halted.add(sym)
+                    continue
+                filled, fill_price = wait_order_filled(str(order.id), timeout=15)
+                if filled <= 0:
+                    entry_checked.add(sym)
+                    continue
+                if fill_price <= 0:
+                    fill_price = entry_price
+                atr = c.get("atr", 0)
+                if atr > 0:
+                    stop_p, target_p, trail_act_p, trail_p = get_atr_stop_params(
+                        rvol, atr, fill_price, gap_pct=abs(c.get("gap_pct", 0)), signal_type="vol_surge")
+                    stop_src = f"ATR=${atr:.3f}"
+                else:
+                    stop_p, target_p, trail_act_p, trail_p = get_rvol_exit_params(rvol)
+                    stop_src = "RVOL"
+                pos = Position(symbol=sym, shares=filled, entry_price=fill_price,
+                               entry_ts=time.time(), open_price=open_price,
+                               gap_pct=c.get("gap_pct", 0), signal_type=signal_type, highest=fill_price,
+                               rvol=rvol, atr=atr, stop_pct=stop_p, target_pct=target_p,
+                               trail_activate_pct=trail_act_p, trail_pct=trail_p)
+                positions.append(pos)
+                entry_checked.add(sym)
+                entry_count[sym] = entry_count.get(sym, 0) + 1
+                daily_trades += 1
+                live_bp -= fill_price * filled
+                log(f"ENTRY {sym} [{signal_type}] {filled}sh @ ${fill_price:.4f} "
+                    f"[RVOL={rvol:.1f}× stop={stop_p:.1%}({stop_src}) tgt={target_p:.0%}]")
+
         # ── Afternoon momentum entry ──────────────────────────────────────
         if getattr(config, "AFTERNOON_SCAN_ENABLED", False) and len(positions) < config.MAX_POSITIONS:
             _aft_start = dt.datetime.combine(target_date.date(), dt.time(10, 30), tzinfo=_EST)
@@ -1662,7 +1737,11 @@ def run_trading_day(target_date):
                 # Scan interval: 5 min before noon, 10 min after
                 _aft_interval = 300 if now.time() < dt.time(12, 0) else 600
                 if time.time() - _last_afternoon_scan >= _aft_interval:
-                    _afternoon_candidates = scan_afternoon_momentum(target_date)
+                    try:
+                        _afternoon_candidates = scan_afternoon_momentum(target_date)
+                    except Exception as e:
+                        log(f"Afternoon momentum scan error (non-fatal): {e}")
+                        _afternoon_candidates = []
                     if _afternoon_candidates:
                         _aft_syms = [c["symbol"] for c in _afternoon_candidates]
                         backfill_1min_bars(_aft_syms, target_date)
