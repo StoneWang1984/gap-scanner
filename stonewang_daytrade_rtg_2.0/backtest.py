@@ -936,7 +936,7 @@ def run_backtest(end_date=None, n_days=None):
                 print(f"  Daily loss ${realized_so_far:,.2f} exceeded limit, stopping")
                 break
 
-            # ── Bar-by-bar entry: RTG instant (after position exits) ──
+            # ── Bar-by-bar entry: RTG (after position exits, buy immediately) ──
             n_open = sum(1 for p in open_positions if not p.closed)
             if n_open < config.MAX_POSITIONS and daily_trade_count > 0:
                 bar_time = ts.time() if hasattr(ts, 'time') else None
@@ -962,11 +962,22 @@ def run_backtest(end_date=None, n_days=None):
                             min_vol = max(config.RTG_MIN_VOLUME // 3, 5000)
                         elif rvol >= 5:
                             min_vol = max(config.RTG_MIN_VOLUME // 2, 10000)
-                        entry_at_open, entry_at_close, entry_bar_idx, confirmed, signal_type = find_rtg_entry_instant_1min(
+                        entry_at_open, entry_at_close, entry_bar_idx, confirmed, signal_type = find_rtg_entry_1min(
                             bars_1m_sym, row["open_price"], min_volume=min_vol)
                         if not confirmed or entry_at_open <= 0:
                             continue
-                        # Enter RTG (instant)
+                        # Stale signal guard: current price must still be above open_price
+                        cur_bar_idx = None
+                        bars = cached_bars[sym]
+                        for bi, b in enumerate(bars):
+                            if b["timestamp"] == ts:
+                                cur_bar_idx = bi
+                                break
+                        if cur_bar_idx is not None and bars[cur_bar_idx]["close"] < row["open_price"]:
+                            continue
+                        if not confirmed or entry_at_open <= 0:
+                            continue
+                        # Enter RTG (found signal, buy immediately)
                         current_equity = daily_start_equity + sum(p.pnl for p in closed_trades)
                         entry_price_actual = round(entry_at_open * (1 + entry_slippage), 4)
                         sizing_price = round(entry_at_close * (1 + entry_slippage), 4)

@@ -1592,13 +1592,12 @@ def run_trading_day(target_date):
                     min_vol = max(config.RTG_MIN_VOLUME // 3, 5000)
                 elif rvol >= 5:
                     min_vol = max(config.RTG_MIN_VOLUME // 2, 10000)
-                # First entry of the day: full scan (original behavior)
-                # Subsequent entries: instant check only (no stale signals)
-                if daily_trades == 0:
-                    entry_price, confirmed, signal_type = check_rtg_entry(sym, open_price, bars, after_time=after_time, min_volume=min_vol)
-                else:
-                    entry_price, confirmed, signal_type = check_rtg_entry_instant(sym, open_price, bars, min_volume=min_vol)
+                entry_price, confirmed, signal_type = check_rtg_entry(sym, open_price, bars, after_time=after_time, min_volume=min_vol)
                 if not confirmed or entry_price <= 0:
+                    continue
+                # Stale signal guard: current price must still be above open_price
+                # (prevents buying on old RTG signals where price has dropped back below open)
+                if bars and bars[-1]["close"] < open_price:
                     continue
                 # Re-entry price guards (after RTG signal confirmed)
                 if is_reentry:
