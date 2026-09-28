@@ -8,6 +8,8 @@ Key differences from rtg_1.0 backtest:
 
 Entry detection (1-min bars):
   Signal A (Red-to-Green):
+    - First entry: full scan from open (find any RTG since market open)
+    - Subsequent entries: instant check (last 3 bars only — fresh signals)
     - bar[i].close > open_price (crossed back above open)
     - bar[i].volume >= RTG_VOLUME_MULT × bar[i-1].volume (volume spike)
     - bar[i].volume >= RTG_MIN_VOLUME (liquidity floor)
@@ -962,19 +964,9 @@ def run_backtest(end_date=None, n_days=None):
                             min_vol = max(config.RTG_MIN_VOLUME // 3, 5000)
                         elif rvol >= 5:
                             min_vol = max(config.RTG_MIN_VOLUME // 2, 10000)
-                        entry_at_open, entry_at_close, entry_bar_idx, confirmed, signal_type = find_rtg_entry_1min(
+                        # After first trade: use instant check (last 3 bars only — fresh RTG signals)
+                        entry_at_open, entry_at_close, entry_bar_idx, confirmed, signal_type = find_rtg_entry_instant_1min(
                             bars_1m_sym, row["open_price"], min_volume=min_vol)
-                        if not confirmed or entry_at_open <= 0:
-                            continue
-                        # Stale signal guard: current price must still be above open_price
-                        cur_bar_idx = None
-                        bars = cached_bars[sym]
-                        for bi, b in enumerate(bars):
-                            if b["timestamp"] == ts:
-                                cur_bar_idx = bi
-                                break
-                        if cur_bar_idx is not None and bars[cur_bar_idx]["close"] < row["open_price"]:
-                            continue
                         if not confirmed or entry_at_open <= 0:
                             continue
                         # Enter RTG (found signal, buy immediately)

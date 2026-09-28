@@ -231,8 +231,8 @@ elif tab == "策略概览":
         st.markdown(f"""
         - **RTG** (Red-to-Green): close > open_price + 量能 ≥ {config.RTG_VOLUME_MULT}× 前bar + ≥ {config.RTG_MIN_VOLUME:,}股
         - 全天窗口: **{config.ENTRY_WINDOW_START} ~ {config.ENTRY_WINDOW_END} EST**
-        - 首笔入场: 扫描全部bar找RTG信号
-        - 后续入场: 只检查最近3根bar (即时扫描, 无排队)
+        - **首笔入场**: 全量扫描 (从开盘到当前bar找RTG信号) + 过时保护 (当前价>开盘价)
+        - **后续入场**: 即时扫描 (只看最近3根bar, 检测新鲜RTG信号, 无需>开盘价)
         """)
 
         st.subheader("仓位管理")
