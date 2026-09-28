@@ -963,6 +963,47 @@ def check_rtg_entry(symbol, open_price, bars, after_time=None, min_volume=None):
     return 0.0, False, ""
 
 
+def check_rtg_entry_instant(symbol, open_price, bars, min_volume=None):
+    """Check if the latest bar(s) meet RTG conditions RIGHT NOW. No stale signals.
+
+    Only examines the last 3 bars — if a signal appeared >3 minutes ago
+    and conditions no longer hold, it won't be found. This prevents
+    buying on old RTG signals after the momentum has faded.
+    """
+    if len(bars) < 2:
+        return 0.0, False, ""
+    if min_volume is None:
+        min_volume = config.RTG_MIN_VOLUME
+    ew_start_h, ew_start_m = (int(x) for x in config.ENTRY_WINDOW_START.split(":"))
+    ew_end_h, ew_end_m = (int(x) for x in config.ENTRY_WINDOW_END.split(":"))
+    entry_start = dt.time(ew_start_h, ew_start_m)
+    entry_end = dt.time(ew_end_h, ew_end_m)
+    # Only check last 3 bars — fresh signals only
+    start_idx = max(1, len(bars) - 3)
+    for i in range(start_idx, len(bars)):
+        bar = bars[i]
+        prev = bars[i - 1]
+        ts = bar.get("timestamp")
+        if ts is None:
+            continue
+        bar_time = ts.time() if isinstance(ts, dt.datetime) else (ts.time() if hasattr(ts, "time") else None)
+        if bar_time is None or not (entry_start <= bar_time <= entry_end):
+            continue
+        bc = bar["close"]
+        bv = bar["volume"]
+        pv = prev["volume"]
+        if bc > open_price and pv > 0 and bv >= config.RTG_VOLUME_MULT * pv and bv >= min_volume:
+            entry = round(open_price * 1.001, 4) if getattr(config, "RTG_ENTRY_AT_OPEN", True) else round(bc, 4)
+            return entry, True, "rtg"
+        ph = prev["high"]
+        po = prev["open"]
+        pc = prev["close"]
+        bh = bar["high"]
+        if pc > po and pv >= config.GAPGO_MIN_FIRST_BAR_VOL and bh > ph and bv >= config.GAPGO_MIN_BREAKOUT_VOL:
+            return round(ph, 4), True, "gapgo"
+    return 0.0, False, ""
+
+
 def _parse_time(t_str):
     h, m = (int(x) for x in t_str.split(":"))
     return dt.time(h, m)
@@ -1135,22 +1176,11 @@ def run_trading_day(target_date):
         pass
 
     candidates = []
-    # Use volume breakout scan if restarting during market hours
     now_est = dt.datetime.now(_EST)
     market_open_time = dt.datetime.combine(target_date.date(), dt.time(9, 30), tzinfo=_EST)
     if now_est >= market_open_time:
-        log("Midday restart detected — running gap scan + volume breakout scan")
-        gap_candidates = scan_gaps(target_date)
-        volume_candidates = scan_volume_breakouts(target_date, existing_symbols=set())
-        # Merge: gap candidates first (RTG priority), then volume candidates
-        seen = set(c["symbol"] for c in gap_candidates)
-        for vc in volume_candidates:
-            if vc["symbol"] not in seen:
-                gap_candidates.append(vc)
-        candidates = gap_candidates
-        log(f"Midday restart: {len(gap_candidates)-len(volume_candidates)+len([vc for vc in volume_candidates if vc['symbol'] in seen])} gap + {len([vc for vc in volume_candidates if vc['symbol'] not in seen])} volume candidates = {len(candidates)} total")
-    else:
-        candidates = scan_gaps(target_date)
+        log("Midday restart detected — running gap scan")
+    candidates = scan_gaps(target_date)
     if not candidates:
         # Fallback: restore candidates from previous state if scan finds nothing
         if prev_state_for_restart.get("candidates"):
@@ -1288,24 +1318,7 @@ def run_trading_day(target_date):
         if now >= market_close_dt:
             break
 
-        # Periodic volume breakout scan: discover new intraday opportunities
-        if time.time() - _last_vol_scan_ts >= _vol_scan_interval:
-            _last_vol_scan_ts = time.time()
-            try:
-                monitored_syms = {c["symbol"] for c in candidates}
-                new_candidates = scan_volume_breakouts(target_date, existing_symbols=monitored_syms)
-                if new_candidates:
-                    candidates.extend(new_candidates)
-                    new_syms = [c["symbol"] for c in new_candidates]
-                    extra = f" ({len(new_syms)-5} more)" if len(new_syms) > 5 else ""
-                    log(f"Volume breakout: added {len(new_candidates)} new candidates: {new_syms[:5]}{extra}")
-                    backfill_1min_bars(new_syms, target_date)
-                    all_syms = [c["symbol"] for c in candidates]
-                    restart_ws_stream(all_syms)
-                else:
-                    log(f"Volume breakout: no new candidates ({len(candidates)} total)")
-            except Exception as e:
-                log(f"Volume breakout scan error: {e}")
+        # (Volume breakout scan removed — all entries use RTG only)
 
         if now >= force_close_dt:
             log("Force close time reached!")
@@ -1316,7 +1329,9 @@ def run_trading_day(target_date):
                     pnl = (fill - pos.entry_price) * sold
                     trades_detail.append({"symbol": pos.symbol, "entry": pos.entry_price, "exit": fill,
                                           "shares": sold, "pnl": round(pnl, 2), "reason": "force_close",
-                                          "trade_type": pos.signal_type})
+                                          "trade_type": pos.signal_type,
+                                          "entry_ts": dt.datetime.fromtimestamp(pos.entry_ts, tz=_EST).strftime("%H:%M:%S"),
+                                          "exit_ts": dt.datetime.now(_EST).strftime("%H:%M:%S")})
                     daily_trades += 1
                     positions.remove(pos)
                     log(f";Force closed {pos.symbol}, P&L=${pnl:+,.2f}")
@@ -1344,7 +1359,9 @@ def run_trading_day(target_date):
                         pnl = (fill - pos.entry_price) * sold
                         trades_detail.append({"symbol": pos.symbol, "entry": pos.entry_price, "exit": fill,
                                               "shares": sold, "pnl": round(pnl, 2), "reason": "circuit_breaker",
-                                              "trade_type": pos.signal_type})
+                                              "trade_type": pos.signal_type,
+                                              "entry_ts": dt.datetime.fromtimestamp(pos.entry_ts, tz=_EST).strftime("%H:%M:%S"),
+                                              "exit_ts": dt.datetime.now(_EST).strftime("%H:%M:%S")})
                         daily_trades += 1
                         log(f"Circuit breaker close {pos.symbol}, P&L=${pnl:+,.2f}")
                 state["daily_stopped"] = True
@@ -1389,7 +1406,9 @@ def run_trading_day(target_date):
                                 pnl = (fill - pos.entry_price) * sold
                                 trades_detail.append({"symbol": pos.symbol, "entry": pos.entry_price, "exit": fill,
                                                       "shares": sold, "pnl": round(pnl, 2), "reason": "profit_protect",
-                                                      "trade_type": pos.signal_type})
+                                                      "trade_type": pos.signal_type,
+                                                      "entry_ts": dt.datetime.fromtimestamp(pos.entry_ts, tz=_EST).strftime("%H:%M:%S"),
+                                                      "exit_ts": dt.datetime.now(_EST).strftime("%H:%M:%S")})
                                 daily_loss += pnl
                                 daily_trades += 1
                                 positions.remove(pos)
@@ -1429,7 +1448,9 @@ def run_trading_day(target_date):
                     pnl = round((fill_price - pos.entry_price) * filled, 2)
                     trades_detail.append({"symbol": pos.symbol, "entry": pos.entry_price,
                                           "exit": round(fill_price, 4), "shares": filled, "pnl": pnl,
-                                          "reason": reason, "trade_type": pos.signal_type})
+                                          "reason": reason, "trade_type": pos.signal_type,
+                                          "entry_ts": dt.datetime.fromtimestamp(pos.entry_ts, tz=_EST).strftime("%H:%M:%S"),
+                                          "exit_ts": dt.datetime.now(_EST).strftime("%H:%M:%S")})
                     daily_loss += pnl
                     daily_trades += 1
                     positions.remove(pos)
@@ -1531,9 +1552,6 @@ def run_trading_day(target_date):
                 rvol = c.get("rvol", 0)
                 if any(p.symbol == sym for p in positions):
                     continue
-                # Skip volume surge candidates here — handled in all-day block below
-                if c.get("rel_vol_ratio", 0) >= getattr(config, "VOLUME_SCAN_MIN_REL_VOL_RATIO", 3.0):
-                    continue
                 # Re-entry checks — Cam Connor: the opening drive is your only edge
                 is_reentry = sym in _last_exit_ts
                 if is_reentry and not config.RTG_REENTRY_ALLOWED:
@@ -1574,7 +1592,12 @@ def run_trading_day(target_date):
                     min_vol = max(config.RTG_MIN_VOLUME // 3, 5000)
                 elif rvol >= 5:
                     min_vol = max(config.RTG_MIN_VOLUME // 2, 10000)
-                entry_price, confirmed, signal_type = check_rtg_entry(sym, open_price, bars, after_time=after_time, min_volume=min_vol)
+                # First entry of the day: full scan (original behavior)
+                # Subsequent entries: instant check only (no stale signals)
+                if daily_trades == 0:
+                    entry_price, confirmed, signal_type = check_rtg_entry(sym, open_price, bars, after_time=after_time, min_volume=min_vol)
+                else:
+                    entry_price, confirmed, signal_type = check_rtg_entry_instant(sym, open_price, bars, min_volume=min_vol)
                 if not confirmed or entry_price <= 0:
                     continue
                 # Re-entry price guards (after RTG signal confirmed)
@@ -1639,185 +1662,7 @@ def run_trading_day(target_date):
                 log(f"ENTRY {sym} [{sig_label}] {filled}sh @ ${fill_price:.4f} "
                     f"[RVOL={rvol:.1f}× stop={stop_p:.1%}({stop_src}) tgt={target_p:.0%}]")
 
-        # Entry monitoring — All-day volume surge (09:30 until AFTERNOON_ENTRY_END)
-        # Volume surge candidates (5min vol ratio >= 3x) can enter any time during market hours
-        _vol_entry_end_str = getattr(config, "AFTERNOON_ENTRY_END", "15:30")
-        _vol_entry_end_h, _vol_entry_end_m = (int(x) for x in _vol_entry_end_str.split(":"))
-        _vol_entry_end_dt = dt.datetime.combine(target_date.date(), dt.time(_vol_entry_end_h, _vol_entry_end_m), tzinfo=_EST)
-        if entry_start_dt <= now < _vol_entry_end_dt and len(positions) < config.MAX_POSITIONS:
-            # Read live buying power
-            live_bp = 0
-            try:
-                acct_live = trading_client.get_account()
-                live_bp = float(acct_live.buying_power)
-                equity = float(acct_live.equity)
-            except Exception:
-                live_bp = equity
-
-            for c in candidates:
-                if len(positions) >= config.MAX_POSITIONS:
-                    break
-                sym = c["symbol"]
-                rvol = c.get("rvol", 0)
-                # Only handle volume surge candidates here
-                if c.get("rel_vol_ratio", 0) < getattr(config, "VOLUME_SCAN_MIN_REL_VOL_RATIO", 3.0):
-                    continue
-                if any(p.symbol == sym for p in positions):
-                    continue
-                if sym in entry_checked or sym in EXCLUDE_SYMBOLS or sym in entry_halted:
-                    continue
-                if is_crypto_etf(sym):
-                    continue
-                if config.MAX_DAILY_TRADES > 0 and daily_trades >= config.MAX_DAILY_TRADES:
-                    break
-                if max_daily_loss > 0 and daily_loss <= -max_daily_loss:
-                    break
-                open_price = c["open_price"]
-                bars = _accumulator.get_1min_bars(sym)
-                if not bars or bars[-1]["close"] <= 0:
-                    continue
-                entry_price = bars[-1]["close"]
-                # Momentum confirmation: close > open * 1.005
-                if entry_price <= open_price * 1.005:
-                    continue
-                confirmed = True
-                signal_type = "vol_surge"
-                # Position sizing
-                if config.MAX_POSITIONS <= 1:
-                    slot = max(config.MIN_POSITION_SIZE, equity)
-                else:
-                    same_tier = 1
-                    slot = max(config.MIN_POSITION_SIZE, get_rvol_sizing(rvol, equity, same_tier_count=same_tier))
-                slot = min(slot, live_bp * 0.95)
-                sizing_price = entry_price
-                shares = int(slot / sizing_price)
-                if shares <= 0:
-                    continue
-                order, _, reject = place_buy_market(sym, shares)
-                if order is None:
-                    log(f"Vol surge entry rejected: {sym} - {reject}")
-                    if "trading halt" in str(reject).lower():
-                        entry_halted.add(sym)
-                    continue
-                filled, fill_price = wait_order_filled(str(order.id), timeout=15)
-                if filled <= 0:
-                    entry_checked.add(sym)
-                    continue
-                if fill_price <= 0:
-                    fill_price = entry_price
-                atr = c.get("atr", 0)
-                if atr > 0:
-                    stop_p, target_p, trail_act_p, trail_p = get_atr_stop_params(
-                        rvol, atr, fill_price, gap_pct=abs(c.get("gap_pct", 0)), signal_type="vol_surge")
-                    stop_src = f"ATR=${atr:.3f}"
-                else:
-                    stop_p, target_p, trail_act_p, trail_p = get_rvol_exit_params(rvol)
-                    stop_src = "RVOL"
-                pos = Position(symbol=sym, shares=filled, entry_price=fill_price,
-                               entry_ts=time.time(), open_price=open_price,
-                               gap_pct=c.get("gap_pct", 0), signal_type=signal_type, highest=fill_price,
-                               rvol=rvol, atr=atr, stop_pct=stop_p, target_pct=target_p,
-                               trail_activate_pct=trail_act_p, trail_pct=trail_p)
-                positions.append(pos)
-                entry_checked.add(sym)
-                entry_count[sym] = entry_count.get(sym, 0) + 1
-                daily_trades += 1
-                live_bp -= fill_price * filled
-                log(f"ENTRY {sym} [{signal_type}] {filled}sh @ ${fill_price:.4f} "
-                    f"[RVOL={rvol:.1f}× stop={stop_p:.1%}({stop_src}) tgt={target_p:.0%}]")
-
-        # ── Afternoon momentum entry ──────────────────────────────────────
-        if getattr(config, "AFTERNOON_SCAN_ENABLED", False) and len(positions) < config.MAX_POSITIONS:
-            _aft_start = dt.datetime.combine(target_date.date(), dt.time(10, 30), tzinfo=_EST)
-            _aft_end_str = getattr(config, "AFTERNOON_ENTRY_END", "15:30")
-            _aft_end_h, _aft_end_m = (int(x) for x in _aft_end_str.split(":"))
-            _aft_end = dt.datetime.combine(target_date.date(), dt.time(_aft_end_h, _aft_end_m), tzinfo=_EST)
-
-            if _aft_start <= now < _aft_end:
-                # Scan interval: 5 min before noon, 10 min after
-                _aft_interval = 300 if now.time() < dt.time(12, 0) else 600
-                if time.time() - _last_afternoon_scan >= _aft_interval:
-                    try:
-                        _afternoon_candidates = scan_afternoon_momentum(target_date)
-                    except Exception as e:
-                        log(f"Afternoon momentum scan error (non-fatal): {e}")
-                        _afternoon_candidates = []
-                    if _afternoon_candidates:
-                        _aft_syms = [c["symbol"] for c in _afternoon_candidates]
-                        backfill_1min_bars(_aft_syms, target_date)
-                        _all_syms = list(set(syms + _aft_syms))
-                        if set(_all_syms) != set(syms):
-                            restart_ws_stream(_all_syms)
-                            syms = _all_syms
-                    _last_afternoon_scan = time.time()
-
-                # Check momentum entry for afternoon candidates
-                for c in _afternoon_candidates:
-                    if len(positions) >= config.MAX_POSITIONS:
-                        break
-                    sym = c["symbol"]
-                    rvol = c.get("rvol", 0)
-                    if rvol < getattr(config, "AFTERNOON_MIN_RVOL", 2.0):
-                        continue
-                    if any(p.symbol == sym for p in positions):
-                        continue
-                    if sym in entry_checked or sym in EXCLUDE_SYMBOLS:
-                        continue
-                    if is_crypto_etf(sym):
-                        continue
-                    if (force_close_dt - now).total_seconds() < 20 * 60:
-                        continue
-                    bars_aft = _accumulator.get_1min_bars(sym)
-                    entry_price, confirmed, signal_type = check_momentum_entry(sym, bars_aft)
-                    if not confirmed or entry_price <= 0:
-                        continue
-                    # Sizing: full all-in when MAX_POSITIONS=1
-                    try:
-                        acct_live = trading_client.get_account()
-                        live_bp = float(acct_live.buying_power)
-                        equity = float(acct_live.equity)
-                    except Exception:
-                        live_bp = equity
-                    if config.MAX_POSITIONS <= 1:
-                        slot = max(config.MIN_POSITION_SIZE, equity)
-                    else:
-                        slot = max(config.MIN_POSITION_SIZE, equity)
-                    slot = min(slot, live_bp * 0.95)
-                    latest_bar = _accumulator.get_1min_bars(sym)
-                    sizing_price = latest_bar[-1]["close"] if latest_bar else entry_price
-                    shares = int(slot / sizing_price)
-                    if shares <= 0:
-                        continue
-                    order, _, reject = place_buy_market(sym, shares)
-                    if order is None:
-                        log(f"Afternoon entry rejected: {sym} - {reject}")
-                        continue
-                    filled, fill_price = wait_order_filled(str(order.id), timeout=15)
-                    if filled <= 0:
-                        entry_checked.add(sym)
-                        continue
-                    if fill_price <= 0:
-                        fill_price = entry_price
-                    # Afternoon stop/trail params
-                    atr_val = c.get("atr", 0)
-                    if atr_val > 0:
-                        stop_p, target_p, trail_act_p, trail_p = get_atr_stop_params(
-                            rvol, atr_val, fill_price, gap_pct=c.get("gap_pct", 0))
-                    else:
-                        stop_p = getattr(config, "AFTERNOON_STOP_PCT", 0.03)
-                        target_p = 0.0
-                        trail_act_p = getattr(config, "AFTERNOON_TRAIL_ACTIVATE_PCT", 0.01)
-                        trail_p = getattr(config, "AFTERNOON_TRAIL_PCT", 0.015)
-                    pos = Position(symbol=sym, shares=filled, entry_price=fill_price,
-                                   entry_ts=time.time(), open_price=c.get("open_price", fill_price),
-                                   gap_pct=c.get("gap_pct", 0), signal_type=signal_type, highest=fill_price,
-                                   rvol=rvol, atr=atr_val, stop_pct=stop_p, target_pct=target_p,
-                                   trail_activate_pct=trail_act_p, trail_pct=trail_p)
-                    positions.append(pos)
-                    entry_checked.add(sym)
-                    daily_trades += 1
-                    log(f"ENTRY {sym} [{signal_type}] {filled}sh @ ${fill_price:.4f} "
-                        f"[RVOL={rvol:.1f}× stop={stop_p:.0%} trail={trail_p:.1%}]")
+        # (Vol surge and afternoon momentum entries removed — all entries use RTG only)
 
         # WS health — restart if not running OR no bars for 60s
         # Add 30s cooldown between restarts to avoid tight loop

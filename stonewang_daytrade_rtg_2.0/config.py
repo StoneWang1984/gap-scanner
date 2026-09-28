@@ -50,13 +50,13 @@ MAX_CANDIDATES = 40  # Top 40 by RVOL — wide monitoring for full-day trading
 RVOL_LOOKBACK_DAYS = 20  # 20-day average volume for RVOL calculation
 RTG_ONLY = True  # Only trade RTG signals — GapGo has 34% win rate (removed)
 
-# ── Volume breakout scan (intraday opportunity discovery) ───────────
-VOLUME_SCAN_INTERVAL = 300      # seconds between volume breakout scans (5 min)
-VOLUME_SCAN_TOP_N = 30          # top N most active stocks from screener
-VOLUME_SCAN_MOVERS_TOP_N = 20   # top N market movers from screener
-VOLUME_SCAN_MIN_REL_VOL_RATIO = 3.0  # min relative 5-min vol ratio (current/prev bar)
-VOLUME_SCAN_PRICE_MIN = 0.50    # relaxed price floor (vs $1 for gap scan)
-VOLUME_SCAN_PRICE_MAX = 20.0    # same ceiling as gap scan
+# ── Volume breakout scan — DISABLED (all entries use RTG only) ──────
+VOLUME_SCAN_INTERVAL = 999999       # Disabled
+VOLUME_SCAN_TOP_N = 0               # Disabled
+VOLUME_SCAN_MOVERS_TOP_N = 0        # Disabled
+VOLUME_SCAN_MIN_REL_VOL_RATIO = 999 # Disabled
+VOLUME_SCAN_PRICE_MIN = 0.50
+VOLUME_SCAN_PRICE_MAX = 20.0
 
 # ── RVOL-weighted position sizing ────────────────────────────────────
 # (rvol_min, equity_pct) — higher RVOL = bigger conviction = bigger size
@@ -77,24 +77,24 @@ ATR_MULT_TIERS = [             # (rvol_min, atr_mult) — higher RVOL = wider st
     (5.0,  2.5),               # RVOL > 5x → 2.5× ATR stop
     (0.0,  2.0),               # RVOL < 5x → 2.0× ATR stop
 ]
-ATR_STOP_MIN_PCT = 0.02        # Stop at least 2% (prevent ATR too small → stop too tight)
-ATR_STOP_MAX_PCT = 0.08        # Stop at most 8% (gap stocks need wider stops)
-GAP_STOP_FACTOR = 0.3          # Stop covers at least 30% of the gap magnitude
+ATR_STOP_MIN_PCT = 0.02        # Fixed 2% stop — no dynamic ATR adjustment
+ATR_STOP_MAX_PCT = 0.02        # Fixed 2% stop
+GAP_STOP_FACTOR = 0.0          # Disable gap expansion — fixed 2% stop
 ATR_TRAIL_MULT = 2.0           # Trailing stop width = 2.0× ATR (wider initial trail)
 ATR_TARGET_MULT = 0.0          # Target price DISABLED — trail + progressive trail manage exit
 
 # ── vol_surge exit parameters (tighter than rtg) ──────────────────────
 # Volume scan candidates are intraday momentum, not opening drive — tighter management
-VOL_SURGE_STOP_MAX_PCT = 0.05  # 5% max stop (no gap expansion — intraday stocks are stable)
+VOL_SURGE_STOP_MAX_PCT = 0.02  # Fixed 2% stop
 VOL_SURGE_TRAIL_MULT = 1.5     # Tighter trail (1.5× ATR vs 2.0× for rtg)
 VOL_SURGE_TRAIL_MAX_PCT = 0.03 # Max trail 3% (lock profit faster)
 
 # ── RVOL-adaptive exit tiers (FALLBACK when ATR unavailable) ──────────
 # (rvol_min, stop_pct, target_pct, trail_activate_pct, trail_pct)
 RVOL_EXIT_TIERS = [
-    (10.0, 0.07, 0.50, 0.05, 0.05),  # High RVOL: 7% stop, 50% target, trail +5%/5%
-    (5.0,  0.05, 0.30, 0.04, 0.04),  # Medium: 5% stop, 30% target, trail +4%/4%
-    (0.0,  0.03, 0.15, 0.03, 0.02),  # Low: 3% stop, 15% target, trail +3%/2%
+    (10.0, 0.02, 0.50, 0.05, 0.05),  # Fixed 2% stop
+    (5.0,  0.02, 0.30, 0.04, 0.04),  # Fixed 2% stop
+    (0.0,  0.02, 0.15, 0.03, 0.02),  # Fixed 2% stop
 ]
 
 # ── Daily profit protection (rtg_2.0) ──────────────────────────────────
@@ -114,13 +114,13 @@ PROGRESSIVE_TRAIL_TIERS = [
 ]
 
 # ── Afternoon momentum scan (from rtg_7.0) ─────────────────────────────
-AFTERNOON_SCAN_ENABLED = True
+AFTERNOON_SCAN_ENABLED = False
 AFTERNOON_PRICE_MAX = 200.0       # After 10:30, allow stocks up to $200
 AFTERNOON_MIN_RVOL = 2.0          # Min relative volume for momentum
 AFTERNOON_MIN_GAIN_PCT = 0.02     # Min 2% gain from previous close
 AFTERNOON_MAX_CANDIDATES = 5      # Top 5 momentum candidates
 AFTERNOON_ENTRY_END = "15:30"     # No new afternoon entries after 15:30
-AFTERNOON_STOP_PCT = 0.03         # 3% stop for afternoon trades
+AFTERNOON_STOP_PCT = 0.02         # Fixed 2% stop
 AFTERNOON_TRAIL_PCT = 0.015       # 1.5% base trail for afternoon
 AFTERNOON_TRAIL_ACTIVATE_PCT = 0.01  # 1% trail activation
 
@@ -136,7 +136,7 @@ REENTRY_COOLDOWN_SEC = 120        # (unused)
 
 # ── Entry parameters ─────────────────────────────────────────────────
 ENTRY_WINDOW_START = "09:30"  # Start at open
-ENTRY_WINDOW_END = "10:30"    # Gap momentum window — no entries after 10:30
+ENTRY_WINDOW_END = "15:30"    # All-day RTG window — scan until 15:30
 
 # Signal A: Red-to-Green (THE signal — 75% win rate in backtest)
 RTG_VOLUME_MULT = 1.5       # Lower threshold catches earlier signals (was 2.0)
@@ -150,7 +150,7 @@ GAPGO_MIN_FIRST_BAR_VOL = 99999999   # Effectively disabled
 GAPGO_MIN_BREAKOUT_VOL = 99999999    # Effectively disabled
 
 # ── Exit parameters (defaults — overridden by RVOL_EXIT_TIERS) ──────
-RTG_STOP_PCT = 0.05           # 5% hard stop loss (default)
+RTG_STOP_PCT = 0.02           # Fixed 2% hard stop loss
 RTG_TARGET_PCT = 0.0          # No target — trail manages exit
 RTG_TIME_LIMIT_SEC = 0          # No time limit — let trail/stop manage the trade (Cam Connor)
 RTG_TRAIL_ACTIVATE_PCT = 0.03 # Activate trailing stop after +3% gain

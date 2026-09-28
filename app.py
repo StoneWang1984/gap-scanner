@@ -1,4 +1,4 @@
-"""Keep Raising 1.0 策略 — Streamlit Web UI (交易显示 + 策略概览 + 交易详情)"""
+"""RTG 2.0 策略 — Streamlit Web UI (交易显示 + 策略概览 + 交易详情)"""
 
 import json
 import time
@@ -7,7 +7,7 @@ from pathlib import Path
 import streamlit as st
 import pandas as pd
 
-VERSION_DIR = Path("/Users/stonewang2014/gap-scanner/stonewang_daytrade_keep_raising_1.0")
+VERSION_DIR = Path("/Users/stonewang2014/gap-scanner/stonewang_daytrade_rtg_2.0")
 STATE_FILE = Path("/Users/stonewang2014/gap-scanner/live_state.json")
 LOG_FILE = VERSION_DIR / "live_rtg.log"
 
@@ -17,12 +17,12 @@ config = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(config)
 sys.modules["config"] = config
 
-st.set_page_config(page_title="Keep Raising 1.0 交易", page_icon="📊", layout="wide")
+st.set_page_config(page_title="RTG 2.0 交易", page_icon="📊", layout="wide")
 
 # ── Sidebar ──────────────────────────────────────────────────────
 
-st.sidebar.title("Keep Raising 1.0 交易")
-st.sidebar.caption("上午RTG + 下午Keep Raising + 利润保护90%")
+st.sidebar.title("RTG 2.0 交易")
+st.sidebar.caption("RTG + 利润保护90% + 渐进Trailing + Vol Surge")
 
 tab = st.sidebar.radio("导航", ["实盘交易", "策略概览", "交易详情", "日志"])
 
@@ -175,9 +175,15 @@ if tab == "实盘交易":
             entry_cost = entry_price * total_shares if entry_price > 0 else 0
             pnl_pct = (total_pnl_sym / entry_cost) if entry_cost > 0 else 0
 
+            # Buy/sell times
+            entry_ts = trades[0].get("entry_ts", "")
+            exit_ts = trades[-1].get("exit_ts", "")
+
             summary_rows.append({
                 "股票": sym,
                 "类型": trade_type,
+                "买入时间": entry_ts,
+                "卖出时间": exit_ts,
                 "买入价": f"${entry_price:.4f}",
                 "卖出价": f"${exit_price:.4f}",
                 "股数": total_shares,
@@ -206,7 +212,7 @@ if tab == "实盘交易":
 # ══════════════════════════════════════════════════════════════════
 
 elif tab == "策略概览":
-    st.title("Keep Raising 1.0 策略概览")
+    st.title("RTG 2.0 策略概览")
 
     col1, col2 = st.columns(2)
 
@@ -221,26 +227,12 @@ elif tab == "策略概览":
         - 候选股: **Top {config.MAX_CANDIDATES} by RVOL**
         """)
 
-        st.subheader("入场信号 (上午)")
+        st.subheader("入场信号")
         st.markdown(f"""
         - **RTG** (Red-to-Green): close > open_price + 量能 ≥ {config.RTG_VOLUME_MULT}× 前bar + ≥ {config.RTG_MIN_VOLUME:,}股
-        - **Vol Surge** (盘中量能): 5min量比 ≥ 3.0× + close > open×1.005
-        - 上午窗口: **{config.ENTRY_WINDOW_START} ~ {config.ENTRY_WINDOW_END} EST**
-        """)
-
-        st.subheader("Keep Raising模式 (下午)")
-        kr_enabled = getattr(config, "KEEP_RAISING_ENABLED", False)
-        kr_start = getattr(config, "KEEP_RAISING_START", "10:30")
-        kr_end = getattr(config, "KEEP_RAISING_ENTRY_END", "15:45")
-        st.markdown(f"""
-        - 启用: **{'是' if kr_enabled else '否'}**
-        - 窗口: **{kr_start} ~ {kr_end} EST**
-        - 价格: **${getattr(config, 'KEEP_RAISING_PRICE_MIN', 1.0):.0f}** ~ **${getattr(config, 'KEEP_RAISING_PRICE_MAX', 200.0):.0f}**
-        - Lookback: **{getattr(config, 'KR_LOOKBACK_MINUTES', 20)}** 分钟1-min bars
-        - 评分: up_ratio × consistency × amplitude_quality
-        - 阳线比 ≥ **{getattr(config, 'KR_MIN_UP_BARS_RATIO', 0.60):.0%}**
-        - 一致性 ≥ **{getattr(config, 'KR_MIN_CONSISTENCY_SCORE', 0.40):.0%}**
-        - 振幅质量 ≤ **{getattr(config, 'KR_MAX_AMPLITUDE_RATIO', 0.50):.0%}**
+        - 全天窗口: **{config.ENTRY_WINDOW_START} ~ {config.ENTRY_WINDOW_END} EST**
+        - 首笔入场: 扫描全部bar找RTG信号
+        - 后续入场: 只检查最近3根bar (即时扫描, 无排队)
         """)
 
         st.subheader("仓位管理")
@@ -252,32 +244,20 @@ elif tab == "策略概览":
         - 日损失熔断: **{config.MAX_DAILY_LOSS_PCT:.0%}**
         """)
 
+        st.subheader("RVOL仓位分级")
+        for rvol_min, eq_pct in config.RVOL_SIZING_TIERS:
+            st.markdown(f"- RVOL ≥ {rvol_min:.0f}× → **{eq_pct:.0%}** 权益")
+
     with col2:
-        st.subheader("ATR止损 + Gap扩展")
+        st.subheader("固定止损")
         st.markdown(f"""
-        - 止损 = max(ATR×乘数, |gap|×{config.GAP_STOP_FACTOR:.0%}) / 入场价
-        - 钳位: **{config.ATR_STOP_MIN_PCT:.0%}** ~ **{config.ATR_STOP_MAX_PCT:.0%}**
-        - RVOL ≥ 10× → ATR×{config.ATR_MULT_TIERS[0][1]:.1f} | ≥ 5× → ATR×{config.ATR_MULT_TIERS[1][1]:.1f} | else → ATR×{config.ATR_MULT_TIERS[2][1]:.1f}
+        - 止损: **{config.ATR_STOP_MIN_PCT:.0%}** (固定2%, 无动态ATR调整)
         - 追踪宽度 = ATR×{config.ATR_TRAIL_MULT:.1f} / 入场价, 钳位 0.5%~5%
         """)
 
-        st.subheader("渐进Trailing (RTG)")
+        st.subheader("渐进Trailing")
         for tier_profit, tier_trail in config.PROGRESSIVE_TRAIL_TIERS:
             st.markdown(f"- 利润 > {tier_profit:.0%} → trail = **{tier_trail:.1%}**")
-
-        st.subheader("Keep Raising退出")
-        kr_tiers = getattr(config, "KR_PROGRESSIVE_TRAIL_TIERS", [])
-        st.markdown(f"""
-        - 连续红线: **{getattr(config, 'KR_EXIT_CONSEC_DOWN_BARS', 3)}** 根 → 退出
-        - 从高点回落: **{getattr(config, 'KR_EXIT_DROP_PCT', 0.005):.1%}** → 退出
-        - 最大持仓: **{getattr(config, 'KR_EXIT_MAX_HOLD_MINUTES', 120)}** 分钟
-        - 硬止损: **{getattr(config, 'KR_STOP_PCT', 0.03):.0%}** | Trail: **{getattr(config, 'KR_TRAIL_PCT', 0.010):.1%}**
-        - Trail激活: **{getattr(config, 'KR_TRAIL_ACTIVATE_PCT', 0.01):.0%}**
-        """)
-        if kr_tiers:
-            st.markdown("**KR渐进Trail:**")
-            for tp, tt in kr_tiers:
-                st.markdown(f"- 利润 > {tp:.0%} → trail = **{tt:.1%}**")
 
         st.subheader("日利润保护")
         st.markdown(f"""
@@ -295,17 +275,15 @@ elif tab == "策略概览":
         """)
 
     st.divider()
-    st.subheader("Keep Raising 1.0 设计理念")
+    st.subheader("RTG 2.0 设计理念")
     st.markdown("""
-    - **上午RTG**: 09:30-10:30 与rtg_2.0一致 (gap scan + RTG entry + vol_surge + ATR stops)
-    - **下午Keep Raising**: 10:30后扫描振幅小但持续上涨的股票, 全仓买入, 趋势破坏即卖出
-    - **KR评分**: score = up_ratio × consistency × amplitude_quality, 选评分最高的股票
-    - **KR退出**: 3根连续红线 / 从高点回落0.5% / 持仓超2小时 → 卖出后立即重新扫描
-    - **ATR自适应止损**: stop=max(ATR×mult, |gap|×30%), 钳位2%-8%, 跳空股给宽止损
-    - **渐进Trailing**: 利润>5%→1.5%, >10%→1%, >15%→0.5%, 让赢家奔跑
+    - **RTG入场**: close > open_price + 量能突破, 75%胜率信号
+    - **即时扫描**: 卖出后立即重新扫描候选股, 只买当前满足RTG条件的, 不排队
+    - **固定2%止损**: 不使用动态ATR, 止损锁定2%
+    - **渐进Trailing**: 利润>2.5%→1.5%, >5%→1.2%, >7.5%→1%, >10%→0.5%, >15%→立即卖出
     - **日利润保护90%**: 峰值利润回撤10%→平仓下行持仓(保留上行), 继续交易
     - **全仓单股**: 最多1仓, 100%权益全仓买入最佳候选
-    - **No Re-entry**: 首笔退出后不再入场 (上午RTG)
+    - **No Re-entry**: 首笔退出后不再入场同一股票 (Cam Connor: opening drive is your only edge)
     """)
 
 # ══════════════════════════════════════════════════════════════════
