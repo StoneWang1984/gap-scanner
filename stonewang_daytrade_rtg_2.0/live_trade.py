@@ -259,8 +259,11 @@ async def _on_trade(trade):
     _accumulator.add_trade(sym, float(trade.price), int(trade.size), ts)
 
 
+_ws_thread = None
+
+
 def start_ws_stream(symbols):
-    global _ws_stream
+    global _ws_stream, _ws_thread
     if _stream_state["running"]:
         return
     try:
@@ -281,16 +284,20 @@ def start_ws_stream(symbols):
                 _ws_stream.run()
             except Exception as e:
                 log(f"WebSocket error: {e}")
-            _stream_state["running"] = False
+            finally:
+                _stream_state["running"] = False
+                log("WebSocket thread exited")
 
-        t = threading.Thread(target=_run, daemon=True)
-        t.start()
+        _ws_thread = threading.Thread(target=_run, daemon=True)
+        _ws_thread.start()
         log(f"WebSocket stream started for {len(symbols)} symbols")
     except Exception as e:
         log(f"WebSocket start failed: {e}")
+        _stream_state["running"] = False
 
 
 def restart_ws_stream(symbols):
+    global _ws_thread
     _stream_state["running"] = False
     if _ws_stream:
         try:
@@ -311,6 +318,12 @@ def restart_ws_stream(symbols):
                 log("WebSocket stop failed (non-fatal)")
         except Exception as e:
             log(f"WebSocket stop error (non-fatal): {e}")
+    # Wait for WS thread to exit (up to 5s)
+    if _ws_thread and _ws_thread.is_alive():
+        _ws_thread.join(timeout=5)
+        if _ws_thread.is_alive():
+            log("WebSocket thread still alive after stop, will be orphaned")
+    _ws_thread = None
     time.sleep(2)
     start_ws_stream(symbols)
 
@@ -1669,12 +1682,14 @@ def run_trading_day(target_date):
 
         # (Vol surge and afternoon momentum entries removed — all entries use RTG only)
 
-        # WS health — restart if not running OR no bars for 60s
-        # Add 30s cooldown between restarts to avoid tight loop
+        # WS health — restart if not running, thread dead, or no bars for 60s
         ws_stale = time.time() - _stream_state["last_bar_ts"] > 60
-        ws_needs_restart = not _stream_state["running"] or ws_stale
+        ws_thread_dead = _ws_thread is not None and not _ws_thread.is_alive()
+        ws_needs_restart = not _stream_state["running"] or ws_thread_dead or ws_stale
         if ws_needs_restart and time.time() - _stream_state.get("last_restart_ts", 0) > 30:
-            if not _stream_state["running"]:
+            if ws_thread_dead:
+                log("WebSocket: thread died, restarting...")
+            elif not _stream_state["running"]:
                 log("WebSocket: not running, restarting...")
             else:
                 log("WebSocket: no bars for 60s, restarting...")
