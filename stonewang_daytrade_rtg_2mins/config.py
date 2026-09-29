@@ -154,7 +154,7 @@ MAX_POSITION_SIZE = 9999      # No hard cap — RVOL tiers control sizing
 MAX_POSITIONS = 1             # Single stock, full all-in
 EXCLUDE_SYMBOLS = {"AEI", "LITZ", "VOGX", "WEAV"}  # Managed by external OCO orders
 MAX_DAILY_TRADES = 0          # 0 = no limit
-MAX_DAILY_LOSS_PCT = 0.04     # 4% daily loss circuit breaker (tighter)
+MAX_DAILY_LOSS_PCT = 0.08     # 8% daily loss circuit breaker (allow one 8% stop)
 EQUITY_POSITION_RATIO = 1.0
 
 # ── Market hours ─────────────────────────────────────────────────────
