@@ -321,8 +321,11 @@ def find_rtg_entry_1min(bars_1m, open_price, min_volume=None):
     return 0.0, 0.0, -1, False, ""
 
 
-def find_rtg_entry_instant_1min(bars_1m, open_price, min_volume=None):
-    """Find RTG entry on the last 3 bars only. No stale signals."""
+def find_rtg_entry_instant_1min(bars_1m, open_price, min_volume=None, require_above_open=True):
+    """Find RTG entry on the last 3 bars only. No stale signals.
+
+    require_above_open: if False, skip close > open_price check (volume surge only).
+    """
     if bars_1m.empty or len(bars_1m) < 2:
         return 0.0, 0.0, -1, False, ""
     if min_volume is None:
@@ -353,7 +356,8 @@ def find_rtg_entry_instant_1min(bars_1m, open_price, min_volume=None):
         bar_vol = int(bar["volume"])
         prev_vol = int(prev_bar["volume"])
 
-        if (bar_close > open_price
+        price_ok = (bar_close > open_price) if require_above_open else True
+        if (price_ok
                 and prev_vol > 0
                 and bar_vol >= config.RTG_VOLUME_MULT * prev_vol
                 and bar_vol >= min_volume):
@@ -834,9 +838,9 @@ def run_backtest(end_date=None, n_days=None):
                             min_vol = max(config.RTG_MIN_VOLUME // 3, 5000)
                         elif rvol >= 5:
                             min_vol = max(config.RTG_MIN_VOLUME // 2, 10000)
-                        # After first trade: use instant check (last 3 bars only — fresh RTG signals)
+                        # After first trade: instant check, no open_price requirement (volume surge only)
                         entry_at_open, entry_at_close, entry_bar_idx, confirmed, signal_type = find_rtg_entry_instant_1min(
-                            bars_1m_sym, row["open_price"], min_volume=min_vol)
+                            bars_1m_sym, row["open_price"], min_volume=min_vol, require_above_open=False)
                         if not confirmed or entry_at_open <= 0:
                             continue
                         # Enter RTG (found signal, buy immediately)

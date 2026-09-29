@@ -965,12 +965,14 @@ def check_rtg_entry(symbol, open_price, bars, after_time=None, min_volume=None):
     return 0.0, False, ""
 
 
-def check_rtg_entry_instant(symbol, open_price, bars, min_volume=None):
+def check_rtg_entry_instant(symbol, open_price, bars, min_volume=None, require_above_open=True):
     """Check if the latest bar(s) meet RTG conditions RIGHT NOW. No stale signals.
 
     Only examines the last 3 bars — if a signal appeared >3 minutes ago
     and conditions no longer hold, it won't be found. This prevents
     buying on old RTG signals after the momentum has faded.
+
+    require_above_open: if False, skip close > open_price check (volume surge only).
     """
     if len(bars) < 2:
         return 0.0, False, ""
@@ -994,7 +996,8 @@ def check_rtg_entry_instant(symbol, open_price, bars, min_volume=None):
         bc = bar["close"]
         bv = bar["volume"]
         pv = prev["volume"]
-        if bc > open_price and pv > 0 and bv >= config.RTG_VOLUME_MULT * pv and bv >= min_volume:
+        price_ok = (bc > open_price) if require_above_open else True
+        if price_ok and pv > 0 and bv >= config.RTG_VOLUME_MULT * pv and bv >= min_volume:
             entry = round(open_price * 1.001, 4) if getattr(config, "RTG_ENTRY_AT_OPEN", True) else round(bc, 4)
             return entry, True, "rtg"
         ph = prev["high"]
@@ -1517,7 +1520,7 @@ def run_trading_day(target_date):
                     if bars and bars[-1]["close"] < open_price:
                         continue
                 else:
-                    entry_price, confirmed, signal_type = check_rtg_entry_instant(sym, open_price, bars, min_volume=min_vol)
+                    entry_price, confirmed, signal_type = check_rtg_entry_instant(sym, open_price, bars, min_volume=min_vol, require_above_open=False)
                     if not confirmed or entry_price <= 0:
                         continue
                 # Re-entry price guards (after RTG signal confirmed)
