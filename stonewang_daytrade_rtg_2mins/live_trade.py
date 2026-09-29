@@ -178,6 +178,12 @@ class Position:
     rvol: float = 0.0
     atr: float = 0.0
     stop_pct: float = 0.0
+    # Trailing stop fields (used for pre-10:30 entries, rtg_2.0 style)
+    highest: float = 0.0
+    trail_active: bool = False
+    target_pct: float = 0.0
+    trail_activate_pct: float = 0.0
+    trail_pct: float = 0.0
 
 
 class BarAccumulator:
@@ -1413,14 +1419,43 @@ def run_trading_day(target_date):
                 continue
             latest = bars[-1]
             bar_low = latest["low"]
+            bar_high = latest["high"]
 
-            # Exit: 5% hard stop OR 2-min time limit
+            # Determine exit style based on entry time
+            entry_time = dt.datetime.fromtimestamp(pos.entry_ts, tz=_EST).time()
+            morning_cutoff = dt.time(10, 30)
+            is_morning_entry = entry_time < morning_cutoff
+
             stop_price = round(pos.entry_price * (1 - pos.stop_pct), 4)
             reason = None
-            if bar_low <= stop_price:
-                reason = "stop_loss"
-            elif config.RTG_TIME_LIMIT_SEC > 0 and time.time() - pos.entry_ts >= config.RTG_TIME_LIMIT_SEC:
-                reason = "time_limit"
+
+            if is_morning_entry:
+                # Pre-10:30 entry: rtg_2.0 exit (trailing + progressive trail)
+                if bar_high > pos.highest:
+                    pos.highest = bar_high
+                if bar_low <= stop_price:
+                    reason = "stop_loss"
+                else:
+                    if not pos.trail_active:
+                        if pos.highest >= pos.entry_price * (1 + pos.trail_activate_pct):
+                            pos.trail_active = True
+                    if pos.trail_active:
+                        stock_profit_pct = (pos.highest - pos.entry_price) / pos.entry_price
+                        effective_trail_pct = pos.trail_pct
+                        progressive_tiers = getattr(config, "PROGRESSIVE_TRAIL_TIERS", [])
+                        for tier_profit, tier_trail in progressive_tiers:
+                            if stock_profit_pct >= tier_profit:
+                                effective_trail_pct = tier_trail
+                                break
+                        trail_stop = round(pos.highest * (1 - effective_trail_pct), 4)
+                        if bar_low <= trail_stop:
+                            reason = "trail_stop"
+            else:
+                # Post-10:30 entry: rtg_2mins exit (5% stop + 2-min time limit)
+                if bar_low <= stop_price:
+                    reason = "stop_loss"
+                elif config.RTG_TIME_LIMIT_SEC > 0 and time.time() - pos.entry_ts >= config.RTG_TIME_LIMIT_SEC:
+                    reason = "time_limit"
 
             if reason is None:
                 continue
@@ -1444,7 +1479,9 @@ def run_trading_day(target_date):
                 log(f"SELL stuck for {pos.symbol} (locked shares), throttling 60s")
                 continue
 
-        # Entry monitoring — Morning RTG (09:30-10:30)
+        # Entry monitoring — all day RTG (09:30-15:30)
+        # Before 10:30: rtg_2.0 style (full scan + stale guard + ATR adaptive stop + trailing)
+        # After 10:30: rtg_2mins style (instant scan, no open_price check, 5% stop + 2-min time limit)
         if entry_start_dt <= now < entry_end_dt and len(positions) < config.MAX_POSITIONS:
             # Read live buying power from Alpaca before sizing
             live_bp = 0
@@ -1510,16 +1547,25 @@ def run_trading_day(target_date):
                     min_vol = max(config.RTG_MIN_VOLUME // 3, 5000)
                 elif rvol >= 5:
                     min_vol = max(config.RTG_MIN_VOLUME // 2, 10000)
-                # First entry: full scan (find any RTG since open)
-                # Subsequent entries: instant check (last 3 bars only — fresh signals)
-                if daily_trades == 0:
-                    entry_price, confirmed, signal_type = check_rtg_entry(sym, open_price, bars, after_time=after_time, min_volume=min_vol)
-                    if not confirmed or entry_price <= 0:
-                        continue
-                    # Stale signal guard: current price must still be above open_price
-                    if bars and bars[-1]["close"] < open_price:
-                        continue
+                # Entry signal detection
+                # Before 10:30: full scan (first trade) or instant scan with close > open_price
+                # After 10:30: instant scan, volume surge only (no close > open_price requirement)
+                morning_cutoff_time = dt.time(10, 30)
+                is_morning = now.time() < morning_cutoff_time
+                if is_morning:
+                    if daily_trades == 0:
+                        entry_price, confirmed, signal_type = check_rtg_entry(sym, open_price, bars, after_time=after_time, min_volume=min_vol)
+                        if not confirmed or entry_price <= 0:
+                            continue
+                        # Stale signal guard: current price must still be above open_price
+                        if bars and bars[-1]["close"] < open_price:
+                            continue
+                    else:
+                        entry_price, confirmed, signal_type = check_rtg_entry_instant(sym, open_price, bars, min_volume=min_vol, require_above_open=True)
+                        if not confirmed or entry_price <= 0:
+                            continue
                 else:
+                    # After 10:30: volume surge only, no open_price requirement
                     entry_price, confirmed, signal_type = check_rtg_entry_instant(sym, open_price, bars, min_volume=min_vol, require_above_open=False)
                     if not confirmed or entry_price <= 0:
                         continue
@@ -1562,22 +1608,36 @@ def run_trading_day(target_date):
                     continue
                 if fill_price <= 0:
                     fill_price = entry_price
-                # Get stop pct (5% fixed)
+                # Get exit params: before 10:30 → ATR adaptive (rtg_2.0), after → fixed 5% (rtg_2mins)
                 atr = c.get("atr", 0)
                 gap_p = abs(c.get("gap_pct", 0))
-                stop_p = config.RTG_STOP_PCT
+                is_morning_entry = now.time() < dt.time(10, 30)
+                if is_morning_entry:
+                    if atr > 0:
+                        stop_p, target_p, trail_act_p, trail_p = get_atr_stop_params(rvol, atr, fill_price, gap_pct=gap_p, signal_type=signal_type)
+                    else:
+                        stop_p, target_p, trail_act_p, trail_p = get_rvol_exit_params(rvol)
+                    exit_label = f"stop={stop_p:.1%} trail={trail_p:.1%}"
+                else:
+                    stop_p = config.RTG_STOP_PCT
+                    target_p = 0.0
+                    trail_act_p = 0.0
+                    trail_p = 0.0
+                    exit_label = f"stop={stop_p:.1%} time={config.RTG_TIME_LIMIT_SEC}s"
                 sig_label = signal_type + ("_re" if is_reentry else "")
                 pos = Position(symbol=sym, shares=filled, entry_price=fill_price,
                                entry_ts=time.time(), open_price=open_price,
                                gap_pct=c["gap_pct"], signal_type=sig_label,
-                               rvol=rvol, atr=atr, stop_pct=stop_p)
+                               highest=fill_price, trail_active=False,
+                               rvol=rvol, atr=atr, stop_pct=stop_p,
+                               target_pct=target_p, trail_activate_pct=trail_act_p, trail_pct=trail_p)
                 positions.append(pos)
                 entry_checked.add(sym)
                 entry_count[sym] = entry_count.get(sym, 0) + 1
                 daily_trades += 1
                 live_bp -= fill_price * filled  # Track remaining buying power
                 log(f"ENTRY {sym} [{sig_label}] {filled}sh @ ${fill_price:.4f} "
-                    f"[RVOL={rvol:.1f}× stop={stop_p:.1%} time={config.RTG_TIME_LIMIT_SEC}s]")
+                    f"[RVOL={rvol:.1f}× {exit_label}]")
 
         # (Vol surge and afternoon momentum entries removed — all entries use RTG only)
 
@@ -1605,7 +1665,9 @@ def run_trading_day(target_date):
             "positions": [{"symbol": p.symbol, "shares": p.shares, "entry_price": p.entry_price,
                            "signal_type": p.signal_type, "rvol": p.rvol, "atr": p.atr,
                            "open_price": p.open_price, "gap_pct": p.gap_pct,
-                           "stop_pct": p.stop_pct, "entry_ts": p.entry_ts} for p in positions],
+                           "stop_pct": p.stop_pct, "entry_ts": p.entry_ts,
+                           "target_pct": p.target_pct, "trail_activate_pct": p.trail_activate_pct,
+                           "trail_pct": p.trail_pct, "highest": p.highest, "trail_active": p.trail_active} for p in positions],
             "trades_detail": trades_detail,
         })
         save_state(state)

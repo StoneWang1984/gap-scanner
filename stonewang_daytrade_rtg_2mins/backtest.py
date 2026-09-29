@@ -457,9 +457,14 @@ def get_atr_stop_params(rvol, atr, entry_price, gap_pct=0, signal_type="rtg"):
 # ── Open position tracker for concurrent bar-by-bar simulation ────
 
 class OpenPosition:
-    """Tracks a single open position during bar-by-bar simulation."""
+    """Tracks a single open position during bar-by-bar simulation.
+
+    Pre-10:30 entries: rtg_2.0 exit (trailing + progressive trail).
+    Post-10:30 entries: rtg_2mins exit (5% stop + 2-min time limit).
+    """
     def __init__(self, symbol, shares, entry_price, entry_bar_idx, open_price,
-                 rvol, atr, stop_pct, signal_type):
+                 rvol, atr, stop_pct, signal_type, is_morning_entry=False,
+                 trail_activate_pct=0.0, trail_pct=0.0):
         self.symbol = symbol
         self.shares = shares
         self.entry_price = entry_price
@@ -469,6 +474,7 @@ class OpenPosition:
         self.atr = atr
         self.stop_pct = stop_pct
         self.signal_type = signal_type
+        self.is_morning_entry = is_morning_entry
 
         self.stop_price = round(entry_price * (1 - stop_pct), 4)
         self.closed = False
@@ -476,18 +482,28 @@ class OpenPosition:
         self.exit_reason = ""
         self.exit_bar_idx = -1
 
+        # Trailing stop fields (pre-10:30 entries only)
+        self.highest = entry_price
+        self.trail_active = False
+        self.trail_activate_pct = trail_activate_pct
+        self.trail_pct = trail_pct
+
     def evaluate_bar(self, bar, bar_idx):
         """Evaluate a single bar. Returns True if position exited this bar."""
         if self.closed:
             return False
 
         bar_low = float(bar["low"])
+        bar_high = float(bar["high"])
         bar_close = float(bar["close"])
         bar_open = float(bar["open"])
 
         exit_slippage = getattr(config, "SLIPPAGE_EXIT_PCT", 0.0)
 
-        # 1. Hard stop (with gap-through model)
+        if bar_high > self.highest:
+            self.highest = bar_high
+
+        # 1. Hard stop (with gap-through model) — both entry types
         if bar_low <= self.stop_price:
             if bar_open < self.stop_price:
                 self.exit_price = round(bar_open * (1 - exit_slippage), 4)
@@ -498,14 +514,35 @@ class OpenPosition:
             self.closed = True
             return True
 
-        # 2. Time limit: sell after 2 minutes (120 bars)
-        time_limit_bars = getattr(config, "RTG_TIME_LIMIT_SEC", 120)
-        if bar_idx - self.entry_bar_idx >= time_limit_bars:
-            self.exit_price = round(bar_close * (1 - exit_slippage), 4)
-            self.exit_reason = "time_limit"
-            self.exit_bar_idx = bar_idx
-            self.closed = True
-            return True
+        if self.is_morning_entry:
+            # Pre-10:30 entry: rtg_2.0 trailing + progressive trail
+            if not self.trail_active:
+                if self.highest >= self.entry_price * (1 + self.trail_activate_pct):
+                    self.trail_active = True
+            if self.trail_active:
+                stock_profit_pct = (self.highest - self.entry_price) / self.entry_price
+                effective_trail_pct = self.trail_pct
+                progressive_tiers = getattr(config, "PROGRESSIVE_TRAIL_TIERS", [])
+                for tier_profit, tier_trail in progressive_tiers:
+                    if stock_profit_pct >= tier_profit:
+                        effective_trail_pct = tier_trail
+                        break
+                trail_stop = round(self.highest * (1 - effective_trail_pct), 4)
+                if bar_low <= trail_stop:
+                    self.exit_price = trail_stop
+                    self.exit_reason = "trail_stop"
+                    self.exit_bar_idx = bar_idx
+                    self.closed = True
+                    return True
+        else:
+            # Post-10:30 entry: rtg_2mins time limit (2 minutes = 120 bars)
+            time_limit_bars = getattr(config, "RTG_TIME_LIMIT_SEC", 120)
+            if bar_idx - self.entry_bar_idx >= time_limit_bars:
+                self.exit_price = round(bar_close * (1 - exit_slippage), 4)
+                self.exit_reason = "time_limit"
+                self.exit_bar_idx = bar_idx
+                self.closed = True
+                return True
 
         return False
 
@@ -728,7 +765,26 @@ def run_backtest(end_date=None, n_days=None):
 
             same_tier = tier_counts.get(_get_rvol_tier(rvol)[0], 1)
             atr = candidate_atrs.get(symbol, 0)
-            stop_p = config.RTG_STOP_PCT
+
+            # Determine if morning entry (before 10:30) for exit style
+            bars_sym = cached_bars.get(symbol, [])
+            if entry_bar_idx < len(bars_sym):
+                entry_ts = bars_sym[entry_bar_idx]["timestamp"]
+                is_morning_entry = entry_ts.time() < pd.Timestamp("10:30").time()
+            else:
+                is_morning_entry = True
+
+            if is_morning_entry:
+                if atr > 0:
+                    stop_p, target_p, trail_act_p, trail_p = get_atr_stop_params(rvol, atr, entry_at_open, gap_pct=gap_p, signal_type=signal_type)
+                else:
+                    stop_p, target_p, trail_act_p, trail_p = get_rvol_exit_params(rvol)
+                exit_label = f"stop={stop_p:.0%} trail={trail_p:.0%}"
+            else:
+                stop_p = config.RTG_STOP_PCT
+                trail_act_p = 0.0
+                trail_p = 0.0
+                exit_label = f"stop={stop_p:.0%} time={config.RTG_TIME_LIMIT_SEC}s"
 
             # Compounding: size based on current equity (start of day + realized P&L so far)
             current_equity = daily_start_equity + sum(p.pnl for p in closed_trades)
@@ -750,16 +806,16 @@ def run_backtest(end_date=None, n_days=None):
             pos = OpenPosition(
                 symbol=symbol, shares=shares, entry_price=entry_price_actual,
                 entry_bar_idx=entry_bar_idx, open_price=open_price, rvol=rvol,
-                atr=atr,
-                stop_pct=stop_p,
-                signal_type=signal_type,
+                atr=atr, stop_pct=stop_p, signal_type=signal_type,
+                is_morning_entry=is_morning_entry,
+                trail_activate_pct=trail_act_p, trail_pct=trail_p,
             )
             open_positions.append(pos)
             entered_symbols.add(symbol)
             entry_ts_str = _bar_ts_str(cached_bars[symbol], entry_bar_idx)
             atr_str = f" ATR=${atr:.3f}" if atr > 0 else ""
             print(f"  {symbol} [{signal_type}] entry=${entry_price_actual:.4f}@{entry_ts_str} "
-                  f"{shares}sh [RVOL={rvol:.1f}×{atr_str} stop={stop_p:.0%}]")
+                  f"{shares}sh [RVOL={rvol:.1f}×{atr_str} {exit_label}]")
 
         # Build global bar timeline from all symbols' bars
         all_bar_times = {}  # timestamp -> {symbol: bar}
@@ -838,9 +894,10 @@ def run_backtest(end_date=None, n_days=None):
                             min_vol = max(config.RTG_MIN_VOLUME // 3, 5000)
                         elif rvol >= 5:
                             min_vol = max(config.RTG_MIN_VOLUME // 2, 10000)
-                        # After first trade: instant check, no open_price requirement (volume surge only)
+                        # Entry signal: before 10:30 → instant scan with close > open, after → no open_price check
+                        is_morning_reentry = bar_time < _dt.time(10, 30)
                         entry_at_open, entry_at_close, entry_bar_idx, confirmed, signal_type = find_rtg_entry_instant_1min(
-                            bars_1m_sym, row["open_price"], min_volume=min_vol, require_above_open=False)
+                            bars_1m_sym, row["open_price"], min_volume=min_vol, require_above_open=is_morning_reentry)
                         if not confirmed or entry_at_open <= 0:
                             continue
                         # Enter RTG (found signal, buy immediately)
@@ -858,19 +915,31 @@ def run_backtest(end_date=None, n_days=None):
                             continue
                         atr = candidate_atrs.get(sym, 0)
                         gap_p = abs(row.get("gap_pct", 0))
-                        stop_p = config.RTG_STOP_PCT
+                        # Exit params: before 10:30 → ATR adaptive, after → fixed 5% + time limit
+                        if is_morning_reentry:
+                            if atr > 0:
+                                stop_p, target_p, trail_act_p, trail_p = get_atr_stop_params(rvol, atr, entry_price_actual, gap_pct=gap_p, signal_type=signal_type)
+                            else:
+                                stop_p, target_p, trail_act_p, trail_p = get_rvol_exit_params(rvol)
+                            exit_label = f"stop={stop_p:.0%} trail={trail_p:.0%}"
+                        else:
+                            stop_p = config.RTG_STOP_PCT
+                            trail_act_p = 0.0
+                            trail_p = 0.0
+                            exit_label = f"stop={stop_p:.0%} time={config.RTG_TIME_LIMIT_SEC}s"
                         pos = OpenPosition(
                             symbol=sym, shares=shares, entry_price=entry_price_actual,
                             entry_bar_idx=entry_bar_idx, open_price=row["open_price"], rvol=rvol,
-                            atr=atr, stop_pct=stop_p,
-                            signal_type=signal_type,
+                            atr=atr, stop_pct=stop_p, signal_type=signal_type,
+                            is_morning_entry=is_morning_reentry,
+                            trail_activate_pct=trail_act_p, trail_pct=trail_p,
                         )
                         open_positions.append(pos)
                         entered_symbols.add(sym)
                         n_open += 1
                         entry_ts_str = _bar_ts_str(cached_bars[sym], entry_bar_idx)
                         print(f"  {sym} [{signal_type}] entry=${entry_price_actual:.4f}@{entry_ts_str} "
-                              f"{shares}sh [RVOL={rvol:.1f}× stop={stop_p:.0%}]")
+                              f"{shares}sh [RVOL={rvol:.1f}× {exit_label}]")
 
         # Force close any remaining open positions at end of day
         last_bar_idx = len(sorted_times) - 1 if sorted_times else 0

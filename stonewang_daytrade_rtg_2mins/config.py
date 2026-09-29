@@ -70,9 +70,9 @@ ATR_MULT_TIERS = [             # (rvol_min, atr_mult) — higher RVOL = wider st
     (5.0,  2.5),               # RVOL > 5x → 2.5× ATR stop
     (0.0,  2.0),               # RVOL < 5x → 2.0× ATR stop
 ]
-ATR_STOP_MIN_PCT = 0.05        # Fixed 5% stop — wider for gap stocks
-ATR_STOP_MAX_PCT = 0.05        # Fixed 5% stop
-GAP_STOP_FACTOR = 0.0          # Disable gap expansion
+ATR_STOP_MIN_PCT = 0.02        # Pre-10:30: ATR adaptive (2% min); Post-10:30: fixed 5%
+ATR_STOP_MAX_PCT = 0.08        # Pre-10:30: max 8%; Post-10:30: config.RTG_STOP_PCT=5%
+GAP_STOP_FACTOR = 0.3          # Pre-10:30: gap expansion applies
 ATR_TRAIL_MULT = 2.0           # Trailing stop width = 2.0× ATR (wider initial trail)
 ATR_TARGET_MULT = 0.0          # Target price DISABLED — trail + progressive trail manage exit
 
@@ -98,7 +98,11 @@ DAILY_PROFIT_PROTECT_DELAY_SEC = 1800  # Don't activate until 30 min after marke
 
 # ── Progressive trailing stop (rtg_2.0) ────────────────────────────────
 # As stock profit grows, tighten trailing stop to lock in gains
-PROGRESSIVE_TRAIL_TIERS = []  # Disabled — 2-min time limit manages exit
+PROGRESSIVE_TRAIL_TIERS = [    # Pre-10:30 entries: tighten trail as profit grows
+    (0.15, 0.005),   # +15% profit → 0.5% trail (lock most gains)
+    (0.10, 0.010),   # +10% profit → 1.0% trail
+    (0.05, 0.015),   # +5% profit → 1.5% trail
+]
 
 # ── Afternoon momentum scan (from rtg_7.0) ─────────────────────────────
 AFTERNOON_SCAN_ENABLED = False
