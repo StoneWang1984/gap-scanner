@@ -7,7 +7,7 @@ from pathlib import Path
 import streamlit as st
 import pandas as pd
 
-VERSION_DIR = Path("/Users/stonewang2014/gap-scanner/stonewang_daytrade_rtg_2mins")
+VERSION_DIR = Path("/Users/stonewang2014/gap-scanner/stonewang_daytrade_rtg_2mins_all")
 STATE_FILE = Path("/Users/stonewang2014/gap-scanner/live_state.json")
 LOG_FILE = VERSION_DIR / "live_rtg.log"
 
@@ -21,8 +21,8 @@ st.set_page_config(page_title="RTG 2.0 交易", page_icon="📊", layout="wide")
 
 # ── Sidebar ──────────────────────────────────────────────────────
 
-st.sidebar.title("RTG 2mins 交易")
-st.sidebar.caption("10:30前rtg_2.0 | 10:30后5%止损+2分钟限时")
+st.sidebar.title("RTG 2mins All 交易")
+st.sidebar.caption("全天5%止损+2分钟限时")
 
 tab = st.sidebar.radio("导航", ["实盘交易", "策略概览", "交易详情", "日志"])
 
@@ -227,17 +227,13 @@ elif tab == "策略概览":
         - 候选股: **Top {config.MAX_CANDIDATES} by RVOL**
         """)
 
-        st.subheader("入场信号 (按时间分策略)")
+        st.subheader("入场信号")
         st.markdown(f"""
         - **RTG** (Red-to-Green): close > open_price + 量能 ≥ {config.RTG_VOLUME_MULT}× 前bar + ≥ {config.RTG_MIN_VOLUME:,}股
         - 全天窗口: **{config.ENTRY_WINDOW_START} ~ {config.ENTRY_WINDOW_END} EST**
-
-        **10:30前 (rtg_2.0策略)**
         - 首笔: 全量扫描 + 过时保护 (当前价 > 开盘价)
-        - 后续: 即时扫描 (最近3根bar, 需 close > open_price)
-
-        **10:30后 (rtg_2mins策略)**
-        - 即时扫描 (最近3根bar, **不要求** close > open_price, 纯量能突破)
+        - 后续: 即时扫描 (最近3根bar)
+        - 10:30后: **不要求** close > open_price (纯量能突破)
         """)
 
         st.subheader("仓位管理")
@@ -254,19 +250,12 @@ elif tab == "策略概览":
             st.markdown(f"- RVOL ≥ {rvol_min:.0f}× → **{eq_pct:.0%}** 权益")
 
     with col2:
-        st.subheader("退出规则 (按入场时间分策略)")
+        st.subheader("退出规则")
         st.markdown(f"""
-        **10:30前入场 → rtg_2.0退出**
-        - **ATR自适应止损**: RVOL>10×→3.0×ATR, >5×→2.5×ATR, 其他→2.0×ATR
-        - **Gap扩展**: |gap_pct| × 0.3 (宽gap宽止损)
-        - **止损范围**: {config.ATR_STOP_MIN_PCT:.0%} ~ {config.ATR_STOP_MAX_PCT:.0%}
-        - **Trailing Stop**: 激活后追踪最高价回撤
-        - **渐进Trail**: 利润>5%→trail1.5%, >10%→1.0%, >15%→0.5%
-
-        **10:30后入场 → rtg_2mins退出**
+        **全天统一 (5%止损 + 2分钟限时)**
         - **5%硬止损**: 价格跌破入场价×95% → `stop_loss`
         - **2分钟限时**: 持有超过120秒 → `time_limit`
-        - 无追踪止损, 无渐进Trailing
+        - 无追踪止损, 无渐进Trailing, 无目标价
 
         **通用**
         - **EOD强平**: **{config.FORCE_CLOSE_TIME} EST** → `force_close`
@@ -279,14 +268,12 @@ elif tab == "策略概览":
         """)
 
     st.divider()
-    st.subheader("RTG 2mins 设计理念")
+    st.subheader("RTG 2mins All 设计理念")
     st.markdown("""
-    - **时间分策略**: 10:30前用rtg_2.0(trailing+渐进trail锁利), 10:30后用简化策略(5%止损+2分钟限时)
+    - **全天统一策略**: 所有入场都用5%止损+2分钟限时, 不区分10:30前后
     - **RTG入场**: close > open_price + 量能突破, 75%胜率信号
     - **即时扫描**: 10:30后只看量能突破, 不要求价格高于开盘价
-    - **ATR自适应止损**: 10:30前根据波动率动态调整, 给gap股留空间
-    - **渐进Trail**: 利润越大trail越紧, 锁住大部分收益
-    - **5%止损+2分钟限时**: 10:30后快进快出, 避免利润回吐
+    - **5%止损+2分钟限时**: 快进快出, 避免利润回吐
     - **全仓单股**: 最多1仓, 100%权益全仓买入最佳候选
     - **No Re-entry**: 首笔退出后不再入场同一股票
     """)
