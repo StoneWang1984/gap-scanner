@@ -892,7 +892,7 @@ def run_backtest(end_date=None, n_days=None):
                         if b["timestamp"] == ts:
                             time_held_bars = bi - current_pos.entry_bar_idx
                             break
-                    if time_held_bars is not None and time_held_bars < config.RTG_TIME_LIMIT_SEC - 10:
+                    if time_held_bars is not None and time_held_bars < config.RTG_TIME_LIMIT_SEC - 30:
                         bar_time = ts.time() if hasattr(ts, 'time') else None
                         entry_end_str = getattr(config, "ENTRY_WINDOW_END", "15:30")
                         entry_end_h, entry_end_m = (int(x) for x in entry_end_str.split(":"))
