@@ -1,7 +1,7 @@
-"""Config — stonewang_daytrade_rtg_2mins_all: RTG entry + 2% stop + 3-min time limit (all day).
+"""Config — stonewang_daytrade_rtg_2mins_all: RTG entry + 5% stop + 3-min time limit (all day).
 
 Exit (all day, same for pre-10:30 and post-10:30):
-  1. 2% hard stop loss — can trigger at any time (even before min hold)
+  1. 5% hard stop loss — can trigger at any time (even before min hold)
   2. 3-minute time limit — sell at market after 180 seconds
   3. EOD force close at 15:59 EST (safety net)
   Min hold: 60 seconds — no switch to other stock in first 60s
@@ -33,7 +33,7 @@ GAP_THRESHOLD = 0.10   # min 10% gap
 GAP_MAX = 1.0          # max 100% gap
 MIN_VOLUME = 10000     # min pre-market volume
 MIN_DOLLAR_VOLUME = 100000
-PRICE_MIN = 1.0
+PRICE_MIN = 3.0
 PRICE_MAX = 20.0
 
 # Leveraged ETF exclusion
@@ -42,7 +42,7 @@ LEVERAGED_ETF_PREFIXES = ()
 
 # ── RTG candidate selection ──────────────────────────────────────────
 MAX_CANDIDATES = 100  # Top 100 by RVOL — wide monitoring for full-day trading
-RTG_MIN_RVOL = 0.0    # No RVOL filter — trade all gap candidates
+RTG_MIN_RVOL = 3.0    # Min RVOL 3× — only trade stocks with institutional interest
 RVOL_LOOKBACK_DAYS = 20  # 20-day average volume for RVOL calculation
 RTG_ONLY = True  # Only trade RTG signals — GapGo has 34% win rate (removed)
 
@@ -73,24 +73,24 @@ ATR_MULT_TIERS = [             # (rvol_min, atr_mult) — higher RVOL = wider st
     (5.0,  2.5),               # RVOL > 5x → 2.5× ATR stop
     (0.0,  2.0),               # RVOL < 5x → 2.0× ATR stop
 ]
-ATR_STOP_MIN_PCT = 0.02        # Fixed 2% stop (all day)
-ATR_STOP_MAX_PCT = 0.02        # Fixed 2% stop
+ATR_STOP_MIN_PCT = 0.05        # Fixed 5% stop (all day)
+ATR_STOP_MAX_PCT = 0.05        # Fixed 5% stop
 GAP_STOP_FACTOR = 0.0          # Disable gap expansion
 ATR_TRAIL_MULT = 2.0           # Trailing stop width = 2.0× ATR (wider initial trail)
 ATR_TARGET_MULT = 0.0          # Target price DISABLED — trail + progressive trail manage exit
 
 # ── vol_surge exit parameters (tighter than rtg) ──────────────────────
 # Volume scan candidates are intraday momentum, not opening drive — tighter management
-VOL_SURGE_STOP_MAX_PCT = 0.02  # Fixed 2% stop
+VOL_SURGE_STOP_MAX_PCT = 0.05  # Fixed 5% stop
 VOL_SURGE_TRAIL_MULT = 1.5     # Tighter trail (1.5× ATR vs 2.0× for rtg)
-VOL_SURGE_TRAIL_MAX_PCT = 0.02 # Max trail 2% (lock profit faster)
+VOL_SURGE_TRAIL_MAX_PCT = 0.05 # Max trail 5% (lock profit faster)
 
 # ── RVOL-adaptive exit tiers (FALLBACK when ATR unavailable) ──────────
 # (rvol_min, stop_pct, target_pct, trail_activate_pct, trail_pct)
 RVOL_EXIT_TIERS = [
-    (10.0, 0.02, 0.50, 0.05, 0.05),  # Fixed 2% stop
-    (5.0,  0.02, 0.30, 0.04, 0.04),  # Fixed 2% stop
-    (0.0,  0.02, 0.15, 0.03, 0.02),  # Fixed 2% stop
+    (10.0, 0.05, 0.50, 0.05, 0.05),  # Fixed 5% stop
+    (5.0,  0.05, 0.30, 0.04, 0.04),  # Fixed 5% stop
+    (0.0,  0.05, 0.15, 0.03, 0.02),  # Fixed 5% stop
 ]
 
 # ── Daily profit protection (rtg_2.0) ──────────────────────────────────
@@ -110,18 +110,18 @@ AFTERNOON_MIN_RVOL = 2.0          # Min relative volume for momentum
 AFTERNOON_MIN_GAIN_PCT = 0.02     # Min 2% gain from previous close
 AFTERNOON_MAX_CANDIDATES = 5      # Top 5 momentum candidates
 AFTERNOON_ENTRY_END = "15:30"     # No new afternoon entries after 15:30
-AFTERNOON_STOP_PCT = 0.02         # Fixed 2% stop
+AFTERNOON_STOP_PCT = 0.05         # Fixed 5% stop
 AFTERNOON_TRAIL_PCT = 0.015       # 1.5% base trail for afternoon
 AFTERNOON_TRAIL_ACTIVATE_PCT = 0.01  # 1% trail activation
 
-# ── Re-entry: unlimited — all stocks have equal opportunity ──
-# Any stock can be traded multiple times per day regardless of prior exits.
+# ── Re-entry: limited — max 3 re-entries, 60s cooldown ──
 RTG_REENTRY_ALLOWED = True
-RTG_REENTRY_MAX = 999            # Unlimited re-entry
+RTG_REENTRY_MAX = 3              # Max 3 re-entries per stock per day
 RTG_REENTRY_SIZE_PCT = 1.00      # Full size on re-entry
 REENTRY_MAX_PRICE_VS_OPEN = 1.15  # Don't chase above 115% of open
 REENTRY_MIN_PULLBACK = 0.00      # No pullback requirement
-REENTRY_COOLDOWN_SEC = 0         # No cooldown
+REENTRY_COOLDOWN_SEC = 60        # 60s cooldown after any exit before re-entry
+REENTRY_STOP_COOLDOWN_SEC = 120  # 120s cooldown after stop_loss exit
 
 # ── Entry parameters ─────────────────────────────────────────────────
 ENTRY_WINDOW_START = "09:30"  # Start at open
@@ -139,7 +139,7 @@ GAPGO_MIN_FIRST_BAR_VOL = 99999999   # Effectively disabled
 GAPGO_MIN_BREAKOUT_VOL = 99999999    # Effectively disabled
 
 # ── Exit parameters (defaults — overridden by RVOL_EXIT_TIERS) ──────
-RTG_STOP_PCT = 0.02           # Fixed 2% hard stop loss
+RTG_STOP_PCT = 0.05           # Fixed 5% hard stop loss
 RTG_TARGET_PCT = 0.0          # No target
 RTG_TIME_LIMIT_SEC = 180        # 3-minute time limit — sell after 180 seconds
 RTG_MIN_HOLD_SEC = 60           # Min 60s hold — no switch in first 60 seconds

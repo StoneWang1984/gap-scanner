@@ -1,6 +1,6 @@
-"""stonewang_daytrade_rtg_2mins_all — RTG entry + 2% stop + 3-min time limit (all day).
+"""stonewang_daytrade_rtg_2mins_all — RTG entry + 5% stop + 3-min time limit (all day).
 
-Exit: 2% hard stop OR sell after 3 minutes, whichever comes first.
+Exit: 5% hard stop OR sell after 3 minutes, whichever comes first.
 Min hold 60s: no switch in first 60 seconds.
 No trailing stop, no progressive trail, no profit protection at any time.
 Pre-10:30: RTG entry with close > open_price; Post-10:30: volume surge only.
@@ -1498,7 +1498,10 @@ def run_trading_day(target_date):
                     entry_checked.add(sym)
                     continue
                 # Re-entry cooldown (after any exit)
-                reentry_cd = getattr(config, "REENTRY_COOLDOWN_SEC", 120)
+                reentry_cd = getattr(config, "REENTRY_COOLDOWN_SEC", 60)
+                # Stop-loss exit gets longer cooldown
+                if sym in _stop_exit_ts:
+                    reentry_cd = getattr(config, "REENTRY_STOP_COOLDOWN_SEC", 120)
                 if is_reentry and time.time() - _last_exit_ts.get(sym, 0) < reentry_cd:
                     continue
                 after_time = _last_exit_ts.get(sym) if is_reentry else None

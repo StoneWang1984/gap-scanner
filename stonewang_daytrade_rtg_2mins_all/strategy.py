@@ -1,4 +1,4 @@
-"""Strategy — stonewang_daytrade_rtg_2mins_all: RTG entry + 2% stop + 3-min time limit (all day).
+"""Strategy — stonewang_daytrade_rtg_2mins_all: RTG entry + 5% stop + 3-min time limit (all day).
 
 Exit logic (evaluate_trade_rtg):
   1. Hard stop: bar low <= entry × (1 - RTG_STOP_PCT) → exit at stop price

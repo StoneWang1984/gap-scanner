@@ -1,6 +1,6 @@
-"""Backtesting engine — stonewang_daytrade_rtg_2mins_all: RTG entry + 2% stop + 3-min time limit (all day).
+"""Backtesting engine — stonewang_daytrade_rtg_2mins_all: RTG entry + 5% stop + 3-min time limit (all day).
 
-Exit: 2% hard stop OR sell after 3 minutes (180 bars), whichever comes first.
+Exit: 5% hard stop OR sell after 3 minutes (180 bars), whichever comes first.
 Min hold 60s: no switch in first 60 seconds.
 No trailing stop, no progressive trail, no profit protection at any time.
 
