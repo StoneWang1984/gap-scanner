@@ -1477,15 +1477,12 @@ def run_trading_day(target_date):
                     continue
                 if any(p.symbol == sym for p in positions):
                     continue
-                # Re-entry checks — Cam Connor: the opening drive is your only edge
+                # Re-entry: all stocks have equal opportunity
                 is_reentry = sym in _last_exit_ts
                 if is_reentry and not config.RTG_REENTRY_ALLOWED:
                     continue
-                # Stop-loss exit = setup FAILED → no re-entry
-                if is_reentry and sym in _stop_exit_ts:
-                    continue
                 # Re-entry count limit
-                if is_reentry and entry_count.get(sym, 0) > config.RTG_REENTRY_MAX:
+                if is_reentry and config.RTG_REENTRY_MAX > 0 and entry_count.get(sym, 0) > config.RTG_REENTRY_MAX:
                     continue
                 # Skip excluded symbols
                 if sym in EXCLUDE_SYMBOLS:
@@ -1617,9 +1614,6 @@ def run_trading_day(target_date):
                     if is_crypto_etf(sym):
                         continue
                     if rvol < getattr(config, "RTG_MIN_RVOL", 0):
-                        continue
-                    # Skip symbols we've already stopped out of today
-                    if sym in _stop_exit_ts:
                         continue
                     open_price = c["open_price"]
                     bars = _accumulator.get_1min_bars(sym)

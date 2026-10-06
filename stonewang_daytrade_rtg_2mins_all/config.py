@@ -113,15 +113,14 @@ AFTERNOON_STOP_PCT = 0.02         # Fixed 2% stop
 AFTERNOON_TRAIL_PCT = 0.015       # 1.5% base trail for afternoon
 AFTERNOON_TRAIL_ACTIVATE_PCT = 0.01  # 1% trail activation
 
-# ── Re-entry: NONE (Cam Connor — "the opening drive is your only edge") ──
-# Backtest proof: first entry P&L +$37.70 (83% WR), ALL re-entries -$39.50 (35% WR)
-# Stop-loss = setup failed. Trail-stop = move captured. Either way, you're done.
-RTG_REENTRY_ALLOWED = False
-RTG_REENTRY_MAX = 0              # No re-entry — the edge was the opening drive
-RTG_REENTRY_SIZE_PCT = 0.50      # (unused when REENTRY_MAX=0)
-REENTRY_MAX_PRICE_VS_OPEN = 1.15  # (unused)
-REENTRY_MIN_PULLBACK = 0.03       # (unused)
-REENTRY_COOLDOWN_SEC = 120        # (unused)
+# ── Re-entry: unlimited — all stocks have equal opportunity ──
+# Any stock can be traded multiple times per day regardless of prior exits.
+RTG_REENTRY_ALLOWED = True
+RTG_REENTRY_MAX = 999            # Unlimited re-entry
+RTG_REENTRY_SIZE_PCT = 1.00      # Full size on re-entry
+REENTRY_MAX_PRICE_VS_OPEN = 1.15  # Don't chase above 115% of open
+REENTRY_MIN_PULLBACK = 0.00      # No pullback requirement
+REENTRY_COOLDOWN_SEC = 0         # No cooldown
 
 # ── Entry parameters ─────────────────────────────────────────────────
 ENTRY_WINDOW_START = "09:30"  # Start at open

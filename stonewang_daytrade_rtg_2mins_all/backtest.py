@@ -802,6 +802,9 @@ def run_backtest(end_date=None, n_days=None):
                 if exited:
                     closed_trades.append(pos)
                     daily_trade_count += 1
+                    # Allow re-entry: remove from entered_symbols so stock can be bought again
+                    if getattr(config, "RTG_REENTRY_ALLOWED", False):
+                        entered_symbols.discard(pos.symbol)
 
             # Check daily loss limit (compounding: recompute limit from current equity)
             realized_so_far = sum(p.pnl for p in closed_trades)
