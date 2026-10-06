@@ -40,7 +40,8 @@ LEVERAGED_ETF_SUFFIXES = ("BULL", "BEAR")
 LEVERAGED_ETF_PREFIXES = ()
 
 # ── RTG candidate selection ──────────────────────────────────────────
-MAX_CANDIDATES = 40  # Top 40 by RVOL — wide monitoring for full-day trading
+MAX_CANDIDATES = 100  # Top 100 by RVOL — wide monitoring for full-day trading
+RTG_MIN_RVOL = 0.0    # No RVOL filter — trade all gap candidates
 RVOL_LOOKBACK_DAYS = 20  # 20-day average volume for RVOL calculation
 RTG_ONLY = True  # Only trade RTG signals — GapGo has 34% win rate (removed)
 

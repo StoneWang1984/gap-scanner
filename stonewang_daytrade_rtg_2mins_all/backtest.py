@@ -727,6 +727,8 @@ def run_backtest(end_date=None, n_days=None):
         for symbol, (entry_at_open, entry_at_close, entry_bar_idx, signal_type, rvol, open_price, gap_p) in sorted_entries:
             if symbol in entered_symbols:
                 continue
+            if rvol < getattr(config, "RTG_MIN_RVOL", 0):
+                continue
             if len(entered_symbols) >= config.MAX_POSITIONS:
                 break
 
@@ -829,6 +831,8 @@ def run_backtest(end_date=None, n_days=None):
                             break
                         sym = row["symbol"]
                         rvol = row.get("rvol", 0)
+                        if rvol < getattr(config, "RTG_MIN_RVOL", 0):
+                            continue
                         if sym in entered_symbols:
                             continue
                         if sym not in cached_bars:
@@ -873,6 +877,77 @@ def run_backtest(end_date=None, n_days=None):
                         entry_ts_str = _bar_ts_str(cached_bars[sym], entry_bar_idx)
                         print(f"  {sym} [{signal_type}] entry=${entry_price_actual:.4f}@{entry_ts_str} "
                               f"{shares}sh [RVOL={rvol:.1f}× {exit_label}]")
+
+            # ── Active scan: switch to better signal while holding ──
+            n_open = sum(1 for p in open_positions if not p.closed)
+            if n_open > 0 and config.MAX_POSITIONS <= 1:
+                current_pos = next((p for p in open_positions if not p.closed), None)
+                if current_pos:
+                    current_rvol = current_pos.rvol
+                    time_held_bars = None
+                    for bi, b in enumerate(cached_bars.get(current_pos.symbol, [])):
+                        if b["timestamp"] == ts:
+                            time_held_bars = bi - current_pos.entry_bar_idx
+                            break
+                    if time_held_bars is not None and time_held_bars < config.RTG_TIME_LIMIT_SEC - 10:
+                        bar_time = ts.time() if hasattr(ts, 'time') else None
+                        entry_end_str = getattr(config, "ENTRY_WINDOW_END", "15:30")
+                        entry_end_h, entry_end_m = (int(x) for x in entry_end_str.split(":"))
+                        entry_end_time = _dt.time(entry_end_h, entry_end_m)
+                        mkt_open_time = _dt.time(9, 30)
+                        if bar_time and mkt_open_time <= bar_time <= entry_end_time:
+                            for _, row in (candidates.iterrows() if not candidates.empty else []):
+                                sym = row["symbol"]
+                                rvol = row.get("rvol", 0)
+                                if sym == current_pos.symbol:
+                                    continue
+                                if rvol <= current_rvol:
+                                    continue
+                                if sym in entered_symbols:
+                                    continue
+                                if rvol < getattr(config, "RTG_MIN_RVOL", 0):
+                                    continue
+                                if sym not in cached_bars:
+                                    continue
+                                bars_1m_sym = _list_to_bars_1m(cached_bars[sym])
+                                min_vol = config.RTG_MIN_VOLUME
+                                if rvol >= 10:
+                                    min_vol = max(config.RTG_MIN_VOLUME // 3, 5000)
+                                elif rvol >= 5:
+                                    min_vol = max(config.RTG_MIN_VOLUME // 2, 10000)
+                                is_morning_switch = bar_time < _dt.time(10, 30)
+                                entry_at_open, entry_at_close, entry_bar_idx, confirmed, signal_type = find_rtg_entry_instant_1min(
+                                    bars_1m_sym, row["open_price"], min_volume=min_vol, require_above_open=is_morning_switch)
+                                if not confirmed or entry_at_open <= 0:
+                                    continue
+                                # Switch: close current, open new
+                                current_pos.force_close(bars_this_min.get(current_pos.symbol, {}).get("close", current_pos.entry_price), time_held_bars + current_pos.entry_bar_idx, "switch_exit")
+                                closed_trades.append(current_pos)
+                                daily_trade_count += 1
+                                entered_symbols.discard(current_pos.symbol)
+                                # Enter new
+                                current_equity = daily_start_equity + sum(p.pnl for p in closed_trades)
+                                entry_price_actual = round(entry_at_open * (1 + entry_slippage), 4)
+                                sizing_price = round(entry_at_close * (1 + entry_slippage), 4)
+                                pos_size = max(config.MIN_POSITION_SIZE, current_equity)
+                                pos_size = min(pos_size, current_equity * 0.95)
+                                shares = int(pos_size / sizing_price)
+                                if shares <= 0:
+                                    break
+                                atr = candidate_atrs.get(sym, 0)
+                                stop_p = config.RTG_STOP_PCT
+                                exit_label = f"stop={stop_p:.0%} time={config.RTG_TIME_LIMIT_SEC}s"
+                                pos = OpenPosition(
+                                    symbol=sym, shares=shares, entry_price=entry_price_actual,
+                                    entry_bar_idx=entry_bar_idx, open_price=row["open_price"], rvol=rvol,
+                                    atr=atr, stop_pct=stop_p, signal_type=signal_type,
+                                )
+                                open_positions.append(pos)
+                                entered_symbols.add(sym)
+                                entry_ts_str = _bar_ts_str(cached_bars[sym], entry_bar_idx)
+                                print(f"  SWITCH: {current_pos.symbol}→{sym} [{signal_type}] entry=${entry_price_actual:.4f}@{entry_ts_str} "
+                                      f"{shares}sh [RVOL={rvol:.1f}× {exit_label}]")
+                                break
 
         # Force close any remaining open positions at end of day
         last_bar_idx = len(sorted_times) - 1 if sorted_times else 0

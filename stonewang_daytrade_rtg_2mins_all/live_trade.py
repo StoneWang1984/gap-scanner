@@ -1473,6 +1473,8 @@ def run_trading_day(target_date):
                     break
                 sym = c["symbol"]
                 rvol = c.get("rvol", 0)
+                if rvol < getattr(config, "RTG_MIN_RVOL", 0):
+                    continue
                 if any(p.symbol == sym for p in positions):
                     continue
                 # Re-entry checks — Cam Connor: the opening drive is your only edge
@@ -1593,6 +1595,103 @@ def run_trading_day(target_date):
                     f"[RVOL={rvol:.1f}× stop={stop_p:.1%} time={config.RTG_TIME_LIMIT_SEC}s]")
 
         # (Vol surge and afternoon momentum entries removed — all entries use RTG only)
+
+        # ── Active scan: switch to better signal while holding ──
+        # If holding a position, scan for fresh RTG signals on other candidates.
+        # If a signal is found with higher RVOL, sell current and buy new immediately.
+        if positions and entry_start_dt <= now < entry_end_dt:
+            current_pos = positions[0]
+            current_rvol = current_pos.rvol
+            # Time held: don't switch if close to time_limit exit anyway
+            time_held = time.time() - current_pos.entry_ts
+            if time_held < config.RTG_TIME_LIMIT_SEC - 10:  # At least 10s left
+                for c in candidates:
+                    sym = c["symbol"]
+                    rvol = c.get("rvol", 0)
+                    if sym == current_pos.symbol:
+                        continue
+                    if rvol <= current_rvol:  # Only switch to higher RVOL
+                        continue
+                    if sym in EXCLUDE_SYMBOLS or sym in entry_halted:
+                        continue
+                    if is_crypto_etf(sym):
+                        continue
+                    if rvol < getattr(config, "RTG_MIN_RVOL", 0):
+                        continue
+                    # Skip symbols we've already stopped out of today
+                    if sym in _stop_exit_ts:
+                        continue
+                    open_price = c["open_price"]
+                    bars = _accumulator.get_1min_bars(sym)
+                    if not bars or len(bars) < 2:
+                        continue
+                    # RVOL-adaptive min volume
+                    min_vol = config.RTG_MIN_VOLUME
+                    if rvol >= 10:
+                        min_vol = max(config.RTG_MIN_VOLUME // 3, 5000)
+                    elif rvol >= 5:
+                        min_vol = max(config.RTG_MIN_VOLUME // 2, 10000)
+                    # Only use instant scan (fresh signals only)
+                    morning_cutoff_time = dt.time(10, 30)
+                    is_morning = now.time() < morning_cutoff_time
+                    require_open = is_morning
+                    entry_price, confirmed, signal_type = check_rtg_entry_instant(
+                        sym, open_price, bars, min_volume=min_vol, require_above_open=require_open)
+                    if not confirmed or entry_price <= 0:
+                        continue
+                    # Found a better signal! Sell current, buy new.
+                    log(f"SWITCH: {sym} [{signal_type}] RVOL={rvol:.1f}× > current {current_pos.symbol} RVOL={current_rvol:.1f}×, selling current position")
+                    # Sell current position
+                    sold, fill = force_sell_position(current_pos.symbol, current_pos.shares)
+                    if sold <= 0:
+                        log(f"SWITCH failed: could not sell {current_pos.symbol}")
+                        break
+                    pnl = round((fill - current_pos.entry_price) * sold, 2)
+                    trades_detail.append({"symbol": current_pos.symbol, "entry": current_pos.entry_price,
+                                          "exit": round(fill, 4), "shares": sold, "pnl": pnl,
+                                          "reason": "switch_exit", "trade_type": current_pos.signal_type,
+                                          "entry_ts": dt.datetime.fromtimestamp(current_pos.entry_ts, tz=_EST).strftime("%H:%M:%S"),
+                                          "exit_ts": dt.datetime.now(_EST).strftime("%H:%M:%S")})
+                    daily_loss += pnl
+                    daily_trades += 1
+                    _last_exit_ts[current_pos.symbol] = time.time()
+                    positions.remove(current_pos)
+                    log(f"SWITCH EXIT {current_pos.symbol} ${fill:.4f}, P&L=${pnl:+,.2f}")
+                    # Buy new position
+                    try:
+                        acct_live = trading_client.get_account()
+                        live_bp = float(acct_live.buying_power)
+                        equity = float(acct_live.equity)
+                    except Exception:
+                        live_bp = equity
+                    slot = max(config.MIN_POSITION_SIZE, equity)
+                    slot = min(slot, live_bp * 0.95)
+                    latest_bar = _accumulator.get_1min_bars(sym)
+                    sizing_price = latest_bar[-1]["close"] if latest_bar else entry_price
+                    shares = int(slot / sizing_price)
+                    if shares <= 0:
+                        break
+                    order, _, reject = place_buy_market(sym, shares)
+                    if order is None:
+                        log(f"SWITCH entry rejected: {sym} - {reject}")
+                        break
+                    filled, fill_price = wait_order_filled(str(order.id), timeout=15)
+                    if filled <= 0:
+                        break
+                    if fill_price <= 0:
+                        fill_price = entry_price
+                    atr = c.get("atr", 0)
+                    stop_p = config.RTG_STOP_PCT
+                    pos = Position(symbol=sym, shares=filled, entry_price=fill_price,
+                                   entry_ts=time.time(), open_price=open_price,
+                                   gap_pct=c["gap_pct"], signal_type=signal_type,
+                                   rvol=rvol, atr=atr, stop_pct=stop_p)
+                    positions.append(pos)
+                    entry_count[sym] = entry_count.get(sym, 0) + 1
+                    daily_trades += 1
+                    log(f"SWITCH ENTRY {sym} [{signal_type}] {filled}sh @ ${fill_price:.4f} "
+                        f"[RVOL={rvol:.1f}× stop={stop_p:.1%} time={config.RTG_TIME_LIMIT_SEC}s]")
+                    break  # Only one switch per loop iteration
 
         # WS health — restart if not running, thread dead, or no bars for 60s
         ws_stale = time.time() - _stream_state["last_bar_ts"] > 60
