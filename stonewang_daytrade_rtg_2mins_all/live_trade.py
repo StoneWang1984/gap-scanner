@@ -534,17 +534,46 @@ def force_sell_position(symbol, shares):
                         break
         except Exception:
             pass
-        # Fallback: if fill_price still 0, use latest bar from accumulator
+        # Fallback chain: accumulator bars → snapshot price → last trade
         if fill_price <= 0:
             bars = _accumulator.get_1min_bars(symbol)
             if bars:
                 fill_price = float(bars[-1]["close"])
+        if fill_price <= 0:
+            try:
+                from alpaca.data.requests import StockSnapshotRequest
+                req = StockSnapshotRequest(symbol_or_symbols=symbol,
+                                           feed=getattr(config, "DATA_FEED_OBJ", DataFeed.SIP))
+                snap = data_client.get_stock_snapshot(req)
+                if snap and symbol in snap:
+                    fill_price = float(snap[symbol].daily_bar.close) if snap[symbol].daily_bar else 0.0
+            except Exception:
+                pass
+        if fill_price <= 0:
+            log(f"  WARNING: fill_price still 0 for {symbol}, P&L will be inaccurate")
         return shares, fill_price
     except Exception as e:
         log(f"Force close failed: {symbol} - {e}")
         if "position not found" in str(e).lower():
             log(f"  Position {symbol} already gone (closed externally)")
-            return shares, 0.0  # Position no longer exists — treat as closed
+            # Try to get actual fill price from recent orders before returning
+            fill_price = 0.0
+            try:
+                cutoff = dt.datetime.now(_EST) - dt.timedelta(minutes=10)
+                orders = trading_client.get_orders_for_symbol(symbol)
+                for o in orders:
+                    if o.side == OrderSide.SELL and o.status in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
+                        submitted = getattr(o, "submitted_at", None)
+                        if submitted and hasattr(submitted, "timestamp"):
+                            submitted_dt = dt.datetime.fromtimestamp(submitted.timestamp(), tz=_EST)
+                            if submitted_dt < cutoff:
+                                continue
+                        fill_price = float(o.filled_avg_price or 0)
+                        if fill_price > 0:
+                            break
+            except Exception:
+                pass
+            return shares, fill_price
         return 0, 0.0
 
 
@@ -1263,6 +1292,13 @@ def run_trading_day(target_date):
             entry_count[sym] = entry_count.get(sym, 0) + 1
         if positions:
             log(f"Restored {len(positions)} existing positions: {[p.symbol for p in positions]}")
+            # Add restored position symbols to WebSocket stream and backfill bars
+            restored_syms = [p.symbol for p in positions if p.symbol not in syms]
+            if restored_syms:
+                syms.extend(restored_syms)
+                backfill_1min_bars(restored_syms, target_date)
+                restart_ws_stream(syms)
+                log(f"Added {len(restored_syms)} restored symbols to WebSocket stream: {restored_syms}")
         # Also restore exit tracking from previous state
         for sp_sym in prev_positions:
             if sp_sym not in {p.symbol for p in positions}:
@@ -1330,6 +1366,23 @@ def run_trading_day(target_date):
             for pos in positions[:]:
                 sold, fill = force_sell_position(pos.symbol, pos.shares)
                 if sold > 0:
+                    # If fill_price is 0, try to get actual fill from Alpaca
+                    if fill <= 0:
+                        try:
+                            cutoff = dt.datetime.now(_EST) - dt.timedelta(minutes=10)
+                            orders = trading_client.get_orders_for_symbol(pos.symbol)
+                            for o in orders:
+                                if o.side == OrderSide.SELL and o.status in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
+                                    submitted = getattr(o, "submitted_at", None)
+                                    if submitted and hasattr(submitted, "timestamp"):
+                                        submitted_dt = dt.datetime.fromtimestamp(submitted.timestamp(), tz=_EST)
+                                        if submitted_dt < cutoff:
+                                            continue
+                                    fill = float(o.filled_avg_price or 0)
+                                    if fill > 0:
+                                        break
+                        except Exception:
+                            pass
                     pnl = (fill - pos.entry_price) * sold
                     trades_detail.append({"symbol": pos.symbol, "entry": pos.entry_price, "exit": fill,
                                           "shares": sold, "pnl": round(pnl, 2), "reason": "force_close",
@@ -1360,6 +1413,22 @@ def run_trading_day(target_date):
                 for pos in positions[:]:
                     sold, fill = force_sell_position(pos.symbol, pos.shares)
                     if sold > 0:
+                        if fill <= 0:
+                            try:
+                                cutoff = dt.datetime.now(_EST) - dt.timedelta(minutes=10)
+                                orders = trading_client.get_orders_for_symbol(pos.symbol)
+                                for o in orders:
+                                    if o.side == OrderSide.SELL and o.status in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
+                                        submitted = getattr(o, "submitted_at", None)
+                                        if submitted and hasattr(submitted, "timestamp"):
+                                            submitted_dt = dt.datetime.fromtimestamp(submitted.timestamp(), tz=_EST)
+                                            if submitted_dt < cutoff:
+                                                continue
+                                        fill = float(o.filled_avg_price or 0)
+                                        if fill > 0:
+                                            break
+                            except Exception:
+                                pass
                         pnl = (fill - pos.entry_price) * sold
                         trades_detail.append({"symbol": pos.symbol, "entry": pos.entry_price, "exit": fill,
                                               "shares": sold, "pnl": round(pnl, 2), "reason": "circuit_breaker",
