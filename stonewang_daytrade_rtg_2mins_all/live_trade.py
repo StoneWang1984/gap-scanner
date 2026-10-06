@@ -1601,7 +1601,7 @@ def run_trading_day(target_date):
             current_rvol = current_pos.rvol
             # Time held: don't switch if close to time_limit exit anyway
             time_held = time.time() - current_pos.entry_ts
-            if time_held < config.RTG_TIME_LIMIT_SEC - 30:  # At least 30s left
+            if time_held < config.RTG_TIME_LIMIT_SEC - 10:  # At least 10s left
                 for c in candidates:
                     sym = c["symbol"]
                     rvol = c.get("rvol", 0)
