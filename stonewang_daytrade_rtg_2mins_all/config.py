@@ -1,9 +1,10 @@
-"""Config — stonewang_daytrade_rtg_2mins_all: RTG entry + 3% stop + 2-min time limit (all day).
+"""Config — stonewang_daytrade_rtg_2mins_all: RTG entry + 2% stop + 3-min time limit (all day).
 
 Exit (all day, same for pre-10:30 and post-10:30):
-  1. 3% hard stop loss
-  2. 2-minute time limit — sell at market after 120 seconds
+  1. 2% hard stop loss — can trigger at any time (even before min hold)
+  2. 3-minute time limit — sell at market after 180 seconds
   3. EOD force close at 15:59 EST (safety net)
+  Min hold: 60 seconds — no switch to other stock in first 60s
   No trailing stop, no progressive trail, no profit protection at any time.
   No daily loss circuit breaker.
 """
@@ -72,24 +73,24 @@ ATR_MULT_TIERS = [             # (rvol_min, atr_mult) — higher RVOL = wider st
     (5.0,  2.5),               # RVOL > 5x → 2.5× ATR stop
     (0.0,  2.0),               # RVOL < 5x → 2.0× ATR stop
 ]
-ATR_STOP_MIN_PCT = 0.03        # Fixed 3% stop (all day)
-ATR_STOP_MAX_PCT = 0.03        # Fixed 3% stop
+ATR_STOP_MIN_PCT = 0.02        # Fixed 2% stop (all day)
+ATR_STOP_MAX_PCT = 0.02        # Fixed 2% stop
 GAP_STOP_FACTOR = 0.0          # Disable gap expansion
 ATR_TRAIL_MULT = 2.0           # Trailing stop width = 2.0× ATR (wider initial trail)
 ATR_TARGET_MULT = 0.0          # Target price DISABLED — trail + progressive trail manage exit
 
 # ── vol_surge exit parameters (tighter than rtg) ──────────────────────
 # Volume scan candidates are intraday momentum, not opening drive — tighter management
-VOL_SURGE_STOP_MAX_PCT = 0.03  # Fixed 3% stop
+VOL_SURGE_STOP_MAX_PCT = 0.02  # Fixed 2% stop
 VOL_SURGE_TRAIL_MULT = 1.5     # Tighter trail (1.5× ATR vs 2.0× for rtg)
-VOL_SURGE_TRAIL_MAX_PCT = 0.03 # Max trail 3% (lock profit faster)
+VOL_SURGE_TRAIL_MAX_PCT = 0.02 # Max trail 2% (lock profit faster)
 
 # ── RVOL-adaptive exit tiers (FALLBACK when ATR unavailable) ──────────
 # (rvol_min, stop_pct, target_pct, trail_activate_pct, trail_pct)
 RVOL_EXIT_TIERS = [
-    (10.0, 0.03, 0.50, 0.05, 0.05),  # Fixed 3% stop
-    (5.0,  0.03, 0.30, 0.04, 0.04),  # Fixed 3% stop
-    (0.0,  0.03, 0.15, 0.03, 0.02),  # Fixed 3% stop
+    (10.0, 0.02, 0.50, 0.05, 0.05),  # Fixed 2% stop
+    (5.0,  0.02, 0.30, 0.04, 0.04),  # Fixed 2% stop
+    (0.0,  0.02, 0.15, 0.03, 0.02),  # Fixed 2% stop
 ]
 
 # ── Daily profit protection (rtg_2.0) ──────────────────────────────────
@@ -138,9 +139,10 @@ GAPGO_MIN_FIRST_BAR_VOL = 99999999   # Effectively disabled
 GAPGO_MIN_BREAKOUT_VOL = 99999999    # Effectively disabled
 
 # ── Exit parameters (defaults — overridden by RVOL_EXIT_TIERS) ──────
-RTG_STOP_PCT = 0.03           # Fixed 3% hard stop loss
+RTG_STOP_PCT = 0.02           # Fixed 2% hard stop loss
 RTG_TARGET_PCT = 0.0          # No target
-RTG_TIME_LIMIT_SEC = 120        # 2-minute time limit — sell after 120 seconds
+RTG_TIME_LIMIT_SEC = 180        # 3-minute time limit — sell after 180 seconds
+RTG_MIN_HOLD_SEC = 60           # Min 60s hold — no switch in first 60 seconds
 RTG_TRAIL_ACTIVATE_PCT = 0.03 # Activate trailing stop after +3% gain
 RTG_TRAIL_PCT = 0.02          # 2% trailing stop
 

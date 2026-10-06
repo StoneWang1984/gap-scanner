@@ -1,6 +1,7 @@
-"""stonewang_daytrade_rtg_2mins_all — RTG entry + 5% stop + 2-min time limit (all day).
+"""stonewang_daytrade_rtg_2mins_all — RTG entry + 2% stop + 3-min time limit (all day).
 
-Exit: 5% hard stop OR sell after 2 minutes, whichever comes first.
+Exit: 2% hard stop OR sell after 3 minutes, whichever comes first.
+Min hold 60s: no switch in first 60 seconds.
 No trailing stop, no progressive trail, no profit protection at any time.
 Pre-10:30: RTG entry with close > open_price; Post-10:30: volume surge only.
 """
@@ -1599,9 +1600,10 @@ def run_trading_day(target_date):
         if positions and entry_start_dt <= now < entry_end_dt:
             current_pos = positions[0]
             current_rvol = current_pos.rvol
-            # Time held: don't switch if close to time_limit exit anyway
+            # Time held: min 60s before switch, don't switch if close to time_limit
             time_held = time.time() - current_pos.entry_ts
-            if time_held < config.RTG_TIME_LIMIT_SEC - 10:  # At least 10s left
+            min_hold = getattr(config, "RTG_MIN_HOLD_SEC", 60)
+            if time_held >= min_hold and time_held < config.RTG_TIME_LIMIT_SEC - 10:  # 60s-170s: can switch
                 for c in candidates:
                     sym = c["symbol"]
                     rvol = c.get("rvol", 0)

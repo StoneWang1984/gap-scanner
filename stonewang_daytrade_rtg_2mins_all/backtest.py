@@ -1,6 +1,7 @@
-"""Backtesting engine — stonewang_daytrade_rtg_2mins_all: RTG entry + 5% stop + 2-min time limit (all day).
+"""Backtesting engine — stonewang_daytrade_rtg_2mins_all: RTG entry + 2% stop + 3-min time limit (all day).
 
-Exit: 5% hard stop OR sell after 2 minutes (120 bars), whichever comes first.
+Exit: 2% hard stop OR sell after 3 minutes (180 bars), whichever comes first.
+Min hold 60s: no switch in first 60 seconds.
 No trailing stop, no progressive trail, no profit protection at any time.
 
 Entry detection (1-min bars):
@@ -502,8 +503,8 @@ class OpenPosition:
             self.closed = True
             return True
 
-        # 2. Time limit (2 minutes = 120 bars)
-        time_limit_bars = getattr(config, "RTG_TIME_LIMIT_SEC", 120)
+        # 2. Time limit (3 minutes = 180 bars)
+        time_limit_bars = getattr(config, "RTG_TIME_LIMIT_SEC", 180)
         if bar_idx - self.entry_bar_idx >= time_limit_bars:
             self.exit_price = round(bar_close * (1 - exit_slippage), 4)
             self.exit_reason = "time_limit"
@@ -892,7 +893,7 @@ def run_backtest(end_date=None, n_days=None):
                         if b["timestamp"] == ts:
                             time_held_bars = bi - current_pos.entry_bar_idx
                             break
-                    if time_held_bars is not None and time_held_bars < config.RTG_TIME_LIMIT_SEC - 10:
+                    if time_held_bars is not None and time_held_bars >= getattr(config, "RTG_MIN_HOLD_SEC", 60) and time_held_bars < config.RTG_TIME_LIMIT_SEC - 10:
                         bar_time = ts.time() if hasattr(ts, 'time') else None
                         entry_end_str = getattr(config, "ENTRY_WINDOW_END", "15:30")
                         entry_end_h, entry_end_m = (int(x) for x in entry_end_str.split(":"))
