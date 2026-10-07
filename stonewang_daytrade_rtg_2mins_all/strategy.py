@@ -33,22 +33,6 @@ class TradeResult:
     signal_type: str = ""
 
 
-def _get_progressive_trail(profit_pct, base_trail_pct):
-    """Get tightened trail_pct based on current profit and PROGRESSIVE_TRAIL_TIERS.
-
-    Tiers (from config): [(profit_threshold, trail_pct), ...]
-    e.g. [(0.15, 0.005), (0.10, 0.010), (0.05, 0.015)]
-    Sorted descending: first match wins.
-    """
-    tiers = getattr(config, "PROGRESSIVE_TRAIL_TIERS", [])
-    if not tiers:
-        return base_trail_pct
-    for threshold, trail in tiers:
-        if profit_pct >= threshold:
-            return trail
-    return base_trail_pct
-
-
 def evaluate_trade_rtg(
     entry_price: float,
     shares: int,
@@ -64,7 +48,7 @@ def evaluate_trade_rtg(
     trail_pct: float | None = None,
     time_limit_sec: int | None = None,
 ) -> TradeResult:
-    """RTG exit with progressive trailing stop (rtg_2.0).
+    """RTG exit with 5% hard stop + 3-min time limit (matches live_trade.py).
 
     bars_after_entry: list of dicts with keys "high", "low", "close", "open", "volume", "timestamp"
     """
@@ -76,22 +60,14 @@ def evaluate_trade_rtg(
         )
 
     _stop_pct = stop_pct if stop_pct is not None else config.RTG_STOP_PCT
-    _target_pct = target_pct if target_pct is not None else config.RTG_TARGET_PCT
-    _trail_act = trail_activate_pct if trail_activate_pct is not None else config.RTG_TRAIL_ACTIVATE_PCT
-    _trail_pct = trail_pct if trail_pct is not None else config.RTG_TRAIL_PCT
     _time_sec = time_limit_sec if time_limit_sec is not None else config.RTG_TIME_LIMIT_SEC
 
     stop_price = round(entry_price * (1 - _stop_pct), 4)
-    target_price = round(entry_price * (1 + _target_pct), 4)
-    trail_activate = entry_price * (1 + _trail_act)
     time_limit_bars = 0 if _time_sec == 0 else max(1, _time_sec // 60)
 
     slippage = getattr(config, "SLIPPAGE_EXIT_PCT", 0.0)
 
     highest = entry_price
-    trail_active = False
-    trail_stop = 0.0
-    current_trail_pct = _trail_pct
     exit_price = 0.0
     reason = ""
     exit_bi = 0
@@ -100,46 +76,24 @@ def evaluate_trade_rtg(
         bar_high = float(bar["high"])
         bar_low = float(bar["low"])
         bar_close = float(bar["close"])
+        bar_open = float(bar["open"])
 
         if bar_high > highest:
             highest = bar_high
 
-        # Progressive trailing: adjust trail_pct based on current profit
-        if highest > entry_price:
-            profit_pct = (highest - entry_price) / entry_price
-            current_trail_pct = _get_progressive_trail(profit_pct, _trail_pct)
-
-        # 1. Hard stop (highest priority)
+        # 1. Hard stop (with gap-through model)
         if bar_low <= stop_price:
-            exit_price = stop_price
+            if bar_open < stop_price:
+                exit_price = round(bar_open * (1 - slippage), 4)
+            else:
+                exit_price = stop_price
             reason = "stop_loss"
             exit_bi = bi
             break
 
-        # 2. Trailing stop (after activation, with progressive tightening)
-        if not trail_active and highest >= trail_activate:
-            trail_active = True
-            trail_stop = round(highest * (1 - current_trail_pct), 4)
-        if trail_active:
-            new_trail = round(highest * (1 - current_trail_pct), 4)
-            if new_trail > trail_stop:
-                trail_stop = new_trail
-            if bar_low <= trail_stop:
-                exit_price = trail_stop
-                reason = "trail_stop"
-                exit_bi = bi
-                break
-
-        # 3. Target
-        if bar_high >= target_price:
-            exit_price = target_price
-            reason = "target"
-            exit_bi = bi
-            break
-
-        # 4. Time limit (0 = disabled)
+        # 2. Time limit (0 = disabled)
         if time_limit_bars > 0 and bi >= time_limit_bars:
-            exit_price = bar_close
+            exit_price = round(bar_close * (1 - slippage), 4)
             reason = "time_limit"
             exit_bi = bi
             break
@@ -154,8 +108,8 @@ def evaluate_trade_rtg(
         reason = "force_close"
         exit_bi = len(bars_after_entry) - 1
 
-    # Apply exit slippage
-    if slippage > 0 and reason not in ("stop_loss", "trail_stop", "target"):
+    # Apply exit slippage for force_close
+    if slippage > 0 and reason == "force_close":
         exit_price = round(exit_price * (1 - slippage), 4)
 
     pnl = round((exit_price - entry_price) * shares, 2)
@@ -171,7 +125,7 @@ def evaluate_trade_rtg(
         exit_reason=reason,
         open_price=round(open_price, 4) if open_price else 0.0,
         stop_price=stop_price,
-        target_price=target_price,
+        target_price=0,
         trailing_high=round(highest, 4),
         exit_bar_idx=exit_bi,
         entry_bar_idx=entry_bar_idx,

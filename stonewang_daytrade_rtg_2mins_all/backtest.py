@@ -505,8 +505,9 @@ class OpenPosition:
             self.closed = True
             return True
 
-        # 2. Time limit (3 minutes = 180 bars)
-        time_limit_bars = getattr(config, "RTG_TIME_LIMIT_SEC", 180)
+        # 2. Time limit (convert seconds to 1-min bars)
+        time_limit_sec = getattr(config, "RTG_TIME_LIMIT_SEC", 180)
+        time_limit_bars = max(1, time_limit_sec // 60)  # 180s → 3 bars
         if bar_idx - self.entry_bar_idx >= time_limit_bars:
             self.exit_price = round(bar_close * (1 - exit_slippage), 4)
             self.exit_reason = "time_limit"
@@ -726,6 +727,10 @@ def run_backtest(end_date=None, n_days=None):
         closed_trades = []
         entered_symbols = set()
         entry_slippage = getattr(config, "SLIPPAGE_ENTRY_PCT", 0.005)
+        # Re-entry tracking (match live_trade.py)
+        entry_count = {}       # symbol -> count of entries
+        last_exit_bar = {}     # symbol -> bar_idx of last exit
+        stop_exit_bar = {}     # symbol -> bar_idx of stop_loss exit
 
         for symbol, (entry_at_open, entry_at_close, entry_bar_idx, signal_type, rvol, open_price, gap_p) in sorted_entries:
             if symbol in entered_symbols:
@@ -763,6 +768,7 @@ def run_backtest(end_date=None, n_days=None):
             )
             open_positions.append(pos)
             entered_symbols.add(symbol)
+            entry_count[symbol] = entry_count.get(symbol, 0) + 1
             entry_ts_str = _bar_ts_str(cached_bars[symbol], entry_bar_idx)
             atr_str = f" ATR=${atr:.3f}" if atr > 0 else ""
             print(f"  {symbol} [{signal_type}] entry=${entry_price_actual:.4f}@{entry_ts_str} "
@@ -805,6 +811,9 @@ def run_backtest(end_date=None, n_days=None):
                 if exited:
                     closed_trades.append(pos)
                     daily_trade_count += 1
+                    last_exit_bar[pos.symbol] = bar_idx
+                    if pos.exit_reason == "stop_loss":
+                        stop_exit_bar[pos.symbol] = bar_idx
                     # Allow re-entry: remove from entered_symbols so stock can be bought again
                     if getattr(config, "RTG_REENTRY_ALLOWED", False):
                         entered_symbols.discard(pos.symbol)
@@ -841,6 +850,24 @@ def run_backtest(end_date=None, n_days=None):
                             continue
                         if sym in entered_symbols:
                             continue
+                        # Re-entry checks (match live_trade.py)
+                        is_reentry = sym in last_exit_bar
+                        if is_reentry and not getattr(config, "RTG_REENTRY_ALLOWED", False):
+                            continue
+                        if is_reentry and getattr(config, "RTG_REENTRY_MAX", 0) > 0 and entry_count.get(sym, 0) >= getattr(config, "RTG_REENTRY_MAX", 3):
+                            continue
+                        # Cooldown: bars since last exit
+                        if is_reentry and sym in last_exit_bar:
+                            bars_since_exit = bar_idx - last_exit_bar[sym]
+                            reentry_cd_bars = max(1, getattr(config, "REENTRY_COOLDOWN_SEC", 60) // 60)
+                            if sym in stop_exit_bar and stop_exit_bar[sym] == last_exit_bar[sym]:
+                                reentry_cd_bars = max(1, getattr(config, "REENTRY_STOP_COOLDOWN_SEC", 120) // 60)
+                            if bars_since_exit < reentry_cd_bars:
+                                continue
+                        # Don't chase: re-entry price < 115% of open
+                        if is_reentry:
+                            max_reentry_price = row["open_price"] * getattr(config, "REENTRY_MAX_PRICE_VS_OPEN", 1.15)
+                            # We'll check after signal confirmation
                         if sym not in cached_bars:
                             continue
                         bars_1m_sym = _list_to_bars_1m(cached_bars[sym])
@@ -855,6 +882,11 @@ def run_backtest(end_date=None, n_days=None):
                             bars_1m_sym, row["open_price"], min_volume=min_vol, require_above_open=is_morning_reentry)
                         if not confirmed or entry_at_open <= 0:
                             continue
+                        # Re-entry price guard: don't chase above 115% of open
+                        if is_reentry:
+                            max_reentry_price = row["open_price"] * getattr(config, "REENTRY_MAX_PRICE_VS_OPEN", 1.15)
+                            if entry_at_open > max_reentry_price:
+                                continue
                         # Enter RTG (found signal, buy immediately)
                         current_equity = daily_start_equity + sum(p.pnl for p in closed_trades)
                         entry_price_actual = round(entry_at_open * (1 + entry_slippage), 4)
@@ -879,6 +911,7 @@ def run_backtest(end_date=None, n_days=None):
                         )
                         open_positions.append(pos)
                         entered_symbols.add(sym)
+                        entry_count[sym] = entry_count.get(sym, 0) + 1
                         n_open += 1
                         entry_ts_str = _bar_ts_str(cached_bars[sym], entry_bar_idx)
                         print(f"  {sym} [{signal_type}] entry=${entry_price_actual:.4f}@{entry_ts_str} "
@@ -895,7 +928,10 @@ def run_backtest(end_date=None, n_days=None):
                         if b["timestamp"] == ts:
                             time_held_bars = bi - current_pos.entry_bar_idx
                             break
-                    if time_held_bars is not None and time_held_bars >= getattr(config, "RTG_MIN_HOLD_SEC", 60) and time_held_bars < config.RTG_TIME_LIMIT_SEC - 10:
+                    # Convert seconds to 1-min bars for comparison
+                    min_hold_bars = max(1, getattr(config, "RTG_MIN_HOLD_SEC", 60) // 60)  # 60s → 1 bar
+                    time_limit_bars = max(1, getattr(config, "RTG_TIME_LIMIT_SEC", 180) // 60)  # 180s → 3 bars
+                    if time_held_bars is not None and time_held_bars >= min_hold_bars and time_held_bars < time_limit_bars - 1:
                         bar_time = ts.time() if hasattr(ts, 'time') else None
                         entry_end_str = getattr(config, "ENTRY_WINDOW_END", "15:30")
                         entry_end_h, entry_end_m = (int(x) for x in entry_end_str.split(":"))
@@ -930,6 +966,7 @@ def run_backtest(end_date=None, n_days=None):
                                 current_pos.force_close(bars_this_min.get(current_pos.symbol, {}).get("close", current_pos.entry_price), time_held_bars + current_pos.entry_bar_idx, "switch_exit")
                                 closed_trades.append(current_pos)
                                 daily_trade_count += 1
+                                last_exit_bar[current_pos.symbol] = bar_idx
                                 entered_symbols.discard(current_pos.symbol)
                                 # Enter new
                                 current_equity = daily_start_equity + sum(p.pnl for p in closed_trades)
@@ -950,6 +987,7 @@ def run_backtest(end_date=None, n_days=None):
                                 )
                                 open_positions.append(pos)
                                 entered_symbols.add(sym)
+                                entry_count[sym] = entry_count.get(sym, 0) + 1
                                 entry_ts_str = _bar_ts_str(cached_bars[sym], entry_bar_idx)
                                 print(f"  SWITCH: {current_pos.symbol}→{sym} [{signal_type}] entry=${entry_price_actual:.4f}@{entry_ts_str} "
                                       f"{shares}sh [RVOL={rvol:.1f}× {exit_label}]")
