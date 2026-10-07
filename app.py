@@ -1,4 +1,4 @@
-"""RTG 2.0 策略 — Streamlit Web UI (交易显示 + 策略概览 + 交易详情)"""
+"""RTG 2mins All 策略 — Streamlit Web UI (交易显示 + 策略概览 + 交易详情)"""
 
 import json
 import time
@@ -17,12 +17,12 @@ config = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(config)
 sys.modules["config"] = config
 
-st.set_page_config(page_title="RTG 2.0 交易", page_icon="📊", layout="wide")
+st.set_page_config(page_title="RTG 2mins All 交易", page_icon="📊", layout="wide")
 
 # ── Sidebar ──────────────────────────────────────────────────────
 
 st.sidebar.title("RTG 2mins All 交易")
-st.sidebar.caption("全天5%止损+2分钟限时")
+st.sidebar.caption(f"全天{config.RTG_STOP_PCT:.0%}止损+{config.RTG_TIME_LIMIT_SEC//60}分钟限时")
 
 tab = st.sidebar.radio("导航", ["实盘交易", "策略概览", "交易详情", "日志"])
 
@@ -242,6 +242,7 @@ elif tab == "策略概览":
         - 首笔: 全量扫描 + 过时保护 (当前价 > 开盘价)
         - 后续: 即时扫描 (最近3根bar)
         - 10:30后: 量能突破 + **阳线确认** (close > open, 不买下跌bar)
+        - **RVOL门槛**: ≥ {config.RTG_MIN_RVOL:.0f}× (仅交易有机构关注的股票)
         """)
 
         st.subheader("仓位管理")
@@ -259,10 +260,11 @@ elif tab == "策略概览":
 
     with col2:
         st.subheader("退出规则")
+        time_min = config.RTG_TIME_LIMIT_SEC // 60
         st.markdown(f"""
-        **全天统一 (5%止损 + 2分钟限时)**
-        - **5%硬止损**: 价格跌破入场价×95% → `stop_loss`
-        - **2分钟限时**: 持有超过120秒 → `time_limit`
+        **全天统一 ({config.RTG_STOP_PCT:.0%}止损 + {time_min}分钟限时)**
+        - **{config.RTG_STOP_PCT:.0%}硬止损**: 价格跌破入场价×{1-config.RTG_STOP_PCT:.2f} → `stop_loss`
+        - **{time_min}分钟限时**: 持有超过{config.RTG_TIME_LIMIT_SEC}秒 → `time_limit`
         - 无追踪止损, 无渐进Trailing, 无目标价
 
         **通用**
@@ -270,20 +272,27 @@ elif tab == "策略概览":
         """)
 
         st.subheader("强制平仓 & Re-entry")
+        re_cd = getattr(config, "REENTRY_COOLDOWN_SEC", 60)
+        re_stop_cd = getattr(config, "REENTRY_STOP_COOLDOWN_SEC", 120)
+        re_price = getattr(config, "REENTRY_MAX_PRICE_VS_OPEN", 1.15)
         st.markdown(f"""
         - EOD强平: **{config.FORCE_CLOSE_TIME} EST**
-        - Re-entry: **禁用** (opening drive is your only edge)
+        - Re-entry: **允许** (最多{config.RTG_REENTRY_MAX}次/股/天)
+        - 普通冷却: **{re_cd}秒** | 止损冷却: **{re_stop_cd}秒**
+        - 不追高: 入场价 < **{re_price:.0%}** × open_price
         """)
 
     st.divider()
     st.subheader("RTG 2mins All 设计理念")
-    st.markdown("""
-    - **全天统一策略**: 所有入场都用5%止损+2分钟限时, 不区分10:30前后
+    time_min = config.RTG_TIME_LIMIT_SEC // 60
+    re_max = config.RTG_REENTRY_MAX if config.RTG_REENTRY_ALLOWED else 0
+    st.markdown(f"""
+    - **全天统一策略**: 所有入场都用{config.RTG_STOP_PCT:.0%}止损+{time_min}分钟限时, 不区分10:30前后
     - **RTG入场**: close > open_price + 量能突破, 75%胜率信号
     - **即时扫描**: 10:30后量能突破+阳线确认(close>open), 不买下跌bar
-    - **5%止损+2分钟限时**: 快进快出, 避免利润回吐
+    - **{config.RTG_STOP_PCT:.0%}止损+{time_min}分钟限时**: 快进快出, 避免利润回吐
     - **全仓单股**: 最多1仓, 100%权益全仓买入最佳候选
-    - **No Re-entry**: 首笔退出后不再入场同一股票
+    - **Re-entry**: 允许, 最多{re_max}次/股/天, 普通{config.REENTRY_COOLDOWN_SEC}秒/止损{config.REENTRY_STOP_COOLDOWN_SEC}秒冷却
     """)
 
 # ══════════════════════════════════════════════════════════════════
