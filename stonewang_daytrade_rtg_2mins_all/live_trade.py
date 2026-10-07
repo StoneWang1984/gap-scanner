@@ -3,7 +3,7 @@
 Exit: 5% hard stop OR sell after 3 minutes, whichever comes first.
 Min hold 60s: no switch in first 60 seconds.
 No trailing stop, no progressive trail, no profit protection at any time.
-Pre-10:30: RTG entry with close > open_price; Post-10:30: volume surge only.
+Pre-10:30: RTG entry with close > open_price; Post-10:30: volume surge + bullish bar (close > open).
 """
 
 import re
@@ -1009,7 +1009,9 @@ def check_rtg_entry_instant(symbol, open_price, bars, min_volume=None, require_a
     and conditions no longer hold, it won't be found. This prevents
     buying on old RTG signals after the momentum has faded.
 
-    require_above_open: if False, skip close > open_price check (volume surge only).
+    require_above_open: if False, skip close > open_price check (volume surge only),
+    but still requires the signal bar to be bullish (close > open) — never buy on
+    a red/down bar (volume dump is NOT a buy signal for long-only strategy).
     """
     if len(bars) < 2:
         return 0.0, False, ""
@@ -1031,9 +1033,10 @@ def check_rtg_entry_instant(symbol, open_price, bars, min_volume=None, require_a
         if bar_time is None or not (entry_start <= bar_time <= entry_end):
             continue
         bc = bar["close"]
+        bo = bar["open"]
         bv = bar["volume"]
         pv = prev["volume"]
-        price_ok = (bc > open_price) if require_above_open else True
+        price_ok = (bc > open_price) if require_above_open else (bc > bo)  # Even in volume-surge mode, require bullish bar
         if price_ok and pv > 0 and bv >= config.RTG_VOLUME_MULT * pv and bv >= min_volume:
             entry = round(open_price * 1.001, 4) if getattr(config, "RTG_ENTRY_AT_OPEN", True) else round(bc, 4)
             return entry, True, "rtg"

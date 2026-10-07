@@ -7,6 +7,7 @@ Exit (all day, same for pre-10:30 and post-10:30):
   Min hold: 60 seconds — no switch to other stock in first 60s
   No trailing stop, no progressive trail, no profit protection at any time.
   No daily loss circuit breaker.
+  Post-10:30: volume surge + bullish bar (close > open), never buy on red/down bar.
 """
 
 import os

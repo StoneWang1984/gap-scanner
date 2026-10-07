@@ -325,7 +325,8 @@ def find_rtg_entry_1min(bars_1m, open_price, min_volume=None):
 def find_rtg_entry_instant_1min(bars_1m, open_price, min_volume=None, require_above_open=True):
     """Find RTG entry on the last 3 bars only. No stale signals.
 
-    require_above_open: if False, skip close > open_price check (volume surge only).
+    require_above_open: if False, skip close > open_price check (volume surge only),
+    but still requires the signal bar to be bullish (close > open).
     """
     if bars_1m.empty or len(bars_1m) < 2:
         return 0.0, 0.0, -1, False, ""
@@ -354,10 +355,11 @@ def find_rtg_entry_instant_1min(bars_1m, open_price, min_volume=None, require_ab
         prev_bar = bars_1m.iloc[i - 1]
 
         bar_close = float(bar["close"])
+        bar_open = float(bar["open"])
         bar_vol = int(bar["volume"])
         prev_vol = int(prev_bar["volume"])
 
-        price_ok = (bar_close > open_price) if require_above_open else True
+        price_ok = (bar_close > open_price) if require_above_open else (bar_close > bar_open)  # Even in volume-surge mode, require bullish bar
         if (price_ok
                 and prev_vol > 0
                 and bar_vol >= config.RTG_VOLUME_MULT * prev_vol

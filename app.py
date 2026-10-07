@@ -63,8 +63,16 @@ if tab == "实盘交易":
         equity = config.INITIAL_CAPITAL
         st.warning(f"无法连接 Alpaca API: {e}")
 
-    pnl = equity - last_equity if last_equity > 0 else 0.0
-    pnl_pct = pnl / last_equity if last_equity > 0 else 0.0
+    # 当日盈亏: 从 trades_detail 累加 (与"今日总盈亏"一致)
+    daily_pnl_from_trades = 0.0
+    try:
+        with open("/Users/stonewang2014/gap-scanner/live_state.json") as f:
+            _s = json.load(f)
+        daily_pnl_from_trades = sum(t.get("pnl", 0) for t in _s.get("trades_detail", []))
+    except Exception:
+        pass
+    pnl = daily_pnl_from_trades if daily_pnl_from_trades != 0.0 else (equity - last_equity if last_equity > 0 else 0.0)
+    pnl_pct = pnl / equity if equity > 0 else 0.0
     a1, a2, a3, a4, a5 = st.columns(5)
     a1.metric("权益", f"${equity:,.2f}")
     a2.metric("购买力", f"${bp:,.2f}")
@@ -233,7 +241,7 @@ elif tab == "策略概览":
         - 全天窗口: **{config.ENTRY_WINDOW_START} ~ {config.ENTRY_WINDOW_END} EST**
         - 首笔: 全量扫描 + 过时保护 (当前价 > 开盘价)
         - 后续: 即时扫描 (最近3根bar)
-        - 10:30后: **不要求** close > open_price (纯量能突破)
+        - 10:30后: 量能突破 + **阳线确认** (close > open, 不买下跌bar)
         """)
 
         st.subheader("仓位管理")
@@ -272,7 +280,7 @@ elif tab == "策略概览":
     st.markdown("""
     - **全天统一策略**: 所有入场都用5%止损+2分钟限时, 不区分10:30前后
     - **RTG入场**: close > open_price + 量能突破, 75%胜率信号
-    - **即时扫描**: 10:30后只看量能突破, 不要求价格高于开盘价
+    - **即时扫描**: 10:30后量能突破+阳线确认(close>open), 不买下跌bar
     - **5%止损+2分钟限时**: 快进快出, 避免利润回吐
     - **全仓单股**: 最多1仓, 100%权益全仓买入最佳候选
     - **No Re-entry**: 首笔退出后不再入场同一股票
