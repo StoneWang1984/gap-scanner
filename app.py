@@ -1,4 +1,4 @@
-"""RTG 2mins All 策略 — Streamlit Web UI (交易显示 + 策略概览 + 交易详情)"""
+"""Momentum Surge 1.0 策略 — Streamlit Web UI (交易显示 + 策略概览 + 交易详情)"""
 
 import json
 import time
@@ -7,7 +7,7 @@ from pathlib import Path
 import streamlit as st
 import pandas as pd
 
-VERSION_DIR = Path("/Users/stonewang2014/gap-scanner/stonewang_daytrade_rtg_2mins_all")
+VERSION_DIR = Path("/Users/stonewang2014/gap-scanner/stonewang_daytrade_momentum_surge_1.0")
 STATE_FILE = Path("/Users/stonewang2014/gap-scanner/live_state.json")
 LOG_FILE = VERSION_DIR / "live_rtg.log"
 
@@ -17,12 +17,12 @@ config = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(config)
 sys.modules["config"] = config
 
-st.set_page_config(page_title="RTG 2mins All 交易", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Momentum Surge 交易", page_icon="📊", layout="wide")
 
 # ── Sidebar ──────────────────────────────────────────────────────
 
-st.sidebar.title("RTG 2mins All 交易")
-st.sidebar.caption(f"全天{config.RTG_STOP_PCT:.0%}止损+{config.RTG_TIME_LIMIT_SEC//60}分钟限时")
+st.sidebar.title("Momentum Surge 1.0")
+st.sidebar.caption(f"三叉动量 | {config.RTG_STOP_PCT:.0%}止损+追踪+{config.RTG_TIME_LIMIT_SEC//60}min限时")
 
 tab = st.sidebar.radio("导航", ["实盘交易", "策略概览", "交易详情", "日志"])
 
@@ -63,7 +63,6 @@ if tab == "实盘交易":
         equity = config.INITIAL_CAPITAL
         st.warning(f"无法连接 Alpaca API: {e}")
 
-    # 当日盈亏: 从 trades_detail 累加 (与"今日总盈亏"一致)
     daily_pnl_from_trades = 0.0
     try:
         with open("/Users/stonewang2014/gap-scanner/live_state.json") as f:
@@ -120,8 +119,9 @@ if tab == "实盘交易":
                 row["信号"] = sp.get("signal_type", "rtg")
                 row["RVOL"] = f"{sp.get('rvol', 0):.1f}×"
                 row["止损"] = f"{sp.get('stop_pct', 0):.1%}"
-                row["Trail"] = f"{sp.get('trail_pct', 0):.1%}"
+                row["Trail"] = f"{sp.get('trail_activate_pct', 0):.0%}/{sp.get('trail_pct', 0):.1%}"
                 row["最高"] = f"${sp.get('highest', 0):.4f}"
+                row["追踪激活"] = "✓" if sp.get("trail_active", False) else "✗"
 
             pos_rows.append(row)
 
@@ -136,7 +136,7 @@ if tab == "实盘交易":
                 "入场价": f"${p.get('entry_price', 0):.4f}",
                 "RVOL": f"{p.get('rvol', 0):.1f}×",
                 "止损": f"{p.get('stop_pct', 0):.1%}",
-                "Trail": f"{p.get('trail_pct', 0):.1%}",
+                "Trail": f"{p.get('trail_activate_pct', 0):.0%}/{p.get('trail_pct', 0):.1%}",
             })
         st.dataframe(pd.DataFrame(pos_rows), hide_index=True, use_container_width=True)
     else:
@@ -148,9 +148,12 @@ if tab == "实盘交易":
         st.subheader("今日候选股")
         cand_rows = []
         for c in state["candidates"]:
+            gap_pct = c.get("gap_pct", 0)
+            sig = "reversal" if gap_pct < 0 else "rtg"
             cand_rows.append({
                 "股票": c["symbol"],
-                "跳空": f"+{c['gap_pct']:.1%}",
+                "信号": sig.upper(),
+                "跳空": f"{gap_pct:+.1%}",
                 "RVOL": f"{c.get('rvol', 0):.1f}×",
                 "开盘": f"${c['open_price']:.4f}",
                 "昨收": f"${c['prev_close']:.4f}",
@@ -183,7 +186,6 @@ if tab == "实盘交易":
             entry_cost = entry_price * total_shares if entry_price > 0 else 0
             pnl_pct = (total_pnl_sym / entry_cost) if entry_cost > 0 else 0
 
-            # Buy/sell times
             entry_ts = trades[0].get("entry_ts", "")
             exit_ts = trades[-1].get("exit_ts", "")
 
@@ -220,29 +222,35 @@ if tab == "实盘交易":
 # ══════════════════════════════════════════════════════════════════
 
 elif tab == "策略概览":
-    st.title("RTG 2mins 策略概览")
+    st.title("Momentum Surge 1.0 策略概览")
 
     col1, col2 = st.columns(2)
 
     with col1:
-        st.subheader("盘前扫描 (9:25启动)")
+        st.subheader("三叉入场")
         st.markdown(f"""
-        - 跳空幅度 > **{config.GAP_THRESHOLD:.0%}** (正跳空)
+        **Prong 1: 小跳空扫描 (gap ≥ {config.GAP_THRESHOLD:.0%})**
+        - RTG入场: close > open_price + 量能 ≥ {config.RTG_VOLUME_MULT}× 前bar
+        - 捕获VEEA/CANG类小gap机会
+
+        **Prong 2: 盘中动量扫描 (每5分钟)**
+        - 价格涨 >{getattr(config, 'MOMENTUM_MIN_GAIN_PCT', 0.03):.0%} from open
+        - 5min量能 >{getattr(config, 'MOMENTUM_VOLUME_SURGE_MULT', 2.0):.1f}× 均量
+        - 突破{getattr(config, 'MOMENTUM_BREAKOUT_LOOKBACK_MIN', 30)}分钟新高
+
+        **Prong 3: 低开反弹 (gap {getattr(config, 'REVERSAL_GAP_MIN', -0.10):+.0%}~{getattr(config, 'REVERSAL_GAP_MAX', -0.03):+.0%})**
+        - 价格穿越回open_price上方 + 量能确认
+        - RVOL ≥ {getattr(config, 'REVERSAL_MIN_RVOL', 3.0):.1f}×
+        """)
+
+        st.subheader("盘前扫描")
+        st.markdown(f"""
+        - 跳空幅度: gap ≥ **{config.GAP_THRESHOLD:.0%}** 或 gap ≤ **{getattr(config, 'REVERSAL_GAP_MAX', -0.03):+.0%}**
         - 盘前成交量 > **{config.MIN_VOLUME:,}** 股
-        - 最低成交额 > **${config.MIN_DOLLAR_VOLUME:,.0f}**
         - 价格区间 **${config.PRICE_MIN}** ~ **${config.PRICE_MAX}**
         - 杠杆ETF / Crypto ETF: **已过滤**
         - 候选股: **Top {config.MAX_CANDIDATES} by RVOL**
-        """)
-
-        st.subheader("入场信号")
-        st.markdown(f"""
-        - **RTG** (Red-to-Green): close > open_price + 量能 ≥ {config.RTG_VOLUME_MULT}× 前bar + ≥ {config.RTG_MIN_VOLUME:,}股
-        - 全天窗口: **{config.ENTRY_WINDOW_START} ~ {config.ENTRY_WINDOW_END} EST**
-        - 首笔: 全量扫描 + 过时保护 (当前价 > 开盘价)
-        - 后续: 即时扫描 (最近3根bar)
-        - 10:30后: 量能突破 + **阳线确认** (close > open, 不买下跌bar)
-        - **RVOL门槛**: ≥ {config.RTG_MIN_RVOL:.0f}× (仅交易有机构关注的股票)
+        - 入场窗口: **{config.ENTRY_WINDOW_START} ~ {config.ENTRY_WINDOW_END} EST**
         """)
 
         st.subheader("仓位管理")
@@ -254,45 +262,38 @@ elif tab == "策略概览":
         - 日损失熔断: **{config.MAX_DAILY_LOSS_PCT:.0%}**
         """)
 
-        st.subheader("RVOL仓位分级")
-        for rvol_min, eq_pct in config.RVOL_SIZING_TIERS:
-            st.markdown(f"- RVOL ≥ {rvol_min:.0f}× → **{eq_pct:.0%}** 权益")
-
     with col2:
         st.subheader("退出规则")
         time_min = config.RTG_TIME_LIMIT_SEC // 60
+        trail_act = config.TRAILING_ACTIVATE_PCT if getattr(config, "TRAILING_STOP_ENABLED", False) else 0
+        trail_p = config.TRAILING_PCT if getattr(config, "TRAILING_STOP_ENABLED", False) else 0
         st.markdown(f"""
-        **全天统一 ({config.RTG_STOP_PCT:.0%}止损 + {time_min}分钟限时)**
-        - **{config.RTG_STOP_PCT:.0%}硬止损**: 价格跌破入场价×{1-config.RTG_STOP_PCT:.2f} → `stop_loss`
-        - **{time_min}分钟限时**: 持有超过{config.RTG_TIME_LIMIT_SEC}秒 → `time_limit`
-        - 无追踪止损, 无渐进Trailing, 无目标价
-
-        **通用**
-        - **EOD强平**: **{config.FORCE_CLOSE_TIME} EST** → `force_close`
+        1. **{config.RTG_STOP_PCT:.0%}硬止损**: 价格跌破入场价×{1-config.RTG_STOP_PCT:.2f} → `stop_loss`
+        2. **追踪止损**: 利润达+{trail_act:.0%}激活，回撤{trail_p:.0%}平仓 → `trailing_stop`
+        3. **{time_min}分钟限时**: 持有超过{config.RTG_TIME_LIMIT_SEC}秒 → `time_limit`
+        4. **日亏损熔断**: 当日亏损达{config.MAX_DAILY_LOSS_PCT:.0%} → `circuit_breaker`
+        5. **EOD强平**: **{config.FORCE_CLOSE_TIME} EST** → `force_close`
         """)
 
-        st.subheader("强制平仓 & Re-entry")
+        st.subheader("Re-entry")
         re_cd = getattr(config, "REENTRY_COOLDOWN_SEC", 60)
         re_stop_cd = getattr(config, "REENTRY_STOP_COOLDOWN_SEC", 120)
         re_price = getattr(config, "REENTRY_MAX_PRICE_VS_OPEN", 1.15)
         st.markdown(f"""
-        - EOD强平: **{config.FORCE_CLOSE_TIME} EST**
         - Re-entry: **允许** (最多{config.RTG_REENTRY_MAX}次/股/天)
         - 普通冷却: **{re_cd}秒** | 止损冷却: **{re_stop_cd}秒**
         - 不追高: 入场价 < **{re_price:.0%}** × open_price
         """)
 
     st.divider()
-    st.subheader("RTG 2mins All 设计理念")
-    time_min = config.RTG_TIME_LIMIT_SEC // 60
-    re_max = config.RTG_REENTRY_MAX if config.RTG_REENTRY_ALLOWED else 0
+    st.subheader("Momentum Surge 1.0 设计理念")
     st.markdown(f"""
-    - **全天统一策略**: 所有入场都用{config.RTG_STOP_PCT:.0%}止损+{time_min}分钟限时, 不区分10:30前后
-    - **RTG入场**: close > open_price + 量能突破, 75%胜率信号
-    - **即时扫描**: 10:30后量能突破+阳线确认(close>open), 不买下跌bar
-    - **{config.RTG_STOP_PCT:.0%}止损+{time_min}分钟限时**: 快进快出, 避免利润回吐
+    - **三叉入口**: 小gap RTG + 盘中动量 + 低开反弹, 覆盖90%日内大涨机会
+    - **追踪止损**: +{trail_act:.0%}激活/{trail_p:.0%}回撤, 锁住大波段利润 (回测50%exit)
+    - **{time_min}分钟限时**: 比原来3分钟多7分钟, 给动量股更多发展时间
+    - **日亏损熔断{config.MAX_DAILY_LOSS_PCT:.0%}**: 安全网, 防止单日大亏
     - **全仓单股**: 最多1仓, 100%权益全仓买入最佳候选
-    - **Re-entry**: 允许, 最多{re_max}次/股/天, 普通{config.REENTRY_COOLDOWN_SEC}秒/止损{config.REENTRY_STOP_COOLDOWN_SEC}秒冷却
+    - **Re-entry**: 允许, 最多{config.RTG_REENTRY_MAX}次/股/天
     """)
 
 # ══════════════════════════════════════════════════════════════════
@@ -356,7 +357,6 @@ elif tab == "日志":
     if LOG_FILE.exists():
         try:
             lines = LOG_FILE.read_text().strip().split("\n")
-            # Show last 200 lines
             recent = lines[-200:]
             st.code("\n".join(recent), language="log")
         except Exception as e:
