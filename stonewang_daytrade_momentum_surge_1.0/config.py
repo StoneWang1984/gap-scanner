@@ -1,6 +1,7 @@
 """Config — stonewang_daytrade_momentum_surge_1.0
 
-Three-pronged intraday momentum strategy:
+Pre-market + Three-pronged intraday momentum strategy:
+  Pre-Market: Gap continuation (5%+, news catalyst) — 7:00-9:25 AM
   Prong 1: Small Gap Scan (3% gap, RVOL >= 2x) — RTG entry
   Prong 2: Intraday Momentum Scan (every 5 min) — breakout entry
   Prong 3: Low-Open Reversal (gap-down -3% to -10% with high RVOL) — reversal entry
@@ -160,7 +161,7 @@ REENTRY_COOLDOWN_SEC = 60
 REENTRY_STOP_COOLDOWN_SEC = 120
 
 # ── Position sizing ─────────────────────────────────────────────────
-INITIAL_CAPITAL = 158.64           # Updated 2026-10-14
+INITIAL_CAPITAL = 163.00           # Updated 2026-10-16
 MIN_POSITION_SIZE = 40
 MAX_POSITION_SIZE = 9999
 MAX_POSITIONS = 1
@@ -190,6 +191,37 @@ FORCE_CLOSE_LIMIT_TIMEOUT = 60
 
 # ── Backtest ────────────────────────────────────────────────────────
 BACKTEST_DAYS = 30
+
+# ── Pre-Market Trading (7:00-9:25 AM) ────────────────────────────────
+PREMARKET_ENABLED = True
+PREMARKET_START = "07:00"             # Begin scanning at 7:00 AM
+PREMARKET_ENTRY_END = "09:20"         # Stop new entries at 9:20
+PREMARKET_TRANSITION_TIME = "09:25"   # Convert to regular session at 9:25
+PREMARKET_GAP_MIN = 0.05             # 5% min pre-market gap
+PREMARKET_MIN_VOLUME = 50000          # Min pre-market volume (shares)
+PREMARKET_PRICE_MIN = 3.0
+PREMARKET_PRICE_MAX = 20.0
+PREMARKET_MAX_CANDIDATES = 10
+PREMARKET_STOP_PCT = 0.03            # 3% hard stop (wider for spread)
+PREMARKET_TRAIL_ACTIVATE_PCT = 0.03  # +3% activates trail
+PREMARKET_TRAIL_PCT = 0.02           # 2% trail
+PREMARKET_TIME_LIMIT_SEC = 1800      # 30 min time limit
+PREMARKET_LIMIT_BUFFER = 0.005       # 0.5% limit price buffer
+PREMARKET_MAX_POSITIONS = 1
+
+# Pre-market news catalyst filter
+PREMARKET_NEWS_REQUIRED = True                            # Must have news catalyst
+PREMARKET_NEWS_KEYWORDS = [                               # Catalyst keywords
+    "FDA", "approval", "approved",                         # FDA
+    "earnings", "EPS", "revenue", "beat", "exceed",       # Earnings
+    "acquisition", "acquire", "merger", "buyout", "takeover",  # M&A
+    "guidance", "upgraded", "initiated",                   # Analyst
+]
+PREMARKET_NEWS_LOOKBACK_HOURS = 12                        # Check news within 12 hours
+
+# Pre-market entry speed split
+PREMARKET_FAST_GAP_PCT = 0.08         # ≥8% gap = fast rise → immediate buy
+PREMARKET_SLOW_GAP_PCT = 0.05         # 5-8% gap = slow rise → 3-bar confirmation
 
 # ── Version ─────────────────────────────────────────────────────────
 VERSION = "stonewang_daytrade_momentum_surge_1.0"

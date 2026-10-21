@@ -20,16 +20,30 @@ def get_data_client():
 def get_tradable_symbols() -> list[str]:
     """Get all active, tradable US stock symbols from Alpaca."""
     from alpaca.trading.client import TradingClient
+    from alpaca.trading.requests import GetAssetsRequest
+    from alpaca.trading.enums import AssetStatus, AssetExchange
     trading_client = TradingClient(
         api_key=config.ALPACA_API_KEY,
         secret_key=config.ALPACA_SECRET_KEY,
         paper=getattr(config, "ALPACA_PAPER", True),
     )
-    assets = trading_client.get_all_assets()
+    try:
+        assets = trading_client.get_all_assets()
+    except Exception:
+        # Fallback: request specific exchanges to avoid unknown exchange errors (e.g. TXSE)
+        assets = []
+        for ex in [AssetExchange.NYSE, AssetExchange.NASDAQ, AssetExchange.AMEX, AssetExchange.ARCA, AssetExchange.BATS]:
+            try:
+                req = GetAssetsRequest(status=AssetStatus.ACTIVE, exchange=ex)
+                batch = trading_client.get_all_assets(req)
+                assets.extend(batch)
+            except Exception:
+                pass
     symbols = [
         a.symbol for a in assets
-        if a.tradable and a.status == "active" and a.exchange in (
-            "NYSE", "NASDAQ", "AMEX", "ARCA", "BATS"
+        if a.tradable and a.status == "active" and str(a.exchange) in (
+            "NYSE", "NASDAQ", "AMEX", "ARCA", "BATS",
+            "AssetExchange.NYSE", "AssetExchange.NASDAQ", "AssetExchange.AMEX", "AssetExchange.ARCA", "AssetExchange.BATS",
         )
     ]
     return symbols

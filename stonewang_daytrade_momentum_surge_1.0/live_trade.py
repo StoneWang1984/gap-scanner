@@ -1,5 +1,6 @@
-"""stonewang_daytrade_momentum_surge_1.0 — Three-pronged intraday momentum strategy.
+"""stonewang_daytrade_momentum_surge_1.0 — Pre-market + Three-pronged intraday momentum strategy.
 
+Pre-Market: Gap continuation (5%+, news catalyst, 7:00-9:25 AM)
 Prong 1: Small Gap Scan (3% gap, RTG entry)
 Prong 2: Intraday Momentum Scan (every 5 min) — breakout entry
 Prong 3: Low-Open Reversal (gap-down -3% to -10% with high RVOL) — reversal entry
@@ -22,7 +23,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest
+from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce, OrderStatus
 from alpaca.data.historical.stock import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
@@ -31,6 +32,8 @@ from alpaca.data.enums import Adjustment, DataFeed
 from alpaca.data.historical.screener import ScreenerClient
 from alpaca.data.requests import MostActivesRequest, MarketMoversRequest
 from alpaca.data.enums import MostActivesBy, MarketType
+from alpaca.data.historical.news import NewsClient
+from alpaca.data.requests import NewsRequest
 
 import importlib.util, sys, os
 
@@ -127,6 +130,7 @@ class Position:
     trail_active: bool = False
     trail_activate_pct: float = 0.0
     trail_pct: float = 0.0
+    from_premarket: bool = False
 
 
 class BarAccumulator:
@@ -208,11 +212,10 @@ def start_ws_stream(symbols):
         from alpaca.data.live.stock import StockDataStream
         _ws_stream = StockDataStream(
             config.ALPACA_API_KEY, config.ALPACA_SECRET_KEY,
-            feed=getattr(config, "DATA_FEED_OBJ", DataFeed.SIP),
+            feed=DataFeed.SIP,
         )
         for sym in symbols:
             _ws_stream.subscribe_bars(_on_bar, sym)
-            _ws_stream.subscribe_trades(_on_trade, sym)
         _stream_state["symbols"] = set(symbols)
         _stream_state["running"] = True
         _stream_state["last_bar_ts"] = time.time()
@@ -344,6 +347,61 @@ def place_sell_market(symbol, shares):
             return 0, 0.0
 
 
+def place_buy_limit(symbol, shares, limit_price, extended_hours=True):
+    if config.DRY_RUN:
+        oid = f"DRY-LIMIT-{uuid4().hex[:8]}"
+        log(f"[DRY] BUY LIMIT {symbol} {shares}sh @ ${limit_price:.4f} (ext_hours={extended_hours})")
+        return type("Order", (), {"id": oid})()
+    try:
+        req = LimitOrderRequest(
+            symbol=symbol,
+            qty=shares,
+            side=OrderSide.BUY,
+            time_in_force=TimeInForce.DAY,
+            limit_price=round(limit_price, 2),
+            extended_hours=extended_hours,
+        )
+        order = trading_client.submit_order(req)
+        log(f"BUY LIMIT submitted: {symbol} {shares}sh @ ${limit_price:.2f}, id={order.id}, ext_hours={extended_hours}")
+        return order
+    except Exception as e:
+        log(f"BUY LIMIT rejected: {symbol} {shares}sh @ ${limit_price:.4f} - {e}")
+        return None
+
+
+def place_sell_limit(symbol, shares, limit_price, extended_hours=True):
+    if config.DRY_RUN:
+        log(f"[DRY] SELL LIMIT {symbol} {shares}sh @ ${limit_price:.4f} (ext_hours={extended_hours})")
+        return shares, 0.0
+    try:
+        orders = trading_client.get_orders()
+        for o in orders:
+            if o.symbol == symbol and o.side == OrderSide.SELL and o.status == OrderStatus.OPEN:
+                try:
+                    trading_client.cancel_order_by_id(o.id)
+                except Exception:
+                    pass
+        time.sleep(0.5)
+    except Exception:
+        pass
+    try:
+        req = LimitOrderRequest(
+            symbol=symbol,
+            qty=shares,
+            side=OrderSide.SELL,
+            time_in_force=TimeInForce.DAY,
+            limit_price=round(limit_price, 2),
+            extended_hours=extended_hours,
+        )
+        order = trading_client.submit_order(req)
+        log(f"SELL LIMIT submitted: {symbol} {shares}sh @ ${limit_price:.2f}, id={order.id}, ext_hours={extended_hours}")
+        filled, price = wait_order_filled(str(order.id), timeout=30)
+        return filled, price
+    except Exception as e:
+        log(f"SELL LIMIT failed: {symbol} {shares}sh @ ${limit_price:.4f} - {e}")
+        return 0, 0.0
+
+
 def place_sell_async(symbol, shares):
     if config.DRY_RUN:
         log(f"[DRY] SELL {symbol} {shares}sh")
@@ -451,7 +509,7 @@ def force_sell_position(symbol, shares):
             try:
                 from alpaca.data.requests import StockSnapshotRequest
                 req = StockSnapshotRequest(symbol_or_symbols=symbol,
-                                           feed=getattr(config, "DATA_FEED_OBJ", DataFeed.SIP))
+                                           feed=DataFeed.SIP)
                 snap = data_client.get_stock_snapshot(req)
                 if snap and symbol in snap:
                     fill_price = float(snap[symbol].daily_bar.close) if snap[symbol].daily_bar else 0.0
@@ -499,7 +557,7 @@ def _fetch_20d_avg_volumes(symbols, target_date):
                 symbol_or_symbols=batch, timeframe=TimeFrame.Day,
                 start=lookback, end=target_date - pd.Timedelta(days=1),
                 adjustment=Adjustment.RAW,
-                feed=getattr(config, "DATA_FEED_OBJ", DataFeed.SIP),
+                feed=DataFeed.SIP,
             )
             bars = data_client.get_stock_bars(req)
             if bars.df.empty:
@@ -645,7 +703,7 @@ def scan_gaps_down(target_date):
                 symbol_or_symbols=batch, timeframe=TimeFrame.Day,
                 start=lookback_start, end=lookback_end,
                 adjustment=Adjustment.RAW,
-                feed=getattr(config, "DATA_FEED_OBJ", DataFeed.SIP),
+                feed=DataFeed.SIP,
             )
             bars = data_client.get_stock_bars(req)
             if bars.df.empty:
@@ -721,6 +779,130 @@ def scan_gaps_down(target_date):
     return candidates
 
 
+def check_news_catalyst(symbol, target_date):
+    """Check if symbol has a news catalyst (FDA, earnings, M&A) within lookback hours."""
+    news_required = getattr(config, "PREMARKET_NEWS_REQUIRED", True)
+    if not news_required:
+        return True, ""
+    keywords = getattr(config, "PREMARKET_NEWS_KEYWORDS", [
+        "FDA", "approval", "approved", "earnings", "EPS", "revenue", "beat",
+        "acquisition", "acquire", "merger", "buyout", "takeover",
+    ])
+    lookback_hours = getattr(config, "PREMARKET_NEWS_LOOKBACK_HOURS", 12)
+    try:
+        news_client = NewsClient(
+            api_key=config.ALPACA_API_KEY,
+            secret_key=config.ALPACA_SECRET_KEY,
+        )
+        start = target_date - pd.Timedelta(hours=lookback_hours)
+        req = NewsRequest(
+            symbols=symbol,
+            start=start,
+            end=target_date,
+            limit=20,
+            include_content=False,
+        )
+        news_set = news_client.get_news(req)
+        news_list = news_set if isinstance(news_set, list) else list(news_set)
+        for article in news_list:
+            headline = getattr(article, "headline", "") or ""
+            summary = getattr(article, "summary", "") or ""
+            text = (headline + " " + summary).upper()
+            for kw in keywords:
+                if kw.upper() in text:
+                    return True, kw
+    except Exception as e:
+        log(f"  News check error for {symbol}: {e}")
+        # If news API fails, allow through (don't block trading)
+        return True, "api_error"
+    return False, ""
+
+
+def scan_premarket_gaps(target_date):
+    """Scan for pre-market gap-up stocks using snapshot API."""
+    log(f"Pre-market scan for {target_date.date()}...")
+    try:
+        symbols = get_tradable_symbols()
+    except Exception as e:
+        log(f"Pre-market scan: get_tradable_symbols failed: {e}")
+        return []
+    symbols = [s for s in symbols if not is_leveraged_etf(s)]
+    symbols = [s for s in symbols if not is_crypto_etf(s)]
+    if EXCLUDE_SYMBOLS:
+        symbols = [s for s in symbols if s not in EXCLUDE_SYMBOLS]
+
+    gap_min = getattr(config, "PREMARKET_GAP_MIN", 0.05)
+    min_vol = getattr(config, "PREMARKET_MIN_VOLUME", 50000)
+    price_min = getattr(config, "PREMARKET_PRICE_MIN", 3.0)
+    price_max = getattr(config, "PREMARKET_PRICE_MAX", 20.0)
+    max_cands = getattr(config, "PREMARKET_MAX_CANDIDATES", 10)
+
+    candidates = []
+    batch_size = 200
+    total_batches = (len(symbols) + batch_size - 1) // batch_size
+
+    for batch_idx in range(total_batches):
+        batch = symbols[batch_idx * batch_size: (batch_idx + 1) * batch_size]
+        if batch_idx % 5 == 0:
+            log(f"  Pre-market scan batch {batch_idx + 1}/{total_batches}...")
+        try:
+            from alpaca.data.requests import StockSnapshotRequest
+            snap_req = StockSnapshotRequest(symbol_or_symbols=batch, feed=DataFeed.SIP)
+            snapshots = data_client.get_stock_snapshot(snap_req)
+            for sym, snap in snapshots.items():
+                try:
+                    if not snap or not snap.daily_bar or not snap.latest_trade:
+                        continue
+                    prev_close = float(snap.daily_bar.close)
+                    premarket_price = float(snap.latest_trade.price)
+                    premarket_vol = int(snap.daily_bar.volume) if snap.daily_bar.volume else 0
+                    if prev_close <= 0:
+                        continue
+                    gap_pct = (premarket_price / prev_close) - 1.0
+                    if gap_pct < gap_min:
+                        continue
+                    if not (price_min <= premarket_price <= price_max):
+                        continue
+                    if premarket_vol < min_vol:
+                        continue
+                    candidates.append({
+                        "symbol": sym,
+                        "prev_close": prev_close,
+                        "open_price": premarket_price,
+                        "gap_pct": gap_pct,
+                        "prev_volume": premarket_vol,
+                        "rvol": 0,
+                        "atr": 0,
+                        "signal_type": "premarket_gap",
+                        "news_catalyst": None,
+                    })
+                except Exception:
+                    continue
+        except Exception as e:
+            log(f"  Pre-market scan batch error: {e}")
+            continue
+
+    candidates.sort(key=lambda c: c["gap_pct"], reverse=True)
+    candidates = candidates[:max_cands]
+
+    # News catalyst filter
+    if getattr(config, "PREMARKET_NEWS_REQUIRED", True):
+        filtered = []
+        for c in candidates:
+            has_news, keyword = check_news_catalyst(c["symbol"], target_date)
+            if has_news:
+                c["news_catalyst"] = keyword
+                filtered.append(c)
+            else:
+                log(f"  {c['symbol']}: no news catalyst, skipped")
+        candidates = filtered
+
+    log(f"Pre-market: {len(candidates)} candidates")
+    for c in candidates:
+        log(f"  {c['symbol']}: gap {c['gap_pct']:+.1%}, premarket=${c['open_price']:.4f}, vol={c['prev_volume']:,}, catalyst={c.get('news_catalyst', '?')}")
+    return candidates
+
+
 def backfill_1min_bars(symbols, target_date):
     mkt_open = pd.Timestamp(f"{target_date.date()} {config.MARKET_OPEN}", tz="America/New_York")
     now = pd.Timestamp.now(tz="America/New_York")
@@ -732,7 +914,7 @@ def backfill_1min_bars(symbols, target_date):
             req = StockBarsRequest(
                 symbol_or_symbols=sym, timeframe=TimeFrame(1, TimeFrameUnit.Minute),
                 start=mkt_open, end=end, adjustment=Adjustment.RAW,
-                feed=getattr(config, "DATA_FEED_OBJ", DataFeed.SIP),
+                feed=DataFeed.SIP,
             )
             bars = data_client.get_stock_bars(req)
             if bars.df.empty:
@@ -860,12 +1042,339 @@ def check_reversal_entry(symbol, open_price, bars, min_volume=None):
     return 0.0, False, ""
 
 
+def calc_support_level(bars, n=5):
+    """Calculate support level as the lowest low of the last n bars."""
+    if not bars or len(bars) < 1:
+        return 0.0
+    recent = bars[-n:] if len(bars) >= n else bars
+    return min(b["low"] for b in recent)
+
+
+def check_volume_exhaustion(bars, n=10):
+    """Check volume exhaustion via two signals:
+    1. Price makes higher high but volume < 30% of recent peak (divergence)
+    2. 3 consecutive bars with declining volume, latest < 20% of peak (sustained dry-up)
+    """
+    if len(bars) < n:
+        return False
+    recent = bars[-n:]
+    peak_vol = max(b["volume"] for b in recent)
+    if peak_vol <= 0:
+        return False
+    last = bars[-1]
+    # Signal 1: higher high + volume divergence
+    if len(bars) >= 2 and last["high"] > bars[-2]["high"] and last["volume"] < 0.30 * peak_vol:
+        return True
+    # Signal 2: 3 consecutive declining volume bars, latest < 20% of peak
+    if len(bars) >= 3:
+        v1, v2, v3 = bars[-3]["volume"], bars[-2]["volume"], bars[-1]["volume"]
+        if v1 > v2 > v3 and v3 < 0.20 * peak_vol:
+            return True
+    return False
+
+
+def check_premarket_entry(symbol, open_price, bars, gap_pct=0.0, min_volume=None):
+    """Pre-market entry: fast rise (≥8% gap) → immediate buy; slow rise (5-8%) → 3-bar confirmation.
+    Both require price to have settled (last 3 bars range < 5% of close)."""
+    if min_volume is None:
+        min_volume = getattr(config, "PREMARKET_MIN_VOLUME", 50000)
+    fast_gap = getattr(config, "PREMARKET_FAST_GAP_PCT", 0.08)
+
+    # Price stability gate: last 3 bars must have range < 5% of close
+    # This prevents entry during opening bar volatility (e.g. 20% swings)
+    if len(bars) < 3:
+        return 0.0, False, ""
+    last_3 = bars[-3:]
+    for b in last_3:
+        bar_range = (b["high"] - b["low"]) / b["close"] if b["close"] > 0 else 1
+        if bar_range >= 0.05:
+            return 0.0, False, ""
+
+    # Fast rise: gap ≥ 8% → immediate entry on latest bar
+    if gap_pct >= fast_gap:
+        last = bars[-1]
+        if last["volume"] < min_volume:
+            return 0.0, False, ""
+        entry = round(last["close"], 4)
+        return entry, True, "premarket_fast"
+
+    # Slow rise: gap 5-8% → 3 consecutive bars with higher highs + volume acceleration
+    for i in range(1, len(last_3)):
+        if last_3[i]["high"] <= last_3[i - 1]["high"]:
+            return 0.0, False, ""
+        if last_3[i]["close"] <= last_3[i - 1]["close"]:
+            return 0.0, False, ""
+    # Volume acceleration: last bar vol >= 1.5× second-to-last
+    if last_3[-1]["volume"] < 1.5 * last_3[-2]["volume"]:
+        return 0.0, False, ""
+    if last_3[-1]["volume"] < min_volume:
+        return 0.0, False, ""
+    entry = round(last_3[-1]["close"], 4)
+    return entry, True, "premarket_slow"
+
+
+def backfill_premarket_bars(symbols, target_date):
+    """Backfill 1-min bars for pre-market (4:00 AM - now)."""
+    premarket_start = pd.Timestamp(f"{target_date.date()} 04:00", tz="America/New_York")
+    now = pd.Timestamp.now(tz="America/New_York")
+    end = min(now, pd.Timestamp(f"{target_date.date()} 09:30", tz="America/New_York"))
+    if end <= premarket_start:
+        return
+    for sym in symbols:
+        try:
+            req = StockBarsRequest(
+                symbol_or_symbols=sym, timeframe=TimeFrame(1, TimeFrameUnit.Minute),
+                start=premarket_start, end=end, adjustment=Adjustment.RAW,
+                feed=DataFeed.SIP,
+            )
+            bars = data_client.get_stock_bars(req)
+            if bars.df.empty:
+                continue
+            df = bars.df
+            if "symbol" in df.columns:
+                df = df[df["symbol"] == sym]
+            for i in range(len(df)):
+                bar = df.iloc[i]
+                idx = df.index[i]
+                ts = idx[1] if isinstance(idx, tuple) else idx
+                ts = pd.Timestamp(ts)
+                if ts.tzinfo is None:
+                    ts = ts.tz_localize("UTC")
+                ts = ts.tz_convert("America/New_York")
+                _accumulator.add_bar(sym, {
+                    "timestamp": ts.to_pydatetime(),
+                    "open": float(bar["open"]),
+                    "high": float(bar["high"]),
+                    "low": float(bar["low"]),
+                    "close": float(bar["close"]),
+                    "volume": int(bar["volume"]),
+                })
+        except Exception:
+            continue
+
+
+def run_premarket_phase(target_date):
+    """Run pre-market trading phase (7:00-9:25 AM)."""
+    if not getattr(config, "PREMARKET_ENABLED", False):
+        return {"positions": [], "daily_loss": 0.0, "trades_detail": []}
+
+    log("=" * 60)
+    log("PRE-MARKET PHASE (7:00-9:25 AM)")
+    log("=" * 60)
+
+    premarket_start_str = getattr(config, "PREMARKET_START", "07:00")
+    entry_end_str = getattr(config, "PREMARKET_ENTRY_END", "09:20")
+    transition_str = getattr(config, "PREMARKET_TRANSITION_TIME", "09:25")
+    stop_pct = getattr(config, "PREMARKET_STOP_PCT", 0.03)
+    trail_activate_pct = getattr(config, "PREMARKET_TRAIL_ACTIVATE_PCT", 0.03)
+    trail_pct = getattr(config, "PREMARKET_TRAIL_PCT", 0.02)
+    time_limit_sec = getattr(config, "PREMARKET_TIME_LIMIT_SEC", 1800)
+    limit_buffer = getattr(config, "PREMARKET_LIMIT_BUFFER", 0.005)
+    max_positions = getattr(config, "PREMARKET_MAX_POSITIONS", 1)
+
+    premarket_start_time = _parse_time(premarket_start_str)
+    entry_end_time = _parse_time(entry_end_str)
+    transition_time = _parse_time(transition_str)
+
+    # Wait until pre-market start
+    now = dt.datetime.now(_EST)
+    start_dt = dt.datetime.combine(target_date.date(), premarket_start_time, tzinfo=_EST)
+    if now < start_dt:
+        _smart_sleep_until(start_dt)
+
+    # Scan for pre-market gaps
+    candidates = scan_premarket_gaps(target_date)
+    if not candidates:
+        log("No pre-market candidates found")
+        return {"positions": [], "daily_loss": 0.0, "trades_detail": []}
+
+    syms = [c["symbol"] for c in candidates]
+    backfill_premarket_bars(syms, target_date)
+    restart_ws_stream(syms)
+
+    positions = []
+    entry_checked = set()
+    daily_loss = 0.0
+    trades_detail = []
+
+    try:
+        acct = trading_client.get_account()
+        equity = float(acct.equity)
+    except Exception:
+        equity = config.INITIAL_CAPITAL
+
+    log(f"Pre-market equity: ${equity:,.2f}")
+    log(f"Pre-market params: stop={stop_pct:.0%}, trail={trail_activate_pct:.0%}/{trail_pct:.0%}, time={time_limit_sec}s")
+
+    while True:
+        now = dt.datetime.now(_EST)
+        now_time = now.time()
+
+        # Transition to regular session
+        if now_time >= transition_time:
+            log(f"Pre-market transition time reached ({transition_str})")
+            break
+
+        # Force close check
+        force_close_time = _parse_time(config.FORCE_CLOSE_TIME)
+        if now_time >= force_close_time:
+            break
+
+        # Entry window
+        entry_active = premarket_start_time <= now_time < entry_end_time
+
+        # Exit monitoring
+        for pos in positions[:]:
+            bars = _accumulator.get_1min_bars(pos.symbol)
+            if not bars:
+                continue
+            latest = bars[-1]
+            bar_low = latest["low"]
+            bar_high = latest["high"]
+
+            max_stop = round(pos.entry_price * (1 - pos.stop_pct), 4)
+            # Support stop: use 5-bar support after 5 bars, else fixed %
+            bars_held = len(bars)  # approximate bars since entry
+            if bars_held >= 5:
+                support = calc_support_level(bars, n=5)
+                stop_price = max(support, max_stop) if support > 0 else max_stop
+            else:
+                support = 0
+                stop_price = max_stop
+            reason = None
+
+            if bar_high > pos.highest:
+                pos.highest = bar_high
+
+            # Exit 1: Support-level stop loss (below 5-bar low, capped at max %)
+            if bar_low <= stop_price:
+                reason = "support_stop" if support > max_stop else "stop_loss"
+            # Exit 2: Volume exhaustion (need at least 7 bars)
+            if reason is None and bars_held >= 7 and check_volume_exhaustion(bars):
+                reason = "volume_exhaustion"
+            # Exit 3: Trailing stop
+            if reason is None:
+                if not pos.trail_active and pos.highest >= pos.entry_price * (1 + pos.trail_activate_pct):
+                    pos.trail_active = True
+                if pos.trail_active:
+                    trail_stop_price = round(pos.highest * (1 - pos.trail_pct), 4)
+                    if bar_low <= trail_stop_price:
+                        reason = "trailing_stop"
+            # Exit 4: Time limit
+            if reason is None and time_limit_sec > 0 and time.time() - pos.entry_ts >= time_limit_sec:
+                reason = "time_limit"
+
+            if reason is None:
+                continue
+
+            # Exit with limit sell (extended hours)
+            sell_price = round(latest["close"] * (1 - 0.005), 4)
+            sold, fill = place_sell_limit(pos.symbol, pos.shares, sell_price, extended_hours=True)
+            if sold > 0:
+                if fill <= 0:
+                    fill = latest["close"]
+                pnl = round((fill - pos.entry_price) * sold, 2)
+                trades_detail.append({
+                    "symbol": pos.symbol, "entry": pos.entry_price,
+                    "exit": round(fill, 4), "shares": sold, "pnl": pnl,
+                    "reason": reason, "trade_type": pos.signal_type,
+                    "entry_ts": dt.datetime.fromtimestamp(pos.entry_ts, tz=_EST).strftime("%H:%M:%S"),
+                    "exit_ts": dt.datetime.now(_EST).strftime("%H:%M:%S"),
+                })
+                daily_loss += pnl
+                positions.remove(pos)
+                log(f"PRE-MARKET EXIT0 {pos.symbol} {reason} ${fill:.4f}, P&L=${pnl:+,.2f}")
+            else:
+                # Fallback: market sell
+                sold, fill = place_sell_market(pos.symbol, pos.shares)
+                if sold > 0:
+                    if fill <= 0:
+                        fill = latest["close"]
+                    pnl = round((fill - pos.entry_price) * sold, 2)
+                    trades_detail.append({
+                        "symbol": pos.symbol, "entry": pos.entry_price,
+                        "exit": round(fill, 4), "shares": sold, "pnl": pnl,
+                        "reason": reason, "trade_type": pos.signal_type,
+                        "entry_ts": dt.datetime.fromtimestamp(pos.entry_ts, tz=_EST).strftime("%H:%M:%S"),
+                        "exit_ts": dt.datetime.now(_EST).strftime("%H:%M:%S"),
+                    })
+                    daily_loss += pnl
+                    positions.remove(pos)
+                    log(f"PRE-MARKET EXIT {pos.symbol} {reason} ${fill:.4f}, P&L=${pnl:+,.2f}")
+
+        # Entry monitoring (price stability checked in check_premarket_entry)
+        if entry_active and len(positions) < max_positions:
+            for c in candidates:
+                if len(positions) >= max_positions:
+                    break
+                sym = c["symbol"]
+                if any(p.symbol == sym for p in positions):
+                    continue
+                if sym in entry_checked:
+                    continue
+                if sym in EXCLUDE_SYMBOLS:
+                    continue
+
+                open_price = c["open_price"]
+                bars = _accumulator.get_1min_bars(sym)
+                entry_price, confirmed, signal_type = check_premarket_entry(sym, open_price, bars, gap_pct=c.get("gap_pct", 0))
+                if not confirmed:
+                    continue
+
+                # Position sizing
+                buy_power = equity
+                shares = int(buy_power / (entry_price * (1 + limit_buffer)))
+                if shares <= 0:
+                    continue
+                min_pos = getattr(config, "MIN_POSITION_SIZE", 40)
+                if shares * entry_price < min_pos:
+                    continue
+
+                # Submit limit buy with buffer (round to cent — sub-penny rejected pre-market)
+                limit_price = round(entry_price * (1 + limit_buffer), 2)
+                order = place_buy_limit(sym, shares, limit_price, extended_hours=True)
+                if order is None:
+                    entry_checked.add(sym)
+                    continue
+
+                # Wait for fill
+                filled, fill_price = wait_order_filled(str(order.id), timeout=60)
+                if filled <= 0:
+                    log(f"Pre-market BUY LIMIT not filled: {sym}")
+                    entry_checked.add(sym)
+                    try:
+                        trading_client.cancel_order_by_id(str(order.id))
+                    except Exception:
+                        pass
+                    continue
+
+                actual_entry = fill_price if fill_price > 0 else entry_price
+                pos = Position(
+                    symbol=sym, shares=filled, entry_price=actual_entry,
+                    entry_ts=time.time(), open_price=open_price,
+                    gap_pct=c.get("gap_pct", 0), signal_type=signal_type,
+                    rvol=c.get("rvol", 0), atr=c.get("atr", 0),
+                    stop_pct=stop_pct, highest=actual_entry,
+                    trail_active=False, trail_activate_pct=trail_activate_pct,
+                    trail_pct=trail_pct, from_premarket=True,
+                )
+                positions.append(pos)
+                entry_checked.add(sym)
+                log(f"PRE-MARKET ENTRY {sym} {filled}sh @ ${actual_entry:.4f} (gap {c['gap_pct']:+.1%})")
+
+        time.sleep(config.POLL_INTERVAL)
+
+    # Return positions to transition into regular session
+    log(f"Pre-market phase done. {len(positions)} positions to transition, P&L=${-daily_loss:+,.2f}")
+    return {"positions": positions, "daily_loss": daily_loss, "trades_detail": trades_detail}
+
+
 def _parse_time(t_str):
     h, m = (int(x) for x in t_str.split(":"))
     return dt.time(h, m)
 
 
-def run_trading_day(target_date):
+def run_trading_day(target_date, premarket_results=None):
     log(f"Starting trading day: {target_date.date()} (close {config.MARKET_CLOSE}, force_close {config.FORCE_CLOSE_TIME})")
     try:
         acct = trading_client.get_account()
@@ -932,6 +1441,17 @@ def run_trading_day(target_date):
     _stop_exit_ts = {}
     _sell_stuck_until = {}
     _pending_sells = {}
+
+    # Transition pre-market positions into regular session
+    if premarket_results and premarket_results.get("positions"):
+        for pos in premarket_results["positions"]:
+            # Adjust stop/trail to regular session params
+            pos.stop_pct = config.RTG_STOP_PCT
+            pos.trail_activate_pct = config.TRAILING_ACTIVATE_PCT
+            pos.trail_pct = config.TRAILING_PCT
+            positions.append(pos)
+            entry_checked.add(pos.symbol)
+            log(f"Transitioned pre-market position: {pos.symbol} {pos.shares}sh @ ${pos.entry_price:.4f} → regular session stops")
 
     # Restore existing Alpaca positions
     try:
@@ -1125,25 +1645,35 @@ def run_trading_day(target_date):
             bar_high = latest["high"]
             bar_close = latest["close"]
 
-            stop_price = round(pos.entry_price * (1 - pos.stop_pct), 4)
+            max_stop = round(pos.entry_price * (1 - pos.stop_pct), 4)
+            bars_held = len(bars)
+            if bars_held >= 5:
+                support = calc_support_level(bars, n=5)
+                stop_price = max(support, max_stop) if support > 0 else max_stop
+            else:
+                support = 0
+                stop_price = max_stop
             reason = None
 
-            # Update highest forA? for trailing stop
+            # Update highest for trailing stop
             if bar_high > pos.highest:
                 pos.highest = bar_high
 
-            # Exit 1: Hard stop
+            # Exit 1: Support-level stop loss (below 5-bar low, capped at max %)
             if bar_low <= stop_price:
-                reason = "stop_loss"
-            # Exit 2: Trailing stop
-            elif getattr(config, "TRAILING_STOP_ENABLED", False):
+                reason = "support_stop" if support > max_stop else "stop_loss"
+            # Exit 2: Volume exhaustion (need 7+ bars)
+            if reason is None and bars_held >= 7 and check_volume_exhaustion(bars):
+                reason = "volume_exhaustion"
+            # Exit 3: Trailing stop
+            if reason is None and getattr(config, "TRAILING_STOP_ENABLED", False):
                 if not pos.trail_active and pos.highest >= pos.entry_price * (1 + pos.trail_activate_pct):
                     pos.trail_active = True
                 if pos.trail_active:
                     trail_stop_price = round(pos.highest * (1 - pos.trail_pct), 4)
                     if bar_low <= trail_stop_price:
                         reason = "trailing_stop"
-            # Exit 3: Time limit (10-min)
+            # Exit 4: Time limit (10-min)
             if reason is None and config.RTG_TIME_LIMIT_SEC > 0 and time.time() - pos.entry_ts >= config.RTG_TIME_LIMIT_SEC:
                 reason = "time_limit"
 
@@ -1196,9 +1726,10 @@ def run_trading_day(target_date):
                     continue
                 if sym in EXCLUDE_SYMBOLS or sym in entry_halted or is_crypto_etf(sym):
                     continue
-                reentry_cd = getattr(config, "REENTRY_COOLDOWN_SEC", 60)
+                # After stop_loss exit, block re-entry entirely
                 if sym in _stop_exit_ts:
-                    reentry_cd = getattr(config, "REENTRY_STOP_COOLDOWN_SEC", 120)
+                    continue
+                reentry_cd = getattr(config, "REENTRY_COOLDOWN_SEC", 60)
                 if is_reentry and time.time() - _last_exit_ts.get(sym, 0) < reentry_cd:
                     continue
                 after_time = _last_exit_ts.get(sym) if is_reentry else None
@@ -1361,7 +1892,7 @@ def test_connectivity():
             symbol_or_symbols="SPY", timeframe=TimeFrame.Day,
             start=pd.Timestamp.now(tz="America/New_York") - pd.Timedelta(days=5),
             end=pd.Timestamp.now(tz="America/New_York"),
-            feed=DataFeed.IEX,
+            feed=DataFeed.SIP,
         )
         bars = data_client.get_stock_bars(req)
         if not bars.df.empty:
@@ -1387,18 +1918,24 @@ def main():
     log(f"Daily loss breaker: {config.MAX_DAILY_LOSS_PCT:.0%}")
     log(f"Window: {config.ENTRY_WINDOW_START}-{config.ENTRY_WINDOW_END} EST")
     log(f"Max concurrent: {config.MAX_POSITIONS} | Re-entry max: {config.RTG_REENTRY_MAX}")
+    if getattr(config, "PREMARKET_ENABLED", False):
+        log(f"Pre-market: {getattr(config, 'PREMARKET_START', '07:00')}-{getattr(config, 'PREMARKET_TRANSITION_TIME', '09:25')} (gap>={getattr(config, 'PREMARKET_GAP_MIN', 0.05):.0%})")
     log("=" * 60)
 
     if not test_connectivity():
         log("Connectivity failed, exiting")
         return
 
+    premarket_enabled = getattr(config, "PREMARKET_ENABLED", False)
+    wake_hour = 7 if premarket_enabled else 9
+    wake_min = 0 if premarket_enabled else 15
+
     while True:
         now = dt.datetime.now(_EST)
         if now.weekday() >= 5:
             next_day = get_next_trading_day()
             log(f"Weekend. Next: {next_day.date()}")
-            _smart_sleep_until(dt.datetime.combine(next_day.date(), dt.time(9, 15), tzinfo=_EST))
+            _smart_sleep_until(dt.datetime.combine(next_day.date(), dt.time(wake_hour, wake_min), tzinfo=_EST))
             continue
 
         market_open = dt.datetime.combine(now.date(), dt.time(9, 30), tzinfo=_EST)
@@ -1406,19 +1943,26 @@ def main():
         if now >= market_close:
             next_day = get_next_trading_day()
             log(f"Market closed. Next: {next_day.date()}")
-            _smart_sleep_until(dt.datetime.combine(next_day.date(), dt.time(9, 20), tzinfo=_EST))
+            _smart_sleep_until(dt.datetime.combine(next_day.date(), dt.time(wake_hour, wake_min), tzinfo=_EST))
             continue
 
-        pre_open = dt.datetime.combine(now.date(), dt.time(9, 15), tzinfo=_EST)
-        if now < pre_open:
-            _smart_sleep_until(pre_open)
+        wake_time = dt.datetime.combine(now.date(), dt.time(wake_hour, wake_min), tzinfo=_EST)
+        if now < wake_time:
+            _smart_sleep_until(wake_time)
 
         target = pd.Timestamp(now.date(), tz="America/New_York")
-        run_trading_day(target)
+
+        # Pre-market phase
+        premarket_results = None
+        if premarket_enabled:
+            premarket_results = run_premarket_phase(target)
+
+        # Regular session
+        run_trading_day(target, premarket_results=premarket_results)
 
         next_day = get_next_trading_day()
-        log(f"Next trading day: {next_day.date()}. Sleeping until 9:15...")
-        _smart_sleep_until(dt.datetime.combine(next_day.date(), dt.time(9, 15), tzinfo=_EST))
+        log(f"Next trading day: {next_day.date()}. Sleeping until {wake_hour}:{wake_min:02d}...")
+        _smart_sleep_until(dt.datetime.combine(next_day.date(), dt.time(wake_hour, wake_min), tzinfo=_EST))
 
 
 def _smart_sleep_until(target_time):
