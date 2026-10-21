@@ -1,4 +1,4 @@
-"""Config — stonewang_daytrade_momentum_surge_1.0
+"""Config — stonewang_daytrade_momentum_surge_1.1
 
 Pre-market + Three-pronged intraday momentum strategy:
   Pre-Market: Gap continuation (5%+, news catalyst) — 7:00-9:25 AM

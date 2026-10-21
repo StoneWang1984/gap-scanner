@@ -847,7 +847,7 @@ def scan_premarket_gaps(target_date):
             log(f"  Pre-market scan batch {batch_idx + 1}/{total_batches}...")
         try:
             from alpaca.data.requests import StockSnapshotRequest
-            snap_req = StockSnapshotRequest(symbol_or_symbols=batch, feed=DataFeed.SIP)
+            snap_req = StockSnapshotRequest(symbol_or_symbols=batch, feed=DataFeed.IEX)
             snapshots = data_client.get_stock_snapshot(snap_req)
             for sym, snap in snapshots.items():
                 try:
@@ -1126,7 +1126,7 @@ def backfill_premarket_bars(symbols, target_date):
             req = StockBarsRequest(
                 symbol_or_symbols=sym, timeframe=TimeFrame(1, TimeFrameUnit.Minute),
                 start=premarket_start, end=end, adjustment=Adjustment.RAW,
-                feed=DataFeed.SIP,
+                feed=DataFeed.IEX,
             )
             bars = data_client.get_stock_bars(req)
             if bars.df.empty:

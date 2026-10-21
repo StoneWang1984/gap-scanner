@@ -1,4 +1,4 @@
-"""stonewang_daytrade_momentum_surge_1.0 — Pre-market + Three-pronged intraday momentum strategy.
+"""stonewang_daytrade_momentum_surge_1.1 — Pre-market + Three-pronged intraday momentum strategy.
 
 Pre-Market: Gap continuation (5%+, news catalyst, 7:00-9:25 AM)
 Prong 1: Small Gap Scan (3% gap, RTG entry)
@@ -847,7 +847,7 @@ def scan_premarket_gaps(target_date):
             log(f"  Pre-market scan batch {batch_idx + 1}/{total_batches}...")
         try:
             from alpaca.data.requests import StockSnapshotRequest
-            snap_req = StockSnapshotRequest(symbol_or_symbols=batch, feed=DataFeed.SIP)
+            snap_req = StockSnapshotRequest(symbol_or_symbols=batch, feed=DataFeed.IEX)
             snapshots = data_client.get_stock_snapshot(snap_req)
             for sym, snap in snapshots.items():
                 try:
@@ -1126,7 +1126,7 @@ def backfill_premarket_bars(symbols, target_date):
             req = StockBarsRequest(
                 symbol_or_symbols=sym, timeframe=TimeFrame(1, TimeFrameUnit.Minute),
                 start=premarket_start, end=end, adjustment=Adjustment.RAW,
-                feed=DataFeed.SIP,
+                feed=DataFeed.IEX,
             )
             bars = data_client.get_stock_bars(req)
             if bars.df.empty:
@@ -1944,7 +1944,7 @@ def main():
 
     log(f"Using {config.DATA_FEED.upper()} data feed")
     log("=" * 60)
-    log(f"stonewang Momentum Surge 1.0 Live Trading")
+    log(f"stonewang Momentum Surge 1.1 Live Trading")
     log(f"Prong 1: Small Gap Scan (gap>={config.GAP_THRESHOLD:.0%}) — RTG entry")
     log(f"Prong 2: Intraday Momentum Scan (every {getattr(config, 'MOMENTUM_SCAN_INTERVAL_SEC', 300)}s)")
     log(f"Prong 3: Low-Open Reversal (gap {getattr(config, 'REVERSAL_GAP_MIN', -0.10):+.0%} to {getattr(config, 'REVERSAL_GAP_MAX', -0.03):+.0%})")
