@@ -212,7 +212,7 @@ def start_ws_stream(symbols):
         from alpaca.data.live.stock import StockDataStream
         _ws_stream = StockDataStream(
             config.ALPACA_API_KEY, config.ALPACA_SECRET_KEY,
-            feed=DataFeed.SIP,
+            feed=DataFeed.IEX,
         )
         for sym in symbols:
             _ws_stream.subscribe_bars(_on_bar, sym)
@@ -509,7 +509,7 @@ def force_sell_position(symbol, shares):
             try:
                 from alpaca.data.requests import StockSnapshotRequest
                 req = StockSnapshotRequest(symbol_or_symbols=symbol,
-                                           feed=DataFeed.SIP)
+                                           feed=DataFeed.IEX)
                 snap = data_client.get_stock_snapshot(req)
                 if snap and symbol in snap:
                     fill_price = float(snap[symbol].daily_bar.close) if snap[symbol].daily_bar else 0.0
