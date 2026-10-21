@@ -1051,26 +1051,27 @@ def calc_support_level(bars, n=5):
 
 
 def check_volume_exhaustion(bars, n=10):
-    """Check volume exhaustion via two signals:
-    1. Price makes higher high but volume < 30% of recent peak (divergence)
-    2. 3 consecutive bars with declining volume, latest < 20% of peak (sustained dry-up)
+    """Check volume exhaustion. Returns:
+    "vol_divergence" — higher high but volume < 30% of peak → sell half, trail the rest
+    "vol_dryup" — 3 declining vol bars, latest < 20% of peak → sell all
+    "" — no exhaustion
     """
     if len(bars) < n:
-        return False
+        return ""
     recent = bars[-n:]
     peak_vol = max(b["volume"] for b in recent)
     if peak_vol <= 0:
-        return False
+        return ""
     last = bars[-1]
-    # Signal 1: higher high + volume divergence
-    if len(bars) >= 2 and last["high"] > bars[-2]["high"] and last["volume"] < 0.30 * peak_vol:
-        return True
-    # Signal 2: 3 consecutive declining volume bars, latest < 20% of peak
+    # Signal 2 (more severe): 3 consecutive declining volume, latest < 20% of peak
     if len(bars) >= 3:
         v1, v2, v3 = bars[-3]["volume"], bars[-2]["volume"], bars[-1]["volume"]
         if v1 > v2 > v3 and v3 < 0.20 * peak_vol:
-            return True
-    return False
+            return "vol_dryup"
+    # Signal 1 (less severe): higher high + volume divergence
+    if len(bars) >= 2 and last["high"] > bars[-2]["high"] and last["volume"] < 0.30 * peak_vol:
+        return "vol_divergence"
+    return ""
 
 
 def check_premarket_entry(symbol, open_price, bars, gap_pct=0.0, min_volume=None):
@@ -1249,9 +1250,29 @@ def run_premarket_phase(target_date):
             # Exit 1: Support-level stop loss (below 5-bar low, capped at max %)
             if bar_low <= stop_price:
                 reason = "support_stop" if support > max_stop else "stop_loss"
-            # Exit 2: Volume exhaustion (need at least 7 bars)
-            if reason is None and bars_held >= 7 and check_volume_exhaustion(bars):
-                reason = "volume_exhaustion"
+            # Exit 2: Volume exhaustion
+            vol_signal = check_volume_exhaustion(bars) if reason is None and bars_held >= 7 else ""
+            if vol_signal == "vol_dryup":
+                reason = "vol_dryup"  # Sell all — trend is dead
+            elif vol_signal == "vol_divergence":
+                # Sell half, activate trailing stop on remainder
+                half_shares = pos.shares // 2
+                if half_shares >= 1:
+                    sell_price = round(latest["close"] * (1 - 0.005), 2)
+                    sold, fill = place_sell_limit(pos.symbol, half_shares, sell_price, extended_hours=True)
+                    if sold > 0:
+                        pos.shares -= sold
+                        if fill <= 0:
+                            fill = latest["close"]
+                        pnl = round((fill - pos.entry_price) * sold, 2)
+                        trades_detail.append({"symbol": pos.symbol, "entry": pos.entry_price,
+                            "exit": round(fill, 4), "shares": sold, "pnl": pnl,
+                            "reason": "vol_divergence", "trade_type": pos.signal_type,
+                            "entry_ts": dt.datetime.fromtimestamp(pos.entry_ts, tz=_EST).strftime("%H:%M:%S"),
+                            "exit_ts": dt.datetime.now(_EST).strftime("%H:%M:%S")})
+                        daily_loss += pnl
+                        log(f"PRE-MARKET HALF SELL {pos.symbol} vol_divergence {sold}sh ${fill:.4f}, P&L=${pnl:+,.2f}, remaining {pos.shares}sh")
+                    pos.trail_active = True  # Force trail on remaining shares
             # Exit 3: Trailing stop
             if reason is None:
                 if not pos.trail_active and pos.highest >= pos.entry_price * (1 + pos.trail_activate_pct):
@@ -1662,9 +1683,22 @@ def run_trading_day(target_date, premarket_results=None):
             # Exit 1: Support-level stop loss (below 5-bar low, capped at max %)
             if bar_low <= stop_price:
                 reason = "support_stop" if support > max_stop else "stop_loss"
-            # Exit 2: Volume exhaustion (need 7+ bars)
-            if reason is None and bars_held >= 7 and check_volume_exhaustion(bars):
-                reason = "volume_exhaustion"
+            # Exit 2: Volume exhaustion
+            vol_signal = check_volume_exhaustion(bars) if reason is None and bars_held >= 7 else ""
+            if vol_signal == "vol_dryup":
+                reason = "vol_dryup"  # Sell all
+            elif vol_signal == "vol_divergence":
+                half_shares = pos.shares // 2
+                if half_shares >= 1:
+                    if pos.symbol in _pending_sells:
+                        vol_signal = ""
+                    else:
+                        order_id = place_sell_async(pos.symbol, half_shares)
+                        if order_id:
+                            _pending_sells[pos.symbol] = {"order_id": order_id, "reason": "vol_divergence", "submit_time": time.time()}
+                            log(f"Async HALF SELL for {pos.symbol} (vol_divergence), {half_shares}sh, order={order_id}")
+                        pos.shares -= half_shares
+                        pos.trail_active = True
             # Exit 3: Trailing stop
             if reason is None and getattr(config, "TRAILING_STOP_ENABLED", False):
                 if not pos.trail_active and pos.highest >= pos.entry_price * (1 + pos.trail_activate_pct):
