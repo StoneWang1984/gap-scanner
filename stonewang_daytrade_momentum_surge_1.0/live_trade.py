@@ -820,7 +820,12 @@ def check_news_catalyst(symbol, target_date):
 
 
 def scan_premarket_gaps(target_date):
-    """Scan for pre-market gap-up stocks using snapshot API."""
+    """Scan for pre-market gap-up stocks.
+
+    Uses IEX snapshot for prev_close (daily_bar.close = yesterday's close),
+    then IEX StockTradesRequest to get actual pre-market trade prices
+    (snapshot latest_trade does NOT return pre-market data on IEX).
+    """
     log(f"Pre-market scan for {target_date.date()}...")
     try:
         symbols = get_tradable_symbols()
@@ -838,7 +843,9 @@ def scan_premarket_gaps(target_date):
     price_max = getattr(config, "PREMARKET_PRICE_MAX", 20.0)
     max_cands = getattr(config, "PREMARKET_MAX_CANDIDATES", 10)
 
-    candidates = []
+    # Step 1: Get prev_close for all symbols via snapshot
+    prev_closes = {}
+    premarket_vols = {}
     batch_size = 200
     total_batches = (len(symbols) + batch_size - 1) // batch_size
 
@@ -852,36 +859,84 @@ def scan_premarket_gaps(target_date):
             snapshots = data_client.get_stock_snapshot(snap_req)
             for sym, snap in snapshots.items():
                 try:
-                    if not snap or not snap.daily_bar or not snap.latest_trade:
+                    if not snap or not snap.daily_bar:
                         continue
                     prev_close = float(snap.daily_bar.close)
-                    premarket_price = float(snap.latest_trade.price)
-                    premarket_vol = int(snap.daily_bar.volume) if snap.daily_bar.volume else 0
-                    if prev_close <= 0:
-                        continue
-                    gap_pct = (premarket_price / prev_close) - 1.0
-                    if gap_pct < gap_min:
-                        continue
-                    if not (price_min <= premarket_price <= price_max):
-                        continue
-                    if premarket_vol < min_vol:
-                        continue
-                    candidates.append({
-                        "symbol": sym,
-                        "prev_close": prev_close,
-                        "open_price": premarket_price,
-                        "gap_pct": gap_pct,
-                        "prev_volume": premarket_vol,
-                        "rvol": 0,
-                        "atr": 0,
-                        "signal_type": "premarket_gap",
-                        "news_catalyst": None,
-                    })
+                    vol = int(snap.daily_bar.volume) if snap.daily_bar.volume else 0
+                    if prev_close > 0:
+                        prev_closes[sym] = prev_close
+                        premarket_vols[sym] = vol
                 except Exception:
                     continue
         except Exception as e:
             log(f"  Pre-market scan batch error: {e}")
             continue
+
+    # Step 2: Get pre-market trade prices via StockTradesRequest
+    from alpaca.data.requests import StockTradesRequest
+    now_est = dt.datetime.now(_EST)
+    pm_start = dt.datetime.combine(target_date.date(), dt.time(4, 0), tzinfo=_EST)
+    pm_end = min(now_est, dt.datetime.combine(target_date.date(), dt.time(9, 30), tzinfo=_EST))
+
+    premarket_prices = {}
+    trade_batch_size = 50
+    syms_with_close = list(prev_closes.keys())
+    trade_batches = (len(syms_with_close) + trade_batch_size - 1) // trade_batch_size
+
+    for bi in range(trade_batches):
+        batch = syms_with_close[bi * trade_batch_size: (bi + 1) * trade_batch_size]
+        try:
+            req = StockTradesRequest(
+                symbol_or_symbols=batch,
+                start=pm_start, end=pm_end,
+                feed=DataFeed.IEX, limit=10,
+            )
+            trades = data_client.get_stock_trades(req)
+            if trades.df.empty:
+                continue
+            for sym in batch:
+                try:
+                    if "symbol" in trades.df.columns:
+                        sym_trades = trades.df[trades.df["symbol"] == sym]
+                    else:
+                        sym_trades = trades.df.loc[sym] if sym in trades.df.index else pd.DataFrame()
+                    if not sym_trades.empty:
+                        premarket_prices[sym] = float(sym_trades.iloc[-1]["price"])
+                except Exception:
+                    continue
+        except Exception:
+            continue
+
+    # Step 3: Calculate gaps and filter
+    candidates = []
+    for sym, pm_price in premarket_prices.items():
+        prev_close = prev_closes.get(sym, 0)
+        vol = premarket_vols.get(sym, 0)
+        if prev_close <= 0:
+            continue
+        gap_pct = (pm_price / prev_close) - 1.0
+        if gap_pct < gap_min:
+            continue
+        if not (price_min <= pm_price <= price_max):
+            continue
+        if vol < min_vol:
+            continue
+        candidates.append({
+            "symbol": sym,
+            "prev_close": prev_close,
+            "open_price": pm_price,
+            "gap_pct": gap_pct,
+            "prev_volume": vol,
+            "rvol": 0,
+            "atr": 0,
+            "signal_type": "premarket_gap",
+            "news_catalyst": None,
+        })
+
+    if candidates:
+        log(f"  Pre-market raw: {len(candidates)} stocks with gap >= {gap_min:.0%}")
+        for c in candidates[:10]:
+            log(f"    {c['symbol']}: gap {c['gap_pct']:+.1%} @ ${c['open_price']:.2f}")
 
     candidates.sort(key=lambda c: c["gap_pct"], reverse=True)
     candidates = candidates[:max_cands]
