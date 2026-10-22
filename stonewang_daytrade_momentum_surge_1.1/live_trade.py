@@ -238,7 +238,7 @@ def start_ws_stream(symbols):
 
 
 def restart_ws_stream(symbols):
-    global _ws_thread
+    global _ws_stream, _ws_thread
     _stream_state["running"] = False
     if _ws_stream:
         try:
@@ -256,10 +256,11 @@ def restart_ws_stream(symbols):
                 log("WebSocket stop timed out after 5s, proceeding anyway")
         except Exception as e:
             log(f"WebSocket stop error (non-fatal): {e}")
+        _ws_stream = None
     if _ws_thread and _ws_thread.is_alive():
         _ws_thread.join(timeout=5)
     _ws_thread = None
-    time.sleep(2)
+    time.sleep(5)
     start_ws_stream(symbols)
 
 
@@ -1856,10 +1857,10 @@ def run_trading_day(target_date, premarket_results=None):
                     f"[RVOL={rvol:.1f}x stop={stop_p:.0%} trail={trail_act:.0%}/{trail_p:.0%} time={config.RTG_TIME_LIMIT_SEC}s]")
 
         # WS health
-        ws_stale = time.time() - _stream_state["last_bar_ts"] > 60
+        ws_stale = time.time() - _stream_state["last_bar_ts"] > 120
         ws_thread_dead = _ws_thread is not None and not _ws_thread.is_alive()
         ws_needs_restart = not _stream_state["running"] or ws_thread_dead or ws_stale
-        if ws_needs_restart and time.time() - _stream_state.get("last_restart_ts", 0) > 30:
+        if ws_needs_restart and time.time() - _stream_state.get("last_restart_ts", 0) > 60:
             _stream_state["last_restart_ts"] = time.time()
             try:
                 restart_ws_stream(syms)
