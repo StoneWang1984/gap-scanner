@@ -208,7 +208,7 @@ def start_ws_stream(symbols):
         from alpaca.data.live.stock import StockDataStream
         _ws_stream = StockDataStream(
             config.ALPACA_API_KEY, config.ALPACA_SECRET_KEY,
-            feed=getattr(config, "DATA_FEED_OBJ", DataFeed.SIP),
+            feed=DataFeed.IEX,
         )
         for sym in symbols:
             _ws_stream.subscribe_bars(_on_bar, sym)
