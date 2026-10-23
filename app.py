@@ -243,10 +243,10 @@ elif tab == "策略概览":
         - RVOL ≥ {getattr(config, 'REVERSAL_MIN_RVOL', 3.0):.1f}×
         """)
 
-        st.subheader("盘前扫描")
+        st.subheader("扫描过滤")
         st.markdown(f"""
         - 跳空幅度: gap ≥ **{config.GAP_THRESHOLD:.0%}** 或 gap ≤ **{getattr(config, 'REVERSAL_GAP_MAX', -0.03):+.0%}**
-        - 盘前成交量 > **{config.MIN_VOLUME:,}** 股
+        - 成交量 > **{config.MIN_VOLUME:,}** 股
         - 价格区间 **${config.PRICE_MIN}** ~ **${config.PRICE_MAX}**
         - 杠杆ETF / Crypto ETF: **已过滤**
         - 候选股: **Top {config.MAX_CANDIDATES} by RVOL**
