@@ -70,7 +70,7 @@ def get_trading_days(client, end_date, n_days):
     request = StockBarsRequest(
         symbol_or_symbols="SPY", timeframe=TimeFrame.Day,
         start=start, end=end_date, adjustment=Adjustment.RAW,
-        feed=getattr(config, "DATA_FEED_OBJ", DataFeed.IEX),
+        feed=getattr(config, "DATA_FEED_OBJ", DataFeed.SIP),
     )
     bars = client.get_stock_bars(request)
     if bars.df.empty:
@@ -98,7 +98,7 @@ def bulk_scan_gaps(client, trading_days, symbols):
         request = StockBarsRequest(
             symbol_or_symbols=batch, timeframe=TimeFrame.Day,
             start=start, end=end, adjustment=Adjustment.RAW,
-            feed=getattr(config, "DATA_FEED_OBJ", DataFeed.IEX),
+            feed=getattr(config, "DATA_FEED_OBJ", DataFeed.SIP),
         )
         try:
             bars = client.get_stock_bars(request)
@@ -216,7 +216,7 @@ def bulk_scan_gaps_down(client, trading_days, symbols):
         request = StockBarsRequest(
             symbol_or_symbols=batch, timeframe=TimeFrame.Day,
             start=start, end=end, adjustment=Adjustment.RAW,
-            feed=getattr(config, "DATA_FEED_OBJ", DataFeed.IEX),
+            feed=getattr(config, "DATA_FEED_OBJ", DataFeed.SIP),
         )
         try:
             bars = client.get_stock_bars(request)
@@ -311,7 +311,7 @@ def get_1min_bars(client, symbol, date):
     request = StockBarsRequest(
         symbol_or_symbols=symbol, timeframe=TimeFrame(1, TimeFrameUnit.Minute),
         start=market_open, end=market_close, adjustment=Adjustment.RAW,
-        feed=getattr(config, "DATA_FEED_OBJ", DataFeed.IEX),
+        feed=getattr(config, "DATA_FEED_OBJ", DataFeed.SIP),
     )
     bars = client.get_stock_bars(request)
     if bars.df.empty:
