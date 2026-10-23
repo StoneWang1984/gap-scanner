@@ -510,7 +510,7 @@ def force_sell_position(symbol, shares):
             try:
                 from alpaca.data.requests import StockSnapshotRequest
                 req = StockSnapshotRequest(symbol_or_symbols=symbol,
-                                           feed=DataFeed.SIP)
+                                           feed=DataFeed.IEX)
                 snap = data_client.get_stock_snapshot(req)
                 if snap and symbol in snap:
                     fill_price = float(snap[symbol].daily_bar.close) if snap[symbol].daily_bar else 0.0
@@ -558,7 +558,7 @@ def _fetch_20d_avg_volumes(symbols, target_date):
                 symbol_or_symbols=batch, timeframe=TimeFrame.Day,
                 start=lookback, end=target_date - pd.Timedelta(days=1),
                 adjustment=Adjustment.RAW,
-                feed=DataFeed.SIP,
+                feed=DataFeed.IEX,
             )
             bars = data_client.get_stock_bars(req)
             if bars.df.empty:
@@ -704,7 +704,7 @@ def scan_gaps_down(target_date):
                 symbol_or_symbols=batch, timeframe=TimeFrame.Day,
                 start=lookback_start, end=lookback_end,
                 adjustment=Adjustment.RAW,
-                feed=DataFeed.SIP,
+                feed=DataFeed.IEX,
             )
             bars = data_client.get_stock_bars(req)
             if bars.df.empty:
@@ -855,7 +855,7 @@ def scan_premarket_gaps(target_date):
             log(f"  Pre-market scan batch {batch_idx + 1}/{total_batches}...")
         try:
             from alpaca.data.requests import StockSnapshotRequest
-            snap_req = StockSnapshotRequest(symbol_or_symbols=batch, feed=DataFeed.SIP)
+            snap_req = StockSnapshotRequest(symbol_or_symbols=batch, feed=DataFeed.IEX)
             snapshots = data_client.get_stock_snapshot(snap_req)
             for sym, snap in snapshots.items():
                 try:
@@ -889,7 +889,7 @@ def scan_premarket_gaps(target_date):
             req = StockTradesRequest(
                 symbol_or_symbols=batch,
                 start=pm_start, end=pm_end,
-                feed=DataFeed.SIP, limit=10,
+                feed=DataFeed.IEX, limit=10,
             )
             trades = data_client.get_stock_trades(req)
             if trades.df.empty:
@@ -968,7 +968,7 @@ def backfill_1min_bars(symbols, target_date):
             req = StockBarsRequest(
                 symbol_or_symbols=sym, timeframe=TimeFrame(1, TimeFrameUnit.Minute),
                 start=mkt_open, end=end, adjustment=Adjustment.RAW,
-                feed=DataFeed.SIP,
+                feed=DataFeed.IEX,
             )
             bars = data_client.get_stock_bars(req)
             if bars.df.empty:
@@ -1180,7 +1180,7 @@ def backfill_premarket_bars(symbols, target_date):
             req = StockBarsRequest(
                 symbol_or_symbols=sym, timeframe=TimeFrame(1, TimeFrameUnit.Minute),
                 start=premarket_start, end=end, adjustment=Adjustment.RAW,
-                feed=DataFeed.SIP,
+                feed=DataFeed.IEX,
             )
             bars = data_client.get_stock_bars(req)
             if bars.df.empty:
@@ -1980,7 +1980,7 @@ def test_connectivity():
             symbol_or_symbols="SPY", timeframe=TimeFrame.Day,
             start=pd.Timestamp.now(tz="America/New_York") - pd.Timedelta(days=5),
             end=pd.Timestamp.now(tz="America/New_York"),
-            feed=DataFeed.SIP,
+            feed=DataFeed.IEX,
         )
         bars = data_client.get_stock_bars(req)
         if not bars.df.empty:

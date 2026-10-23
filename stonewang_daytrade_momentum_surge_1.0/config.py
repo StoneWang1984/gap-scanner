@@ -22,9 +22,9 @@ DRY_RUN = False
 ALPACA_BASE_URL = "https://api.alpaca.markets"
 ALPACA_DATA_URL = "https://data.alpaca.markets"
 
-DATA_FEED = "sip"
+DATA_FEED = "iex"
 from alpaca.data.enums import DataFeed as _DF
-DATA_FEED_OBJ = _DF.SIP
+DATA_FEED_OBJ = _DF.IEX
 
 # ── Scanner filters ──────────────────────────────────────────────────
 GAP_THRESHOLD = 0.03          # 3% min gap (Prong 1 — lowered from 10%)
